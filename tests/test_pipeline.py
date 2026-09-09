@@ -71,8 +71,8 @@ def _register_llm_responses() -> None:
         AdaptedCV(
             cv_title="Data Scientist – NLP & Multimodal AI",
             professional_summary=(
-                "Data Scientist with 2 years applied R&D in multimodal AI and "
-                "clinical digital biomarkers. Strong NLP/RAG and speech pipelines."
+                "Data Scientist with 2 years in NLP and machine learning. "
+                "Built RAG and speech pipelines on synthetic datasets."
             ),
             selected_experiences=[
                 AdaptedExperience(
@@ -80,11 +80,11 @@ def _register_llm_responses() -> None:
                     bullets=[
                         AdaptedBullet(
                             source_id="blt_aurore_ds_multimodal",
-                            text="Built multimodal pipelines reaching 0.67 correlation with clinical scores.",
+                            text="Built a multimodal classifier reaching 0.82 accuracy on synthetic test samples.",
                         ),
                         AdaptedBullet(
-                            source_id="blt_aurore_ds_speech_face",
-                            text="Developed speech/NLP and face-recognition pipelines using Whisper and Pyannote.",
+                            source_id="blt_aurore_ds_speech",
+                            text="Developed speech transcription and document-tagging pipelines using Whisper and PyTorch.",
                         ),
                     ],
                 )
@@ -99,8 +99,8 @@ def _register_llm_responses() -> None:
         ApplicationDraft(
             cv_title="Data Scientist – NLP & Multimodal AI",
             professional_summary=(
-                "Data Scientist with 2 years applied R&D in multimodal AI and "
-                "clinical digital biomarkers. Strong NLP/RAG and speech pipelines."
+                "Data Scientist with 2 years in NLP and machine learning. "
+                "Built RAG and speech pipelines on synthetic datasets."
             ),
             selected_experiences=[
                 AdaptedExperience(
@@ -108,11 +108,11 @@ def _register_llm_responses() -> None:
                     bullets=[
                         AdaptedBullet(
                             source_id="blt_aurore_ds_multimodal",
-                            text="Built multimodal pipelines reaching 0.67 correlation with clinical scores.",
+                            text="Built a multimodal classifier reaching 0.82 accuracy on synthetic test samples.",
                         ),
                         AdaptedBullet(
-                            source_id="blt_aurore_ds_speech_face",
-                            text="Developed speech/NLP and face-recognition pipelines using Whisper and Pyannote.",
+                            source_id="blt_aurore_ds_speech",
+                            text="Developed speech transcription and document-tagging pipelines using Whisper and PyTorch.",
                         ),
                     ],
                 )
@@ -219,7 +219,7 @@ def test_manual_offers_with_shared_url_keep_separate_job_rows() -> None:
     shared_url = "https://jobs.example.com/search?ref=semantic_search_landing_page"
     first = p.ingest_manual_offer(
         ManualOfferInput(
-            company="Maytronics",
+            company="Example Vision",
             title="Ingénieur Vision par Ordinateur",
             description="Développer des modèles de vision par ordinateur.",
             location="Paris",
@@ -228,10 +228,10 @@ def test_manual_offers_with_shared_url_keep_separate_job_rows() -> None:
     )
     second = p.ingest_manual_offer(
         ManualOfferInput(
-            company="Dassault Systèmes",
+            company="Exemple Systèmes",
             title="Ingénieur en développement IA",
             description="Développer et déployer des composants IA.",
-            location="Vélizy-Villacoublay",
+            location="Lyon",
             application_url=shared_url,
         )
     )
@@ -239,8 +239,8 @@ def test_manual_offers_with_shared_url_keep_separate_job_rows() -> None:
     assert first.job_ids and second.job_ids
     assert first.job_ids != second.job_ids
     with session_scope() as s:
-        assert s.get(Job, first.job_ids[0]).company == "Maytronics"
-        assert s.get(Job, second.job_ids[0]).company == "Dassault Systèmes"
+        assert s.get(Job, first.job_ids[0]).company == "Example Vision"
+        assert s.get(Job, second.job_ids[0]).company == "Exemple Systèmes"
 
 
 def test_ingestor_keeps_paid_serpapi_boolean_query_atomic(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -648,7 +648,7 @@ def test_analysis_replaces_job_board_company_with_extracted_employer() -> None:
             match_reasons=["Expérience IA alignée"],
             risks=[],
             cv_keywords_to_include=["Python", "Machine Learning"],
-            extracted_company_name="CS GROUP",
+            extracted_company_name="EXAMPLE INDUSTRY",
             offer_language="fr",
         ),
     )
@@ -661,7 +661,7 @@ def test_analysis_replaces_job_board_company_with_extracted_employer() -> None:
     ingested = p.ingest_text(
         text=(
             "En tant qu'organisateur de forums de recrutement, Talents Handicap "
-            "accompagne des entreprises. L'entreprise CS GROUP recherche un "
+            "accompagne des entreprises. L'entreprise EXAMPLE INDUSTRY recherche un "
             "Data Scientist pour sa BU Industrie."
         ),
         title="Ingénieur(e) Data Scientist confirmé(e)",
@@ -678,7 +678,7 @@ def test_analysis_replaces_job_board_company_with_extracted_employer() -> None:
     with session_scope() as s:
         job = s.get(Job, ingested.job_ids[0])
         assert job is not None
-        assert job.company == "CS GROUP"
+        assert job.company == "EXAMPLE INDUSTRY"
 
 
 def test_rank_pending_scores_without_llm_analysis() -> None:

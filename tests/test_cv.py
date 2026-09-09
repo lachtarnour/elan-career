@@ -94,8 +94,8 @@ def _valid_adapted_cv() -> AdaptedCV:
     return AdaptedCV(
         cv_title="Data Scientist – NLP & Multimodal AI",
         professional_summary=(
-            "Data Scientist with 2 years applied R&D in multimodal AI and clinical "
-            "digital biomarkers. Strong NLP/RAG and speech pipelines."
+            "Data Scientist with 2 years in NLP and machine learning. "
+            "Built RAG and speech pipelines on synthetic datasets."
         ),
         selected_experiences=[
             AdaptedExperience(
@@ -103,11 +103,11 @@ def _valid_adapted_cv() -> AdaptedCV:
                 bullets=[
                     AdaptedBullet(
                         source_id="blt_aurore_ds_multimodal",
-                        text="Built multimodal pipelines reaching 0.67 correlation with clinical scores.",
+                        text="Built a multimodal classifier reaching 0.82 accuracy on synthetic test samples.",
                     ),
                     AdaptedBullet(
-                        source_id="blt_aurore_ds_speech_face",
-                        text="Developed speech/NLP and face-recognition pipelines using Whisper and Pyannote.",
+                        source_id="blt_aurore_ds_speech",
+                        text="Developed speech transcription and document-tagging pipelines using Whisper and PyTorch.",
                     ),
                 ],
             )

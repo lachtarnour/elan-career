@@ -290,7 +290,7 @@ def test_parse_detail_html_reads_json_ld_and_metadata() -> None:
     html = """
     <html>
       <head>
-        <title>Senior ML Engineer - Doctolib - CDI à Paris</title>
+        <title>Senior ML Engineer - Example Health - CDI à Paris</title>
         <script type="application/ld+json">
         {
           "@context": "http://schema.org",
@@ -300,7 +300,7 @@ def test_parse_detail_html_reads_json_ld_and_metadata() -> None:
           "employmentType": "FULL_TIME",
           "hiringOrganization": {
             "@type": "Organization",
-            "name": "Doctolib"
+            "name": "Example Health"
           },
           "industry": "Santé",
           "jobLocation": [{
@@ -319,7 +319,7 @@ def test_parse_detail_html_reads_json_ld_and_metadata() -> None:
       </head>
       <body>
         <div data-testid="job-metadata-block">
-          Doctolib Senior ML Engineer Résumé du poste CDI Paris Télétravail fréquent
+          Example Health Senior ML Engineer Résumé du poste CDI Paris Télétravail fréquent
           Salaire : Non spécifié
           <div>
             <div><span><span>Compétences & expertises</span></span></div>
@@ -331,14 +331,14 @@ def test_parse_detail_html_reads_json_ld_and_metadata() -> None:
           </div>
         </div>
         <aside>
-          <a href="/fr/companies/doctolib">Explorer l’entreprise</a>
-          <a href="https://about.doctolib.com/">Voir le site</a>
+          <a href="/fr/companies/example-health">Explorer l’entreprise</a>
+          <a href="https://about.health.example.com/">Voir le site</a>
           <h4><span>Qui sont-ils ?</span></h4>
-          <p>Doctolib builds healthcare software.</p>
+          <p>Example Health builds healthcare software.</p>
           <h4><span>Le lieu de travail</span></h4>
           <a>Paris, France</a>
-          <div data-testid="job-company-tag">3000 collaborateurs</div>
-          <div data-testid="job-company-tag">Créée en 2013</div>
+          <div data-testid="job-company-tag">120 collaborateurs</div>
+          <div data-testid="job-company-tag">Créée en 2018</div>
         </aside>
       </body>
     </html>
@@ -346,12 +346,12 @@ def test_parse_detail_html_reads_json_ld_and_metadata() -> None:
 
     job = parse_detail_html(
         html,
-        url="https://www.welcometothejungle.com/fr/companies/doctolib/jobs/senior-ml_paris",
+        url="https://www.welcometothejungle.com/fr/companies/example-health/jobs/senior-ml_paris",
     )
 
     assert job.source == WTTJ_SOURCE
     assert job.title == "Senior ML Engineer"
-    assert job.company == "Doctolib"
+    assert job.company == "Example Health"
     assert job.location == "Paris, FR"
     assert job.contract_type == "CDI"
     assert job.remote_policy == "hybrid"
@@ -359,20 +359,20 @@ def test_parse_detail_html_reads_json_ld_and_metadata() -> None:
     assert job.published_date is not None
     assert job.source_data is not None
     assert job.source_data["company_profile_url"] == (
-        "https://www.welcometothejungle.com/fr/companies/doctolib"
+        "https://www.welcometothejungle.com/fr/companies/example-health"
     )
-    assert job.source_data["company_website"] == "https://about.doctolib.com/"
-    assert job.source_data["company_domain"] == "about.doctolib.com"
-    assert job.source_data["company_summary"] == "Doctolib builds healthcare software."
+    assert job.source_data["company_website"] == "https://about.health.example.com/"
+    assert job.source_data["company_domain"] == "about.health.example.com"
+    assert job.source_data["company_summary"] == "Example Health builds healthcare software."
     assert job.source_data["workplace"] == "Paris, France"
     assert job.source_data["skills"] == ["Python", "Communication"]
     assert job.source_data["skills_more_count"] == 3
     assert job.source_data["company_stats"] == {
-        "employees": "3000 collaborateurs",
-        "founded": "Créée en 2013",
+        "employees": "120 collaborateurs",
+        "founded": "Créée en 2018",
     }
     assert job.application_url == (
-        "https://www.welcometothejungle.com/fr/companies/doctolib/jobs/senior-ml_paris"
+        "https://www.welcometothejungle.com/fr/companies/example-health/jobs/senior-ml_paris"
     )
     assert job.external_id.startswith("welcometothejungle:")
 
