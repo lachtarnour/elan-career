@@ -83,6 +83,69 @@ def refresh_embeddings_command() -> None:
     )
 
 
+@cli.command("sync-profile")
+@click.option(
+    "--direction",
+    type=click.Choice(["to-app", "from-app"]),
+    default="to-app",
+    show_default=True,
+    help="Copy the project profile to the app, or the app profile to the project.",
+)
+@click.option(
+    "--project-profile",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=Path("smartapply/profile/data"),
+    show_default=True,
+    help="Project profile directory, relative to the current working directory.",
+)
+@click.option(
+    "--app-profile",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=None,
+    help="App profile directory; defaults to ELAN_HOME/profile (independent of PROFILE_DIR).",
+)
+@click.option("--dry-run", is_flag=True, help="Compare and validate without copying any files.")
+def sync_profile_command(
+    direction: str,
+    project_profile: Path,
+    app_profile: Path | None,
+    dry_run: bool,
+) -> None:
+    """Copy profile JSON files with validation and an automatic destination backup.
+
+    The source wins for each copied file, including its list of projects.
+    Optional destination files absent from the source are kept. Credentials,
+    databases and generated documents are never copied.
+    """
+    from smartapply.config import RUNTIME_DIR
+    from smartapply.profile.sync import sync_profile
+
+    app_profile = app_profile if app_profile is not None else RUNTIME_DIR / "profile"
+    source, destination = (
+        (project_profile, app_profile) if direction == "to-app" else (app_profile, project_profile)
+    )
+    try:
+        result = sync_profile(source, destination, dry_run=dry_run)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Source: {result.source}")
+    click.echo(f"Destination: {result.destination}")
+    for label, names in (
+        ("Create", result.created),
+        ("Replace", result.updated),
+        ("Unchanged", result.unchanged),
+        ("Keep destination-only", result.retained),
+    ):
+        if names:
+            click.echo(f"{label}: {', '.join(names)}")
+    if dry_run:
+        click.echo("Preview only; no files written.")
+    elif result.backup:
+        click.echo(f"Synchronized. Backup: {result.backup}")
+    else:
+        click.echo("Profiles already synchronized for all source files.")
+
+
 @cli.command("ingest")
 @click.option("--source", required=True, type=SCRAPER_SOURCE_CHOICE)
 @click.option("--query", "-q", required=True)

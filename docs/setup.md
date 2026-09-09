@@ -68,6 +68,38 @@ open dist/Elan.app
 
 The first build provisions the runtime under `~/Library/Application Support/Elan`, copying the project configuration, profile, and database when available. Later builds preserve existing runtime data. When launching the packaged app, use its runtime configuration; the development environment overrides above are intended for source runs.
 
+### Synchronize the project and app profiles
+
+The two profile directories are not automatically synchronized by a rebuild.
+From the repository root, compare them and then copy the project profile into Élan:
+
+```bash
+make check-profile-sync
+make sync-profile
+```
+
+To copy changes made in Élan back into the project instead:
+
+```bash
+make check-profile-sync DIRECTION=from-app
+make sync-profile DIRECTION=from-app
+```
+
+The source wins for each copied JSON file: lists such as projects and skills are
+replaced, not merged. Choose the direction that contains the data you want to keep.
+The command validates the source and resulting profile before writing, skips
+unchanged JSON, and backs up the destination's profile files under
+`<destination>/.sync-backups/<timestamp>/`. Optional files absent from the source
+remain in the destination. API credentials, the database and generated documents
+are not copied. A failed write rolls back the files already replaced.
+
+The app destination defaults to `ELAN_HOME/profile`, or
+`~/Library/Application Support/Elan/profile` when `ELAN_HOME` is unset; development
+overrides of `PROFILE_DIR` do not redirect this command. For custom directories,
+use `.venv/bin/elan sync-profile --project-profile /path/to/project/profile
+--app-profile /path/to/app/profile --dry-run`, then omit `--dry-run` to apply.
+No rebuild is needed after copying profile data. Existing CVs are not regenerated.
+
 ## Adapt the profile and matching rules
 
 Élan is primarily designed for AI Engineer profiles seeking employment. Using it for another role or field requires adapting the profile data, search role families, and static matching rules, including changes to the source code. The repository publishes a safe example profile; review the files below for your target role, country, and experience level.

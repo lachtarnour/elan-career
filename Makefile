@@ -1,8 +1,9 @@
-.PHONY: help install install-desktop venv check test test-fast lint format clean run-desktop build run-cli init-db refresh-embeddings
+.PHONY: help install install-desktop venv check test test-fast lint format clean run-desktop build run-cli init-db refresh-embeddings sync-profile check-profile-sync
 
 PY ?= python3
 VENV = .venv
 BIN = $(VENV)/bin
+DIRECTION ?= to-app
 
 help:
 	@echo "Élan — commandes disponibles"
@@ -12,6 +13,8 @@ help:
 	@echo "  make install-desktop  Installe l'application macOS et les outils de build"
 	@echo "  make init-db          Initialise la base SQLite"
 	@echo "  make refresh-embeddings  Pre-calcule les embeddings du profil et des projets"
+	@echo "  make check-profile-sync Compare le profil du depot avec celui d'Elan"
+	@echo "  make sync-profile     Copie le profil vers Elan avec sauvegarde (DIRECTION=from-app pour l'inverse)"
 	@echo "  make check            Verifie le code et lance les tests rapides"
 	@echo "  make test             Lance les tests"
 	@echo "  make test-fast        Tests rapides (skip integration)"
@@ -37,6 +40,12 @@ init-db:
 
 refresh-embeddings:
 	$(BIN)/elan refresh-embeddings
+
+check-profile-sync:
+	$(BIN)/elan sync-profile --project-profile "$(CURDIR)/smartapply/profile/data" --direction "$(DIRECTION)" --dry-run
+
+sync-profile:
+	$(BIN)/elan sync-profile --project-profile "$(CURDIR)/smartapply/profile/data" --direction "$(DIRECTION)"
 
 check: lint test-fast
 
