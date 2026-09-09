@@ -30,6 +30,7 @@ from typing import Any
 
 from smartapply.cv.role_family import KNOWN_ROLE_FAMILIES, classify, has_data_scientist_ia_signal
 from smartapply.llm import AdaptedCV, JobAnalysis, SkillSelectionBlock
+from smartapply.utils.skill_terms import normalize_skill_term
 
 _CONTRACTS_PATH = Path(__file__).with_name("role_contracts.json")
 
@@ -84,7 +85,8 @@ def _is_explicit_offer_skill(term: str, offer_terms: set[str]) -> bool:
     Mirrors the loose matching used by ``_ensure_supported_offer_skills`` so
     the two post-filters agree on what counts as "the offer asked for it".
     """
-    norm = _normalize(term)
+    norm = normalize_skill_term(term)
+    offer_terms = {normalize_skill_term(other) for other in offer_terms}
     if not norm:
         return False
     if norm in offer_terms:

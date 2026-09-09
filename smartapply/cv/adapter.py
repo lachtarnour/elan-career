@@ -27,6 +27,7 @@ from smartapply.ranking.embeddings import (
     EmbeddingsProvider,
     get_embeddings_provider,
 )
+from smartapply.utils.skill_terms import normalize_skill_term
 
 _CV_HEAD_UNSUPPORTED_REPLACEMENTS: tuple[tuple[str, str], ...] = (
     ("Databricks-driven", "SQL/Spark"),
@@ -529,12 +530,12 @@ class CvAdapter:
         term: str,
         canonical_by_skill: dict[str, str],
     ) -> list[str]:
-        normalized = " ".join((term or "").lower().split())
+        normalized = normalize_skill_term(term)
         if not normalized:
             return []
 
         normalized_by_skill = {
-            skill_key: " ".join(skill_key.lower().split()) for skill_key in canonical_by_skill
+            skill_key: normalize_skill_term(skill_key) for skill_key in canonical_by_skill
         }
         exact_matches = [
             skill_key

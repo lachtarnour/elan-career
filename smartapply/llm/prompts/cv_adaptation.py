@@ -18,6 +18,7 @@ from smartapply.llm.prompts.loader import load_prompt, render_prompt
 from smartapply.llm.prompts.skill_profiles import format_skill_profiles
 from smartapply.llm.schemas import JobAnalysis
 from smartapply.profile import Bullet, Experience, Profile, Project
+from smartapply.utils.skill_terms import normalize_skill_term
 
 SYSTEM = load_prompt("cv_adaptation/system.j2")
 
@@ -85,11 +86,11 @@ def _format_matching_keywords(profile: Profile) -> str:
 
 
 def _term_supported_by_allowed_skill(term: str, allowed_skills: set[str]) -> bool:
-    normalized = term.strip().lower()
+    normalized = normalize_skill_term(term)
     if not normalized:
         return True
     for skill in allowed_skills:
-        skill_norm = skill.strip().lower()
+        skill_norm = normalize_skill_term(skill)
         if not skill_norm:
             continue
         if len(skill_norm) <= 2:
