@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Property, QObject, QThreadPool, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QGuiApplication
 
 from smartapply.database.models import JobStatus
 from smartapply.desktop.services import DesktopService, SearchResult
@@ -86,6 +86,11 @@ class DesktopBridge(QObject):
     analysisTopKChanged = Signal()
     shortlistTopKChanged = Signal()
     jobsChanged = Signal()
+    companiesChanged = Signal()
+    companiesLoadingChanged = Signal()
+    companiesSavingChanged = Signal()
+    companyAdded = Signal()
+    companySaveFailed = Signal(str)
     currentJobChanged = Signal()
     profileChanged = Signal()
     diagnosticsChanged = Signal()
@@ -112,6 +117,9 @@ class DesktopBridge(QObject):
         self._analysis_top_k = self.service.analysis_top_k()
         self._shortlist_top_k = self.service.shortlist_top_k()
         self._jobs: list[dict[str, Any]] = []
+        self._companies: list[dict[str, Any]] = []
+        self._companies_loading = False
+        self._companies_saving = False
         self._current_job: dict[str, Any] = {}
         self._selected_job_id = 0
         self._profile: dict[str, Any] = {}
@@ -177,6 +185,85 @@ class DesktopBridge(QObject):
     @Property("QVariantList", notify=jobsChanged)
     def jobs(self) -> list[dict[str, Any]]:
         return self._jobs
+
+    @Property("QVariantList", notify=companiesChanged)
+    def companies(self) -> list[dict[str, Any]]:
+        return self._companies
+
+    @Property(bool, notify=companiesLoadingChanged)
+    def companiesLoading(self) -> bool:  # noqa: N802
+        return self._companies_loading
+
+    @Property(bool, notify=companiesSavingChanged)
+    def companiesSaving(self) -> bool:  # noqa: N802
+        return self._companies_saving
+
+    @Slot()
+    def loadCompanies(self) -> None:  # noqa: N802
+        if self._companies_saving:
+            return
+        self._companies_loading = True
+        self.companiesLoadingChanged.emit()
+        self._start_read(
+            "companies",
+            self.service.list_companies,
+            on_success=self._companies_loaded,
+            on_finished=self._companies_load_finished,
+        )
+
+    def _companies_loaded(self, rows: list[dict[str, Any]]) -> None:
+        self._companies = rows
+        self.companiesChanged.emit()
+
+    def _companies_load_finished(self) -> None:
+        self._companies_loading = False
+        self.companiesLoadingChanged.emit()
+
+    @Slot(int, bool)
+    def setCompanyChecked(self, company_id: int, checked: bool) -> None:  # noqa: N802
+        self._save_company(self.service.set_company_checked, company_id, checked)
+
+    @Slot("QVariantMap")
+    def addCompany(self, values: dict[str, Any]) -> None:  # noqa: N802
+        self._save_company(self.service.add_company, values, created=True)
+
+    def _save_company(
+        self, operation: Callable[..., Any], *args: Any, created: bool = False
+    ) -> None:
+        if self._companies_saving:
+            return
+        self._companies_saving = True
+        self.companiesSavingChanged.emit()
+        # Invalidate an in-flight read so it cannot restore an older check state.
+        self._read_tokens["companies"] = self._read_tokens.get("companies", 0) + 1
+        self._companies_load_finished()
+
+        def save_and_reload() -> list[dict[str, Any]]:
+            operation(*args)
+            return self.service.list_companies()
+
+        worker = TaskWorker(save_and_reload)
+        self._workers.add(worker)
+
+        def saved(rows: list[dict[str, Any]]) -> None:
+            self._companies_loaded(rows)
+            if created:
+                self.companyAdded.emit()
+                self.toastRequested.emit("Entreprise ajoutée", "", "success")
+
+        def failed(message: str, trace: str) -> None:
+            self.companySaveFailed.emit(message)
+            self._task_error(message, trace)
+
+        def finished() -> None:
+            self._workers.discard(worker)
+            self._companies_saving = False
+            self.companiesSavingChanged.emit()
+
+        worker.signals.result.connect(saved)
+        worker.signals.error.connect(failed)
+        worker.signals.finished.connect(finished)
+        self._thread_pool.start(worker)
 
     @Property("QVariantMap", notify=currentJobChanged)
     def currentJob(self) -> dict[str, Any]:  # noqa: N802 - Qt property name
@@ -790,13 +877,12 @@ class DesktopBridge(QObject):
 
     @Slot(int)
     def rescueJob(self, job_id: int) -> None:  # noqa: N802
-        try:
-            self.service.rescue_job(job_id)
-            self._refresh_workflow()
-            self.selectJob(job_id)
-            self.toastRequested.emit("Offre restaurée", "", "success")
-        except Exception as exc:
-            self._error("Restauration impossible", exc)
+        self._run(
+            "Désarchivage et création de la candidature",
+            self.service.rescue_job,
+            job_id,
+            on_success=self._bulk_rescue_done,
+        )
 
     @Slot("QVariantList")
     def rescueJobs(self, job_ids: list[Any]) -> None:  # noqa: N802
@@ -809,7 +895,7 @@ class DesktopBridge(QObject):
             )
             return
         self._run(
-            "Restauration de " + _count_text(len(ids), "offre", "offres"),
+            "Désarchivage et création de " + _count_text(len(ids), "candidature", "candidatures"),
             self.service.rescue_jobs,
             ids,
             on_success=self._bulk_rescue_done,
@@ -818,21 +904,36 @@ class DesktopBridge(QObject):
     def _bulk_rescue_done(self, report: dict[str, Any]) -> None:
         self._refresh_workflow()
         self.jobSelectionClearRequested.emit()
-        rescued = int(report.get("rescued", 0))
+        generated = int(report.get("generated", 0))
+        existing = int(report.get("existing", 0))
         skipped = int(report.get("skipped", 0))
-        message = _count_text(rescued, "offre restaurée", "offres restaurées") + "."
-        if skipped:
-            message = (
-                _count_text(rescued, "offre restaurée", "offres restaurées")
-                + ", "
-                + _count_text(skipped, "offre ignorée", "offres ignorées")
-                + "."
+        failed = int(report.get("failed", 0))
+        message = _count_text(generated, "candidature créée", "candidatures créées")
+        if existing:
+            message += ", " + _count_text(
+                existing, "dossier déjà disponible", "dossiers déjà disponibles"
             )
-        self.toastRequested.emit(
-            "Restauration terminée",
-            message,
-            "success" if rescued else "warning",
-        )
+        if skipped:
+            message += ", " + _count_text(skipped, "offre ignorée", "offres ignorées")
+        if failed:
+            message += ", " + _count_text(failed, "échec", "échecs")
+        errors = list(report.get("errors") or [])
+        if errors:
+            message += ". Détails : " + self._failure_details(errors)
+        warnings = list(report.get("warnings") or [])
+        if warnings:
+            message += ". Points à vérifier : " + self._failure_details(warnings)
+        kind = "success" if generated or existing else "warning"
+        if failed or warnings:
+            kind = "warning" if generated or existing else "danger"
+        title = "Désarchivage terminé" if not failed else "Préparation incomplète"
+        self._set_activity(title, message + ".", kind)
+        self.toastRequested.emit(title, message + ".", kind)
+        # Leave the archive filter and select the prepared dossier even when
+        # the clicked row was an alias of a different source.
+        application_ids = list(report.get("application_ids") or [])
+        if int(report.get("requested", 0)) == 1 and application_ids:
+            self.openApplication(int(application_ids[0]))
 
     @Slot(int)
     def openApplication(self, application_id: int) -> None:  # noqa: N802
@@ -909,6 +1010,14 @@ class DesktopBridge(QObject):
 
     def _manual_done(self, report: dict[str, Any]) -> None:
         self._generation_done(report)
+
+    @Slot(str, result=bool)
+    def copyText(self, text: str) -> bool:  # noqa: N802
+        clipboard = QGuiApplication.clipboard()
+        if not text or clipboard is None:
+            return False
+        clipboard.setText(text)
+        return True
 
     @Slot(str)
     def openUrl(self, url: str) -> None:  # noqa: N802

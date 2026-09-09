@@ -53,7 +53,7 @@ def test_linkedin_region_location_with_ile_de_france_is_not_foreign() -> None:
     f = JobFilter(_real_rules())
     job = FakeJob(
         title="Data Scientist",
-        company="CATL",
+        company="Example Energy",
         description="Build Python ML models for battery monitoring.",
         location="Paris, Île-de-France, France",
         contract_type="Full-time",

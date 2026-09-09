@@ -32,13 +32,16 @@ from smartapply.database.repository import (
     application_ids_for_confirmed_groups,
     canonical_job,
     confirm_duplicate,
+    duplicate_group_ids,
     mark_archived,
+    pending_duplicate_for_group,
     reject_duplicate,
     rescue_archived_job,
     set_score,
     set_shortlisted,
     update_application_tracking,
 )
+from smartapply.database.repository import companies as company_repository
 from smartapply.desktop.source_health import (
     SourceHealth,
     check_source_health,
@@ -260,6 +263,15 @@ class DesktopService:
 
     def initialize(self) -> None:
         init_db()
+
+    def list_companies(self) -> list[dict[str, Any]]:
+        return company_repository.list_companies()
+
+    def set_company_checked(self, company_id: int, checked: bool) -> None:
+        company_repository.set_company_checked(company_id, checked)
+
+    def add_company(self, values: dict[str, Any]) -> int:
+        return company_repository.add_company(values)
 
     def dashboard(self) -> DashboardSnapshot:
         from smartapply.database.models import LLMUsage
@@ -600,6 +612,13 @@ class DesktopService:
                 or (components.get("reasons") if archived else [])
                 or []
             )
+            if archived and job.canonical_job_id is not None:
+                reference = canonical_job(session, job.id)
+                raw_archive_reasons = [
+                    f"duplicate_reference:{reference.title} — {reference.company} (n° {reference.id})"
+                    if reference is not None
+                    else f"duplicate_of:{job.canonical_job_id}"
+                ]
             return JobDetail(
                 **base_values,
                 remote=job.remote_policy or "",
@@ -1413,34 +1432,129 @@ class DesktopService:
             job.status = JobStatus.SENT
             return True
 
-    def rescue_job(self, job_id: int) -> None:
-        with session_scope() as session:
-            rescue_archived_job(
-                session,
-                job_id,
-                justification="Restaurée depuis l’application macOS",
-            )
+    def rescue_job(self, job_id: int, *, progress=None) -> dict[str, Any]:
+        return self.rescue_jobs([job_id], progress=progress)
 
-    def rescue_jobs(self, job_ids: list[int], *, progress=None) -> dict[str, int]:
-        """Re-inject all archived jobs in a selection in one transaction."""
+    def rescue_jobs(self, job_ids: list[int], *, progress=None) -> dict[str, Any]:
+        """Restore selected offers, analyze them and prepare their dossiers."""
+        from smartapply.pipeline import Pipeline
+        from smartapply.pipeline.apply.persistence import reservation_is_stale
+
         requested_ids = list(dict.fromkeys(int(job_id) for job_id in job_ids if int(job_id) > 0))
-        rescued = 0
-        skipped = 0
-        with session_scope() as session:
-            for index, job_id in enumerate(requested_ids, start=1):
+        report: dict[str, Any] = {
+            "requested": len(requested_ids),
+            "rescued": 0,
+            "generated": 0,
+            "existing": 0,
+            "skipped": 0,
+            "failed": 0,
+            "job_ids": [],
+            "application_ids": [],
+            "errors": [],
+            "warnings": [],
+        }
+        handled: set[int] = set()
+        pipeline = None
+        for index, job_id in enumerate(requested_ids, start=1):
+            try:
+                with session_scope() as session:
+                    job = session.get(Job, job_id)
+                    if job is None or not (
+                        job.archived_at
+                        or job.status == JobStatus.ARCHIVED
+                        or (job.application and job.application.status == JobStatus.ARCHIVED)
+                    ):
+                        report["skipped"] += 1
+                        continue
+                    if job.duplicate_review_status == JobDuplicateStatus.PENDING:
+                        raise ValueError("Vérifiez d’abord le doublon de cette offre.")
+                    # A confirmed source alias shares its dossier with the
+                    # canonical offer. Resume that dossier without splitting
+                    # the group or creating a second application.
+                    target = canonical_job(session, job_id)
+                    if target is None:
+                        raise ValueError("Offre principale introuvable.")
+                    canonical_id = int(target.id)
+                    if pending_duplicate_for_group(session, canonical_id) is not None:
+                        raise ValueError("Vérifiez d’abord le doublon de cette offre.")
+                    application = application_for_duplicate_group(session, target.id)
+                    if application is not None:
+                        target = application.job
+                    target_id = int(target.id)
+                    if target_id in handled:
+                        report["skipped"] += 1
+                        continue
+                    handled.add(target_id)
+                    if target.duplicate_review_status == JobDuplicateStatus.PENDING:
+                        raise ValueError("Vérifiez d’abord le doublon de cette offre.")
+                    has_documents = bool(
+                        application
+                        and (
+                            application.documents
+                            or application.cv_json
+                            or application.cv_docx_path
+                            or application.cv_pdf_path
+                        )
+                    )
+                    target_archived = bool(
+                        target.archived_at
+                        or target.status == JobStatus.ARCHIVED
+                        or (application and application.status == JobStatus.ARCHIVED)
+                    )
+                    if has_documents and not target_archived:
+                        report["existing"] += 1
+                        report["job_ids"].append(target_id)
+                        report["application_ids"].append(application.id)
+                        continue
+                    if application and not has_documents and not reservation_is_stale(application):
+                        raise ValueError(
+                            "La création de ce dossier est déjà en cours. Réessayez plus tard."
+                        )
+                    if target_id != canonical_id:
+                        # Older groups can own a dossier on an alias. Make
+                        # that owner canonical so the pipeline can reuse it.
+                        for member_id in duplicate_group_ids(session, canonical_id):
+                            member = session.get(Job, member_id)
+                            member.canonical_job_id = None if member_id == target_id else target_id
+                            if member_id != target_id:
+                                mark_archived(session, member_id)
+                    if target_archived:
+                        rescue_archived_job(
+                            session,
+                            target_id,
+                            justification="Désarchivée depuis l’application macOS",
+                        )
+                report["rescued"] += 1
+                report["job_ids"].append(target_id)
+                # Commit restoration before starting network work. A failed
+                # generation leaves the offer available for a retry.
                 if progress:
-                    progress(f"Restauration {index}/{len(requested_ids)}…")
-                job = session.get(Job, job_id)
-                if job is None or not (job.archived_at or job.status == JobStatus.ARCHIVED):
-                    skipped += 1
-                    continue
-                rescue_archived_job(
-                    session,
-                    job_id,
-                    justification="Restaurée depuis la sélection macOS",
-                )
-                rescued += 1
-        return {"requested": len(requested_ids), "rescued": rescued, "skipped": skipped}
+                    progress(f"Analyse de l’offre {index}/{len(requested_ids)}…")
+                pipeline = pipeline or Pipeline()
+                analysis = pipeline.analyze_jobs([target_id])
+                if analysis.analyzed == 0 and analysis.already_analyzed == 0:
+                    errors = getattr(analysis, "errors", []) or []
+                    detail = str(errors[0].get("message", "")) if errors else ""
+                    raise RuntimeError(
+                        "L’analyse de l’offre n’a pas abouti." + (f" {detail}" if detail else "")
+                    )
+                if progress:
+                    progress(f"Création du CV et de la lettre {index}/{len(requested_ids)}…")
+                application_report = pipeline.apply_to(target_id, force_regenerate=has_documents)
+                report["generated"] += 1
+                if application_report.application_id:
+                    report["application_ids"].append(int(application_report.application_id))
+                issues = [
+                    *(getattr(application_report, "validation_warnings", None) or []),
+                    *(getattr(application_report, "validation_errors", None) or []),
+                ]
+                if issues:
+                    report["warnings"].append({"job_id": target_id, "message": " · ".join(issues)})
+            except Exception as exc:
+                logger.exception("Offer restoration failed: job_id=%s", job_id)
+                report["failed"] += 1
+                report["errors"].append({"job_id": job_id, "message": str(exc)})
+        return report
 
     def profile(self) -> ProfileSnapshot:
         profile = get_profile()

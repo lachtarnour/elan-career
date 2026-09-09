@@ -25,5 +25,5 @@ class DuplicateReviewRequiredError(RuntimeError):
         super().__init__(
             f"L’offre {job_id} ressemble à une offre déjà connue"
             + (f" ({candidate_job_id})" if candidate_job_id is not None else "")
-            + ". Vérifiez le doublon avant de créer une candidature."
+            + ". Ouvrez « Doublons » et comparez les offres avant de créer une candidature."
         )

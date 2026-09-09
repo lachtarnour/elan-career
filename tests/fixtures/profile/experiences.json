@@ -15,9 +15,9 @@
     "bullets": [
       {
         "id": "blt_aurore_ds_multimodal",
-        "text": "Built multimodal digital biomarker pipelines from facial, mobility and smartphone data, reaching 0.67 correlation with validated clinical scores.",
+        "text": "Built a multimodal classifier for synthetic image and text samples, reaching 0.82 accuracy on a labeled test set.",
         "numbers": [
-          "0.67"
+          "0.82"
         ],
         "keywords": [
           "Python",
@@ -27,8 +27,8 @@
         "evidence_level": "verified"
       },
       {
-        "id": "blt_aurore_ds_speech_face",
-        "text": "Developed speech/NLP and face-recognition pipelines using Whisper, Pyannote, RetinaFace, FaceNet and Flask APIs.",
+        "id": "blt_aurore_ds_speech",
+        "text": "Developed speech transcription and document-tagging pipelines using Whisper, PyTorch and Flask APIs.",
         "numbers": [],
         "keywords": [
           "Python",
@@ -38,8 +38,8 @@
         "evidence_level": "verified"
       },
       {
-        "id": "blt_aurore_ds_patent",
-        "text": "Contributed to a patent-pending AI monitoring system and clinical preprint on passive mood markers.",
+        "id": "blt_aurore_ds_documentation",
+        "text": "Documented model evaluation protocols and reproducible experiments on synthetic datasets.",
         "numbers": [],
         "keywords": [
           "Python",
@@ -66,7 +66,7 @@
     "bullets": [
       {
         "id": "blt_aurore_intern_anomaly",
-        "text": "Built an anomaly detection pipeline for identifying behavioral disruptions in mood tracking data.",
+        "text": "Built an anomaly detection pipeline for identifying missing and corrupted samples in synthetic sensor data.",
         "numbers": [],
         "keywords": [
           "Python",

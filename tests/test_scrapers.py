@@ -302,13 +302,13 @@ def test_linkedin_apify_rejects_limit_above_configured_max(mocker, monkeypatch) 
 def test_linkedin_apify_maps_jobs_and_payload(mocker) -> None:
     payload = [
         {
-            "id": 4434928307,
-            "url": "https://fr.linkedin.com/jobs/view/data-scientist-paris-at-catl-4434928307",
+            "id": 1234567890,
+            "url": "https://fr.linkedin.com/jobs/view/data-scientist-paris-at-example-energy-1234567890",
             "title": "Data Scientist- Paris",
             "location": "Paris, Île-de-France, France",
             "postedDate": "2026-06-30T00:00:00.000Z",
-            "companyName": "CATL",
-            "companyUrl": "https://cn.linkedin.com/company/contemporary-amperex-technology-gmbh",
+            "companyName": "Example Energy",
+            "companyUrl": "https://cn.linkedin.com/company/example-energy",
             "recruiterName": "",
             "recruiterUrl": "",
             "experienceLevel": "Associate",
@@ -342,7 +342,7 @@ def test_linkedin_apify_maps_jobs_and_payload(mocker) -> None:
     assert len(jobs) == 1
     job = jobs[0]
     assert job.title == "Data Scientist- Paris"
-    assert job.company == "CATL"
+    assert job.company == "Example Energy"
     assert job.location == "Paris, Île-de-France, France"
     assert job.contract_type == "Full-time"
     assert job.remote_policy == "hybrid"
@@ -369,13 +369,13 @@ def test_linkedin_apify_maps_jobs_and_payload(mocker) -> None:
 def test_linkedin_apify_prefers_html_description_and_stable_id(mocker) -> None:
     payload = [
         {
-            "id": 4434928307,
-            "url": "[https://fr.linkedin.com/jobs/view/data-scientist-paris-at-catl-4434928307](https://fr.linkedin.com/jobs/view/data-scientist-paris-at-catl-4434928307)",
+            "id": 1234567890,
+            "url": "[https://fr.linkedin.com/jobs/view/data-scientist-paris-at-example-energy-1234567890](https://fr.linkedin.com/jobs/view/data-scientist-paris-at-example-energy-1234567890)",
             "title": "Data Scientist- Paris",
             "location": "Paris, Île-de-France, France",
             "postedDate": "2026-06-30T00:00:00.000Z",
-            "companyName": "CATL",
-            "companyUrl": "[https://cn.linkedin.com/company/contemporary-amperex-technology-gmbh](https://cn.linkedin.com/company/contemporary-amperex-technology-gmbh)",
+            "companyName": "Example Energy",
+            "companyUrl": "[https://cn.linkedin.com/company/example-energy](https://cn.linkedin.com/company/example-energy)",
             "recruiterName": "",
             "recruiterUrl": "",
             "experienceLevel": "Mid-Senior level",
@@ -420,12 +420,12 @@ def test_linkedin_apify_prefers_html_description_and_stable_id(mocker) -> None:
         "3+ years of experience."
     )
     assert job.application_url == (
-        "https://fr.linkedin.com/jobs/view/data-scientist-paris-at-catl-4434928307"
+        "https://fr.linkedin.com/jobs/view/data-scientist-paris-at-example-energy-1234567890"
     )
     assert job.apply_options == [
         {
             "title": "LinkedIn Easy Apply",
-            "link": "https://fr.linkedin.com/jobs/view/data-scientist-paris-at-catl-4434928307",
+            "link": "https://fr.linkedin.com/jobs/view/data-scientist-paris-at-example-energy-1234567890",
         }
     ]
     assert job.external_id == s._to_raw_job({**payload[0], "title": "Updated title"}).external_id

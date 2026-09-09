@@ -94,8 +94,8 @@ def _valid_adapted_cv() -> AdaptedCV:
     return AdaptedCV(
         cv_title="Data Scientist – NLP & Multimodal AI",
         professional_summary=(
-            "Data Scientist with 2 years applied R&D in multimodal AI and clinical "
-            "digital biomarkers. Strong NLP/RAG and speech pipelines."
+            "Data Scientist with 2 years in NLP and machine learning. "
+            "Built RAG and speech pipelines on synthetic datasets."
         ),
         selected_experiences=[
             AdaptedExperience(
@@ -103,11 +103,11 @@ def _valid_adapted_cv() -> AdaptedCV:
                 bullets=[
                     AdaptedBullet(
                         source_id="blt_aurore_ds_multimodal",
-                        text="Built multimodal pipelines reaching 0.67 correlation with clinical scores.",
+                        text="Built a multimodal classifier reaching 0.82 accuracy on synthetic test samples.",
                     ),
                     AdaptedBullet(
-                        source_id="blt_aurore_ds_speech_face",
-                        text="Developed speech/NLP and face-recognition pipelines using Whisper and Pyannote.",
+                        source_id="blt_aurore_ds_speech",
+                        text="Developed speech transcription and document-tagging pipelines using Whisper and PyTorch.",
                     ),
                 ],
             )
@@ -184,6 +184,39 @@ def test_offer_skill_matching_prefers_specific_nested_skills() -> None:
         )
         selected = _selected_skill_map(adapted)
         assert selected == {category_id: expected_skills}
+
+
+@pytest.mark.parametrize(
+    "term", ["théorie des graphes", "Connaissances en THEORIE DES GRAPHES", "Graph Theory"]
+)
+def test_graph_theory_translation_survives_cv_skill_filters(term: str) -> None:
+    profile = get_profile().model_copy(deep=True)
+    category = next(c for c in profile.skills.categories if c.id == "stats_signal")
+    category.skills.append("Graph Theory")
+    analysis = _analysis_with_required_skills([]).model_copy(
+        update={"cv_keywords_to_include": [term], "role_type": "Optimization Engineer"}
+    )
+    adapter = CvAdapter(profile, llm=MockLLMProvider(), embeddings=MockEmbeddingsProvider())
+
+    assert cv_adaptation._format_unsupported_offer_terms(profile, analysis) == "- none"
+    adapted = adapter._ensure_supported_offer_skills(_empty_skills_cv(), analysis)
+    assert _selected_skill_map(adapted) == {"stats_signal": ["Graph Theory"]}
+    adapted = adapter._apply_role_family_contract(adapted, analysis, "Ingénieur Optimisation")
+    adapted, removed = CvValidator(profile).auto_fix(adapted)
+    assert "Graph Theory" in _selected_skill_map(adapted)["stats_signal"]
+    assert not removed
+
+
+def test_graph_theory_translation_does_not_infer_graph_tools_or_gnn_experience() -> None:
+    assert not cv_adaptation._term_supported_by_allowed_skill(
+        "théorie des graphes", {"Graph Neural Networks (GNNs)"}
+    )
+    for unsupported in ("NetworkX", "igraph", "graph-tool", "Graph Neural Networks (GNNs)"):
+        assert not cv_adaptation._term_supported_by_allowed_skill(unsupported, {"Graph Theory"})
+        assert (
+            CvAdapter._matched_allowed_skill_keys(unsupported, {"graph theory": "Graph Theory"})
+            == []
+        )
 
 
 def test_adapter_can_produce_cv_and_letter_in_one_call() -> None:

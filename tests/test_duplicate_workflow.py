@@ -91,6 +91,67 @@ def test_same_source_id_updates_one_offer_but_same_label_with_new_id_is_held(
     assert probable.duplicate_review_ids == probable.job_ids
 
 
+@pytest.mark.parametrize(
+    "retry_url", ["https://acme.test/jobs/2", "https://acme.test/jobs/2?utm_source=retry"]
+)
+def test_manual_retry_reports_pending_review_until_user_resolves_it(
+    isolated_db,
+    retry_url: str,
+) -> None:
+    ingestor = Ingestor()
+    root = ingestor._persist("serpapi", [_raw("serpapi:original", "https://acme.test/jobs/1")])
+    with session_scope() as session:
+        original = session.get(Job, root.job_ids[0])
+        original.archived_at = datetime.now(timezone.utc)
+        original.status = JobStatus.ARCHIVED
+
+    def submit(url: str):
+        return ingestor.from_text(
+            _DESCRIPTION,
+            title="Data Scientist",
+            company="Acme SAS",
+            location="Paris",
+            application_url=url,
+        )
+
+    first = submit("https://acme.test/jobs/2")
+    retry = submit(retry_url)
+
+    assert retry.job_ids == first.job_ids
+    assert retry.duplicate_review_ids == first.duplicate_review_ids == first.job_ids
+    with session_scope() as session:
+        assert session.query(Job).count() == 2
+        duplicate = session.get(Job, first.job_ids[0])
+        assert duplicate.possible_duplicate_of_id == root.job_ids[0]
+
+    assert DesktopService().resolve_duplicate(first.job_ids[0], same_offer=False)
+    resolved = submit(retry_url)
+    assert resolved.job_ids == first.job_ids
+    assert resolved.duplicate_review_ids == []
+
+
+def test_manual_application_retry_explains_duplicate_review(isolated_db) -> None:
+    root = Ingestor()._persist("serpapi", [_raw("serpapi:original", "https://acme.test/jobs/1")])
+    service = DesktopService()
+    blocked_ids: list[int] = []
+
+    for _ in range(2):
+        with pytest.raises(DuplicateReviewRequiredError) as error:
+            service.create_manual_application(
+                title="Data Scientist",
+                company="Acme SAS",
+                location="Paris",
+                description=_DESCRIPTION,
+                application_url="https://acme.test/jobs/2",
+            )
+        assert error.value.candidate_job_id == root.job_ids[0]
+        blocked_ids.append(error.value.job_id)
+
+    assert blocked_ids[0] == blocked_ids[1]
+    with session_scope() as session:
+        assert session.query(Application).count() == 0
+
+
 def test_startup_backfill_protects_legacy_rows_without_touching_application_history(
     isolated_db,
 ) -> None:

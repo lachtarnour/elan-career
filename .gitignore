@@ -46,6 +46,9 @@ token.json
 /tmp/
 /daily scrapper/
 /smartapply/profile/data/
+# Legacy locations for private company lists and ranking research.
+/smartapply/desktop/resources/*.csv
+/docs/company-ranking.json
 *.db
 *.db-*
 *.sqlite

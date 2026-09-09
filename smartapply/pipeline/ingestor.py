@@ -279,6 +279,10 @@ class Ingestor:
                     job.shortlist_origin = None
                     job.archived_at = None
                     job.status = JobStatus.SCRAPED
+                if job.duplicate_review_status == JobDuplicateStatus.PENDING:
+                    # Retries reuse the row without recomputing the match.
+                    # Keep reporting its unresolved review so callers stop
+                    # before analysis, which excludes pending duplicates.
                     duplicate_review_ids.append(int(job.id))
                 if source == "manual" and existing_status is not None:
                     # Manual one-shot submissions are explicit user intent:

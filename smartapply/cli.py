@@ -83,6 +83,127 @@ def refresh_embeddings_command() -> None:
     )
 
 
+@cli.command("sync-companies")
+@click.option(
+    "--csv",
+    "csv_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="CSV des entreprises à synchroniser dans la base configurée d’Élan.",
+)
+@click.option("--dry-run", is_flag=True, help="Afficher les changements sans modifier les données.")
+def sync_companies_command(csv_path: Path, dry_run: bool) -> None:
+    """Synchroniser les entreprises sans écraser les fiches checked ni supprimer de lignes."""
+    import csv
+    import sqlite3
+    from datetime import datetime, timezone
+
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from smartapply.database.repository.companies import sync_companies
+
+    try:
+        report = sync_companies(csv_path, dry_run=True)
+        backup = None
+        if not dry_run:
+            url = make_url(get_settings().database_url)
+            if (report["added"] or report["updated"]) and (
+                url.get_backend_name() == "sqlite" and url.database not in {None, ":memory:"}
+            ):
+                database = Path(url.database).expanduser().resolve()
+                if database.exists():
+                    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+                    backup_dir = database.parent / "backups"
+                    backup_dir.mkdir(parents=True, exist_ok=True)
+                    backup = backup_dir / f"{database.stem}-companies-{timestamp}.db"
+                    with (
+                        sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as source,
+                        sqlite3.connect(backup) as destination,
+                    ):
+                        source.backup(destination)
+                    backup.chmod(0o600)
+            report = sync_companies(csv_path)
+        click.echo(
+            json.dumps(
+                {
+                    "csv": str(csv_path.resolve()),
+                    "database": get_settings().database_url,
+                    "dry_run": dry_run,
+                    **report,
+                    "backup": str(backup) if backup else None,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    except (OSError, ValueError, csv.Error, sqlite3.Error, SQLAlchemyError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command("sync-profile")
+@click.option(
+    "--direction",
+    type=click.Choice(["to-app", "from-app"]),
+    default="to-app",
+    show_default=True,
+    help="Copy the project profile to the app, or the app profile to the project.",
+)
+@click.option(
+    "--project-profile",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=Path("smartapply/profile/data"),
+    show_default=True,
+    help="Project profile directory, relative to the current working directory.",
+)
+@click.option(
+    "--app-profile",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=None,
+    help="App profile directory; defaults to ELAN_HOME/profile (independent of PROFILE_DIR).",
+)
+@click.option("--dry-run", is_flag=True, help="Compare and validate without copying any files.")
+def sync_profile_command(
+    direction: str,
+    project_profile: Path,
+    app_profile: Path | None,
+    dry_run: bool,
+) -> None:
+    """Copy profile JSON files with validation and an automatic destination backup.
+
+    The source wins for each copied file, including its list of projects.
+    Optional destination files absent from the source are kept. Credentials,
+    databases and generated documents are never copied.
+    """
+    from smartapply.config import RUNTIME_DIR
+    from smartapply.profile.sync import sync_profile
+
+    app_profile = app_profile if app_profile is not None else RUNTIME_DIR / "profile"
+    source, destination = (
+        (project_profile, app_profile) if direction == "to-app" else (app_profile, project_profile)
+    )
+    try:
+        result = sync_profile(source, destination, dry_run=dry_run)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Source: {result.source}")
+    click.echo(f"Destination: {result.destination}")
+    for label, names in (
+        ("Create", result.created),
+        ("Replace", result.updated),
+        ("Unchanged", result.unchanged),
+        ("Keep destination-only", result.retained),
+    ):
+        if names:
+            click.echo(f"{label}: {', '.join(names)}")
+    if dry_run:
+        click.echo("Preview only; no files written.")
+    elif result.backup:
+        click.echo(f"Synchronized. Backup: {result.backup}")
+    else:
+        click.echo("Profiles already synchronized for all source files.")
+
+
 @cli.command("ingest")
 @click.option("--source", required=True, type=SCRAPER_SOURCE_CHOICE)
 @click.option("--query", "-q", required=True)

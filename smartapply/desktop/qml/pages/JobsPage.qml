@@ -443,7 +443,7 @@ Item {
                     }
                     AppButton {
                         visible: root.rescueIds.length > 0
-                        text: "Restaurer (" + root.rescueIds.length + ")"
+                        text: "Désarchiver (" + root.rescueIds.length + ")"
                         iconSource: Theme.icon("refresh")
                         refined: true
                         iconSize: 13
@@ -1022,7 +1022,36 @@ Item {
                             Layout.fillWidth: true
                             spacing: 6
                             RowLayout {
-                                visible: Boolean(root.applicationData.id)
+                                visible: AppBridge.currentJob.status === "archived"
+                                Layout.fillWidth: true
+                                spacing: 6
+                                AppButton {
+                                    objectName: "offerRestoreAction"
+                                    text: "Désarchiver et créer"
+                                    iconSource: Theme.icon("refresh")
+                                    kind: "primary"
+                                    fontPixelSize: root.detailButtonFontSize
+                                    refined: true
+                                    implicitHeight: 34
+                                    enabled: !AppBridge.busy
+                                    onClicked: AppBridge.rescueJob(AppBridge.currentJob.id)
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: "Analyse l’offre puis génère le CV et la lettre. Un doublon reprend son dossier principal."
+                                }
+                                Item { Layout.fillWidth: true }
+                                AppButton {
+                                    visible: Boolean(AppBridge.currentJob.url)
+                                    text: "Offre"
+                                    iconSource: Theme.icon("arrow-up-right")
+                                    kind: "primary"
+                                    fontPixelSize: root.detailButtonFontSize
+                                    refined: true
+                                    implicitHeight: 34
+                                    onClicked: AppBridge.openUrl(AppBridge.currentJob.url)
+                                }
+                            }
+                            RowLayout {
+                                visible: Boolean(root.applicationData.id) && AppBridge.currentJob.status !== "archived"
                                 Layout.fillWidth: true
                                 spacing: 6
                                 AppButton {
@@ -1070,7 +1099,7 @@ Item {
                                 Item { Layout.fillWidth: true }
                             }
                             RowLayout {
-                                visible: !Boolean(root.applicationData.id)
+                                visible: !Boolean(root.applicationData.id) && AppBridge.currentJob.status !== "archived"
                                 Layout.fillWidth: true
                                 spacing: 6
                                 AppButton {
@@ -1078,10 +1107,9 @@ Item {
                                     Layout.preferredWidth: Math.max(148, implicitWidth)
                                     text: AppBridge.currentJob.status === "duplicate_review" ? "Décision requise"
                                         : AppBridge.currentJob.related_application_id ? "Voir le dossier #" + AppBridge.currentJob.related_application_id
-                                        : AppBridge.currentJob.status === "archived" ? "Restaurer"
                                         : Boolean(AppBridge.currentJob.can_generate) ? "Créer"
                                         : "Analyser"
-                                    iconSource: AppBridge.currentJob.status === "archived" ? Theme.icon("refresh") : Theme.icon("sparkle")
+                                    iconSource: Theme.icon("sparkle")
                                     kind: "primary"
                                     fontPixelSize: root.detailButtonFontSize
                                     refined: true
@@ -1090,7 +1118,6 @@ Item {
                                     onClicked: {
                                         if (AppBridge.currentJob.status === "duplicate_review") return
                                         if (AppBridge.currentJob.related_application_id) AppBridge.openApplication(AppBridge.currentJob.related_application_id)
-                                        else if (AppBridge.currentJob.status === "archived") AppBridge.rescueJob(AppBridge.currentJob.id)
                                         else if (AppBridge.currentJob.can_generate) AppBridge.generateApplication(AppBridge.currentJob.id)
                                         else AppBridge.analyzeJob(AppBridge.currentJob.id)
                                     }

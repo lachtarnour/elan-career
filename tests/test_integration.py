@@ -43,11 +43,11 @@ def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 SAMPLE_JOBS = [
     {
         "title": "Data Scientist NLP",
-        "company": "Doctolib",
+        "company": "Example Health",
         "location": "Paris, France",
         "contract_type": "CDI",
         "remote_policy": "hybrid",
-        "application_url": "https://careers.doctolib.com/jobs/42",
+        "application_url": "https://health.example.com/jobs/42",
         "description": (
             "Vos missions\n"
             "Concevoir des pipelines RAG (BM25, FAISS, reranking) sur des données "
@@ -60,11 +60,11 @@ SAMPLE_JOBS = [
     },
     {
         "title": "Senior ML Engineer",
-        "company": "Mistral AI",
+        "company": "Example Model Lab",
         "location": "Paris, France",
         "contract_type": "CDI",
         "remote_policy": "onsite",
-        "application_url": "https://jobs.mistral.ai/ml-engineer",
+        "application_url": "https://models.example.com/ml-engineer",
         "description": (
             "Build distributed training infrastructure for foundation models. "
             "5+ years of experience required. PyTorch, JAX, CUDA expert. "
@@ -73,11 +73,11 @@ SAMPLE_JOBS = [
     },
     {
         "title": "Data Analyst BI",
-        "company": "Carrefour",
+        "company": "Example Retail",
         "location": "Massy, France",
         "contract_type": "CDI",
         "remote_policy": "hybrid",
-        "application_url": "https://careers.carrefour.com/analyst",
+        "application_url": "https://retail.example.com/analyst",
         "description": (
             "Création de dashboards Power BI. Reporting financier mensuel. "
             "SQL avancé requis. Pas de développement Python."
@@ -85,11 +85,11 @@ SAMPLE_JOBS = [
     },
     {
         "title": "Sales Director Europe",
-        "company": "Salesforce",
+        "company": "Example Sales",
         "location": "Paris, France",
         "contract_type": "CDI",
         "remote_policy": "hybrid",
-        "application_url": "https://salesforce.com/careers",
+        "application_url": "https://sales.example.com/careers",
         "description": (
             "Lead the European B2B sales organization. 10+ years of experience "
             "managing enterprise sales teams. Hit aggressive growth targets."
@@ -97,11 +97,11 @@ SAMPLE_JOBS = [
     },
     {
         "title": "AI Research Engineer",
-        "company": "Hugging Face",
+        "company": "Example Research",
         "location": "Remote (EU)",
         "contract_type": "CDI",
         "remote_policy": "remote",
-        "application_url": "https://huggingface.co/jobs/ai-researcher",
+        "application_url": "https://research.example.com/jobs/ai-researcher",
         "description": (
             "Research engineer to push the state of the art in multimodal AI. "
             "Strong publications and engineering skills. PyTorch, Transformers, "
@@ -147,10 +147,9 @@ def _register_llm_fixtures() -> None:
         AdaptedCV(
             cv_title="Data Scientist – NLP & Multimodal AI",
             professional_summary=(
-                "Data Scientist with 2 years applied R&D in NLP, multimodal AI and "
-                "clinical digital biomarkers. Built RAG pipelines, speech/NLP "
-                "stacks (Whisper, Pyannote) and multimodal models reaching 0.67 "
-                "correlation with clinical scores."
+                "Data Scientist with 2 years in NLP and machine learning. "
+                "Built RAG and speech pipelines and evaluated multimodal "
+                "classifiers with 0.82 accuracy on synthetic test samples."
             ),
             selected_experiences=[
                 AdaptedExperience(
@@ -159,23 +158,22 @@ def _register_llm_fixtures() -> None:
                         AdaptedBullet(
                             source_id="blt_aurore_ds_multimodal",
                             text=(
-                                "Built multimodal digital biomarker pipelines from facial, "
-                                "mobility and smartphone data, reaching 0.67 correlation "
-                                "with validated clinical scores."
+                                "Built a multimodal classifier for synthetic image and text "
+                                "samples, reaching 0.82 accuracy on a labeled test set."
                             ),
                         ),
                         AdaptedBullet(
-                            source_id="blt_aurore_ds_speech_face",
+                            source_id="blt_aurore_ds_speech",
                             text=(
-                                "Developed speech/NLP and face-recognition pipelines using "
-                                "Whisper, Pyannote, RetinaFace, FaceNet and Flask APIs."
+                                "Developed speech transcription and document-tagging "
+                                "pipelines using Whisper, PyTorch and Flask APIs."
                             ),
                         ),
                         AdaptedBullet(
-                            source_id="blt_aurore_ds_patent",
+                            source_id="blt_aurore_ds_documentation",
                             text=(
-                                "Contributed to a patent-pending AI monitoring system and "
-                                "clinical preprint on passive mood markers."
+                                "Documented model evaluation protocols and reproducible "
+                                "experiments on synthetic datasets."
                             ),
                         ),
                     ],
@@ -186,8 +184,8 @@ def _register_llm_fixtures() -> None:
                         AdaptedBullet(
                             source_id="blt_aurore_intern_anomaly",
                             text=(
-                                "Built an anomaly detection pipeline for identifying "
-                                "behavioral disruptions in mood tracking data."
+                                "Built an anomaly detection pipeline for identifying missing "
+                                "and corrupted samples in synthetic sensor data."
                             ),
                         ),
                     ],
@@ -207,10 +205,9 @@ def _register_llm_fixtures() -> None:
         ApplicationDraft(
             cv_title="Data Scientist – NLP & Multimodal AI",
             professional_summary=(
-                "Data Scientist with 2 years applied R&D in NLP, multimodal AI and "
-                "clinical digital biomarkers. Built RAG pipelines, speech/NLP "
-                "stacks (Whisper, Pyannote) and multimodal models reaching 0.67 "
-                "correlation with clinical scores."
+                "Data Scientist with 2 years in NLP and machine learning. "
+                "Built RAG and speech pipelines and evaluated multimodal "
+                "classifiers with 0.82 accuracy on synthetic test samples."
             ),
             selected_experiences=[
                 AdaptedExperience(
@@ -219,23 +216,22 @@ def _register_llm_fixtures() -> None:
                         AdaptedBullet(
                             source_id="blt_aurore_ds_multimodal",
                             text=(
-                                "Built multimodal digital biomarker pipelines from facial, "
-                                "mobility and smartphone data, reaching 0.67 correlation "
-                                "with validated clinical scores."
+                                "Built a multimodal classifier for synthetic image and text "
+                                "samples, reaching 0.82 accuracy on a labeled test set."
                             ),
                         ),
                         AdaptedBullet(
-                            source_id="blt_aurore_ds_speech_face",
+                            source_id="blt_aurore_ds_speech",
                             text=(
-                                "Developed speech/NLP and face-recognition pipelines using "
-                                "Whisper, Pyannote, RetinaFace, FaceNet and Flask APIs."
+                                "Developed speech transcription and document-tagging "
+                                "pipelines using Whisper, PyTorch and Flask APIs."
                             ),
                         ),
                         AdaptedBullet(
-                            source_id="blt_aurore_ds_patent",
+                            source_id="blt_aurore_ds_documentation",
                             text=(
-                                "Contributed to a patent-pending AI monitoring system and "
-                                "clinical preprint on passive mood markers."
+                                "Documented model evaluation protocols and reproducible "
+                                "experiments on synthetic datasets."
                             ),
                         ),
                     ],
@@ -246,8 +242,8 @@ def _register_llm_fixtures() -> None:
                         AdaptedBullet(
                             source_id="blt_aurore_intern_anomaly",
                             text=(
-                                "Built an anomaly detection pipeline for identifying "
-                                "behavioral disruptions in mood tracking data."
+                                "Built an anomaly detection pipeline for identifying missing "
+                                "and corrupted samples in synthetic sensor data."
                             ),
                         ),
                     ],
@@ -265,9 +261,9 @@ def _register_llm_fixtures() -> None:
                 "Bonjour,\n\n"
                 "Je vous adresse ma candidature pour le poste de Data Scientist NLP. "
                 "Mes deux années chez Aurore Labs m'ont permis de construire des pipelines "
-                "NLP et speech avec Whisper et Pyannote, ainsi que des biomarqueurs "
-                "cliniques multimodaux atteignant 0.67 de corrélation avec des scores "
-                "validés. Le projet Evidence RAG, fondé sur BM25, FAISS, reranking et "
+                "NLP avec Whisper et PyTorch, ainsi que des classifieurs multimodaux "
+                "atteignant une exactitude de 0.82 sur un jeu de test synthétique. "
+                "Le projet Evidence RAG, fondé sur BM25, FAISS, reranking et "
                 "génération de réponses sourcées, rejoint directement les missions de "
                 "RAG, de fine-tuning et de déploiement que vous décrivez. Ce parcours "
                 "combine expérimentation, évaluation et intégration logicielle sur des "
@@ -317,9 +313,9 @@ def test_full_pipeline_on_realistic_sample(tmp_path: Path) -> None:
 
     assert top_ids
     # The Sales Director should NOT be in the top
-    assert "Salesforce" not in top_companies
+    assert "Example Sales" not in top_companies
     # The BI role should NOT be in the top
-    assert "Carrefour" not in top_companies
+    assert "Example Retail" not in top_companies
 
     reports = []
     for jid in top_ids:
@@ -348,7 +344,7 @@ def test_full_pipeline_on_realistic_sample(tmp_path: Path) -> None:
     # Fixture facts from the profile must appear
     assert "Camille Martin" in text
     assert "Aurore Labs" in text
-    assert "0.67" in text  # the validated quantified metric
+    assert "0.82" in text  # the synthetic fixture metric
     assert "Whisper" in text  # real tech from profile
     # Allowed skills should appear
     assert "PyTorch" in text

@@ -23,6 +23,7 @@ https://github.com/user-attachments/assets/b357b04e-eba4-49aa-a6ed-851d0a94e167
 - **Review your fit** with ranked offers, match explanations, and a comparison view for suspected duplicates.
 - **Prepare applications** with CVs and cover letters grounded in your profile.
 - **Track progress** with application statuses, documents, and a dashboard of recent activity.
+- **Review target companies** on the Entreprises page with search, priority filters, persistent checkboxes, and manual additions. [Import or synchronize your private CSV](docs/company-targeting.md) with `make sync-companies` while preserving checked records.
 
 Profile data and application history are stored locally. Connected providers process the data needed for search and AI features. You review documents and submit applications yourself.
 

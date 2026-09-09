@@ -271,13 +271,13 @@ def test_serpapi_source_metadata_includes_compact_source_signals() -> None:
 def test_linkedin_source_metadata_includes_api_signals_without_raw_html() -> None:
     metadata = build_linkedin_source_metadata(
         {
-            "id": 4434928307,
-            "url": "[https://fr.linkedin.com/jobs/view/data-scientist-paris-at-catl-4434928307](https://fr.linkedin.com/jobs/view/data-scientist-paris-at-catl-4434928307)",
+            "id": 1234567890,
+            "url": "[https://fr.linkedin.com/jobs/view/data-scientist-paris-at-example-energy-1234567890](https://fr.linkedin.com/jobs/view/data-scientist-paris-at-example-energy-1234567890)",
             "title": "Data Scientist- Paris",
             "location": "Paris, Île-de-France, France",
             "postedDate": "2026-06-30T00:00:00.000Z",
-            "companyName": "CATL",
-            "companyUrl": "[https://cn.linkedin.com/company/contemporary-amperex-technology-gmbh](https://cn.linkedin.com/company/contemporary-amperex-technology-gmbh)",
+            "companyName": "Example Energy",
+            "companyUrl": "[https://cn.linkedin.com/company/example-energy](https://cn.linkedin.com/company/example-energy)",
             "recruiterName": "",
             "recruiterUrl": "",
             "experienceLevel": "Mid-Senior level",
@@ -291,8 +291,8 @@ def test_linkedin_source_metadata_includes_api_signals_without_raw_html() -> Non
             "descriptionHtml": "<p>Do not include raw HTML in metadata.</p>",
             "applyUrl": "",
             "_smartapply_normalized": {
-                "url": "https://fr.linkedin.com/jobs/view/data-scientist-paris-at-catl-4434928307",
-                "companyUrl": "https://cn.linkedin.com/company/contemporary-amperex-technology-gmbh",
+                "url": "https://fr.linkedin.com/jobs/view/data-scientist-paris-at-example-energy-1234567890",
+                "companyUrl": "https://cn.linkedin.com/company/example-energy",
                 "description_source": "descriptionHtml",
             },
             "_smartapply_search": {
@@ -310,7 +310,7 @@ def test_linkedin_source_metadata_includes_api_signals_without_raw_html() -> Non
 
     assert "APPLICATION_URL_METADATA" in metadata
     assert "source: linkedin" in metadata
-    assert "companyName: CATL" in metadata
+    assert "companyName: Example Energy" in metadata
     assert "applyType: EASY_APPLY" in metadata
     assert "source_field=url" in metadata
     assert "domain=linkedin.com" in metadata
@@ -329,14 +329,14 @@ def test_linkedin_source_metadata_includes_api_signals_without_raw_html() -> Non
 def test_build_analyzer_input_uses_linkedin_offer_adapter() -> None:
     job = SimpleNamespace(
         title="Data Scientist- Paris",
-        company="CATL",
+        company="Example Energy",
         location="Paris, Île-de-France, France",
-        application_url="https://fr.linkedin.com/jobs/view/4434928307",
+        application_url="https://fr.linkedin.com/jobs/view/1234567890",
         cleaned_description="Analyze raw data.\nBuild Python ML models.",
         description="Raw fallback.",
         source="linkedin",
         source_data={
-            "companyName": "CATL",
+            "companyName": "Example Energy",
             "applyType": "EASY_APPLY",
             "experienceLevel": "Mid-Senior level",
             "contractType": "Full-time",
