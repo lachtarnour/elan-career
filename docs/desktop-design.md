@@ -4,7 +4,7 @@
 
 ## Direction commune
 
-Les sept pages utilisent le même thème sombre, une hiérarchie typographique commune,
+Les huit pages utilisent le même thème sombre, une hiérarchie typographique commune,
 des surfaces sobres et des couleurs sémantiques : violet pour les actions de recherche,
 vert pour l’envoi, ambre pour l’archivage et les avertissements.
 
@@ -42,11 +42,25 @@ de profil long et de comparaison de doublons sont des fixtures en mémoire.
 Le dossier de sortie contient les captures et `diagnostics.json`, qui répertorie les
 avertissements QML et les assertions. Un échec de contrôle produit un code de sortie non nul.
 
-La recette couvre les sept pages en 1 320 × 820, 1 480 × 920, 1 800 × 1 000 et 2 524 × 1 000,
+La recette couvre les huit pages en 1 320 × 820, 1 480 × 920, 1 800 × 1 000 et 2 524 × 1 000,
 ainsi que la barre d’outils Offres en 1 559 et 1 560 px, de part et d’autre du
 changement de largeur de la navigation. Les colonnes sont contrôlées pour détecter les chevauchements, les désalignements et le recouvrement par la barre de défilement. Elle exerce aussi le tri, la sélection et le filtrage des offres,
 Échap, l’ordre de tabulation du formulaire, sa validation, le zoom, la navigation
 au clavier et la fermeture des notifications.
+
+La page Entreprises conserve les neuf champs du CSV importé dans la table SQLite
+`companies`. La colonne `checked` est enregistrée dès le clic et reste inchangée
+au redémarrage. Une nouvelle installation commence avec une liste vide ; les
+entreprises sont ajoutées manuellement ou importées explicitement. Les noms en doublon
+(casse et espaces) sont refusés. La recette vérifie aussi les filtres, les coches,
+la validation du popup, l’ajout manuel et sa fermeture avec Échap.
+
+La maintenance `make sync-companies` actualise les fiches non cochées depuis le
+CSV privé `data/company-targeting/companies.csv` avec
+sauvegarde, sans suppression et sans modifier les fiches checked.
+Le tri de l’application utilise la priorité puis l’ordre ; après ajout manuel,
+la vue se positionne sur la nouvelle fiche à son rang. Voir le
+[référentiel et les règles de synchronisation](company-targeting.md).
 
 ## Avant distribution
 

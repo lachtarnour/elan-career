@@ -34,7 +34,9 @@ def seed_visual_fixtures() -> None:
             status = (
                 JobStatus.READY_FOR_FORM_SUBMISSION
                 if index < 20
-                else JobStatus.ARCHIVED if index < 23 else JobStatus.SENT
+                else JobStatus.ARCHIVED
+                if index < 23
+                else JobStatus.SENT
             )
             session.add(
                 Job(
@@ -48,7 +50,8 @@ def seed_visual_fixtures() -> None:
                         "Offre fictive pour vérifier la présentation de l’interface. "
                         "Concevoir des pipelines Python et SQL, évaluer les modèles et "
                         "déployer des services fiables avec Docker et FastAPI. "
-                    ) * 8,
+                    )
+                    * 8,
                     application_url=f"https://example.com/jobs/{index}",
                     source="manual",
                     status=status,
@@ -60,6 +63,35 @@ def seed_visual_fixtures() -> None:
                         risks=["Vérifier les attentes en déploiement et en autonomie."],
                     ),
                     application=Application(status=status),
+                )
+            )
+
+
+def seed_company_visual_fixtures() -> None:
+    """Use synthetic companies when the isolated database has no prospecting list."""
+    from smartapply.database import Company, init_db, session_scope
+    from smartapply.database.repository.companies import PRIORITY_LABELS, company_name_key
+
+    init_db()
+    with session_scope() as session:
+        if session.query(Company).first() is not None:
+            return
+        for index in range(30):
+            name = f"Example Target {index + 1:02d}"
+            priority = 1 + index // 6
+            session.add(
+                Company(
+                    name=name,
+                    name_key=company_name_key(name),
+                    sort_order=index + 1,
+                    priority=priority,
+                    priority_label=PRIORITY_LABELS[priority],
+                    category="Données fictives",
+                    company_type="Entreprise de démonstration",
+                    english_level="Non évalué",
+                    selectivity="Non évaluée",
+                    ranking_reason="Exemple synthétique pour vérifier la présentation du tableau.",
+                    checked=False,
                 )
             )
 
@@ -118,6 +150,7 @@ def main() -> int:
 
     if not args.database:
         seed_visual_fixtures()
+    seed_company_visual_fixtures()
 
     messages = []
     qInstallMessageHandler(lambda kind, context, message: messages.append(message))
@@ -245,6 +278,7 @@ def main() -> int:
         "search",
         "duplicates",
         "jobs?status=ready_for_form_submission",
+        "companies",
         "manual",
         "profile",
         "settings",
@@ -256,6 +290,74 @@ def main() -> int:
             window.navigate(route)
             settle()
             capture(f"{route.split('?')[0]}-{width}")
+    # Exercise the company UI against the isolated SQLite database.
+    window.setWidth(1320)
+    window.setHeight(820)
+    window.navigate("companies")
+    settle()
+    check(bool(bridge.companies), "Companies loaded from the isolated database")
+    first_company = bridge.companies[0]
+    check_name = "companyCheck-" + str(first_company["id"])
+    click(check_name)
+    settle()
+    expected_checked = not first_company["checked"]
+    check(bridge.companies[0]["checked"] == expected_checked, "Company checkbox persisted")
+    bridge.loadCompanies()
+    settle()
+    check(
+        item(check_name).property("checked") == expected_checked, "Company checkbox survives reload"
+    )
+    item("companyCheckedFilter").setProperty("currentIndex", 2 if expected_checked else 1)
+    QTest.qWait(150)
+    check(item("companyList").property("count") > 0, "Company checked filter")
+    item("companyCheckedFilter").setProperty("currentIndex", 0)
+    item("companySearch").setProperty("text", "no-company-with-this-name")
+    QTest.qWait(150)
+    check(item("companyList").property("count") == 0, "Company search empty state")
+    item("companySearch").setProperty("text", "")
+    click("companyAddButton")
+    check(item("companyAddDialog").property("opened"), "Company add popup opens")
+    check(not item("companySaveButton").property("enabled"), "Empty company cannot be submitted")
+    capture("companies-add-dialog")
+    item("companyNameInput").setProperty("text", first_company["name"])
+    click("companySaveButton")
+    settle()
+    check(item("companyAddDialog").property("opened"), "Duplicate company keeps the popup open")
+    check(
+        bool(item("companyFormError").property("text")), "Duplicate company validation is visible"
+    )
+    item("companyNameInput").setProperty("text", "Entreprise de démonstration pour la recette")
+    item("companyPriorityInput").setProperty("currentIndex", 2)
+    count_before_add = len(bridge.companies)
+    click("companySaveButton")
+    settle()
+    check(
+        not item("companyAddDialog").property("opened"), "Successful company add closes the popup"
+    )
+    check(len(bridge.companies) == count_before_add + 1, "Company added from the popup")
+    added_company = next(
+        row
+        for row in bridge.companies
+        if row["name"] == "Entreprise de démonstration pour la recette"
+    )
+    check(added_company["priority"] == 2, "Manual company priority saved")
+    check(not added_company["checked"], "Manual company starts unchecked")
+    list_scroll_before = item("companyList").property("contentY")
+    click("companyCheck-" + str(added_company["id"]))
+    settle()
+    check(
+        next(row for row in bridge.companies if row["id"] == added_company["id"])["checked"],
+        "Manual company can be checked",
+    )
+    check(
+        abs(item("companyList").property("contentY") - list_scroll_before) < 4,
+        "Checking a company keeps the scroll position",
+    )
+    capture("companies-added")
+    click("companyAddButton")
+    QTest.keyClick(window, Qt.Key_Escape)
+    check(not item("companyAddDialog").property("opened"), "Company popup closes with Escape")
+
     # Keep the final page at the standard size for state captures.
     window.setWidth(1480)
     window.setHeight(920)
@@ -272,6 +374,31 @@ def main() -> int:
     window.navigate("jobs?status=archived")
     settle()
     capture("jobs-archived")
+    restore = item("offerRestoreAction")
+    check(restore.property("visible"), "Archived offer exposes restoration even with a dossier")
+    check(
+        restore.property("text") == "Désarchiver et créer",
+        "Restoration describes document creation",
+    )
+    bridge._busy = True
+    bridge.busyChanged.emit()
+    QTest.qWait(50)
+    check(not restore.property("enabled"), "Restoration is disabled during a running operation")
+    bridge._busy = False
+    bridge.busyChanged.emit()
+    restored_ids = []
+    real_rescue = bridge.service.rescue_job
+
+    def mock_rescue(job_id, *, progress=None):
+        restored_ids.append(job_id)
+        return {"requested": 1, "skipped": 1}
+
+    bridge.service.rescue_job = mock_rescue
+    archived_id = int(bridge.currentJob["id"])
+    click("offerRestoreAction")
+    settle()
+    bridge.service.rescue_job = real_rescue
+    check(restored_ids == [archived_id], "Restoration button dispatches the selected offer")
     page_position = item("jobsPage").mapToScene(QPointF(0, 0))
     bridge.toastRequested.emit("Modification enregistrée", "Votre espace est à jour.", "success")
     QTest.qWait(300)
@@ -324,7 +451,9 @@ def main() -> int:
     click("offerSearchToggle")
     check(item("expandableSearch").property("expanded"), "Search button expands")
     if len(bridge.jobs) < 2:
-        raise RuntimeError("Visual checks need at least two ready offers; omit --database to use fixtures.")
+        raise RuntimeError(
+            "Visual checks need at least two ready offers; omit --database to use fixtures."
+        )
     search_company = bridge.jobs[0]["company"]
     type_text(search_company)
     settle()

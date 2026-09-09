@@ -310,7 +310,19 @@ def test_mark_job_sent_without_application_is_rejected(isolated_db) -> None:
         assert job is not None and job.status != JobStatus.SENT
 
 
-def test_rescue_jobs_only_reinjects_archived_selection(isolated_db) -> None:
+@pytest.fixture
+def restoration_llm():
+    from smartapply.llm import MockLLMProvider
+    from tests.test_pipeline import _register_llm_responses
+
+    _register_llm_responses()
+    yield
+    MockLLMProvider.clear()
+
+
+def test_rescue_jobs_prepares_documents_for_archived_selection(
+    isolated_db, restoration_llm
+) -> None:
     archived_id = _job(external_id="manual:archived")
     active_id = _job(external_id="manual:active")
     with session_scope() as session:
@@ -318,13 +330,204 @@ def test_rescue_jobs_only_reinjects_archived_selection(isolated_db) -> None:
 
     report = DesktopService().rescue_jobs([archived_id, archived_id, active_id, 999_999])
 
-    assert report == {"requested": 3, "rescued": 1, "skipped": 2}
+    assert report["requested"] == 3
+    assert report["rescued"] == report["generated"] == 1
+    assert report["skipped"] == 2
+    assert report["failed"] == 0
     with session_scope() as session:
         rescued = session.get(Job, archived_id)
         assert rescued is not None
-        assert rescued.status == JobStatus.FILTERED
+        assert rescued.status in (JobStatus.READY_FOR_FORM_SUBMISSION, JobStatus.QUALITY_REJECTED)
         assert rescued.shortlisted_at is None
         assert rescued.archived_at is None
+        assert rescued.analyzed_at is not None
+        assert rescued.score.components["manual_rescue"] is True
+        assert rescued.application.id in report["application_ids"]
+        assert rescued.application.cv_pdf_path
+        assert {doc.doc_type for doc in rescued.application.documents} >= {
+            "cv_json",
+            "motivation_letter",
+            "motivation_letter_pdf",
+        }
+
+
+@pytest.mark.parametrize("legacy_application_only", [False, True])
+def test_rescue_regenerates_archived_dossier(
+    isolated_db, restoration_llm, legacy_application_only
+) -> None:
+    job_id = _job(external_id="manual:restore-dossier")
+    service = DesktopService()
+    service.analyze_job(job_id)
+    original = service.generate_application(job_id)
+    with session_scope() as session:
+        old_analysis_time = session.get(Job, job_id).analyzed_at
+        if legacy_application_only:
+            session.get(Application, original["application_id"]).status = JobStatus.ARCHIVED
+    if not legacy_application_only:
+        service.archive_application(original["application_id"])
+
+    report = service.rescue_job(job_id)
+
+    assert report["generated"] == 1
+    assert report["failed"] == 0
+    assert report["application_ids"] == [original["application_id"]]
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        assert job.archived_at is None
+        assert job.analyzed_at > old_analysis_time
+        assert job.application.status != JobStatus.ARCHIVED
+        assert len(session.query(Application).all()) == 1
+
+
+def test_rescue_duplicate_resumes_stale_canonical_dossier(isolated_db, restoration_llm) -> None:
+    root_id = _job(external_id="manual:restore-root")
+    alias_id = _job(external_id="manual:restore-alias")
+    with session_scope() as session:
+        alias = session.get(Job, alias_id)
+        alias.canonical_job_id = root_id
+        alias.duplicate_review_status = "confirmed"
+        mark_archived(session, alias_id)
+        app = create_or_get_application(session, root_id)
+        app.updated_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        application_id = app.id
+
+    detail = DesktopService().get_job(alias_id)
+    assert detail.archive_reasons == (
+        f"Doublon de l’offre « Machine Learning Engineer — Acme (n° {root_id}) »",
+    )
+    report = DesktopService().rescue_job(alias_id)
+
+    assert report["generated"] == 1
+    assert report["failed"] == 0
+    assert report["job_ids"] == [root_id]
+    assert report["application_ids"] == [application_id]
+    with session_scope() as session:
+        assert session.get(Job, alias_id).canonical_job_id == root_id
+        assert session.get(Job, alias_id).archived_at is not None
+        assert session.get(Job, root_id).analyzed_at is not None
+        assert session.get(Application, application_id).cv_json
+        assert session.query(Application).count() == 1
+
+
+def test_rescue_recovers_archived_dossier_owned_by_an_alias(isolated_db, restoration_llm) -> None:
+    owner_id = _job(external_id="manual:alias-owner")
+    root_id = _job(external_id="manual:canonical-without-dossier")
+    service = DesktopService()
+    service.analyze_job(owner_id)
+    original = service.generate_application(owner_id)
+    service.archive_application(original["application_id"])
+    with session_scope() as session:
+        owner = session.get(Job, owner_id)
+        owner.canonical_job_id = root_id
+        owner.duplicate_review_status = "confirmed"
+
+    report = service.rescue_job(owner_id)
+
+    assert report["generated"] == 1
+    assert report["failed"] == 0
+    assert report["application_ids"] == [original["application_id"]]
+    with session_scope() as session:
+        assert session.get(Job, owner_id).canonical_job_id is None
+        assert session.get(Job, owner_id).archived_at is None
+        assert session.get(Job, root_id).canonical_job_id == owner_id
+        assert session.query(Application).count() == 1
+
+
+def test_rescue_keeps_existing_active_dossier_and_deduplicates_selection(
+    isolated_db, restoration_llm
+) -> None:
+    root_id = _job(external_id="manual:existing-root")
+    service = DesktopService()
+    service.analyze_job(root_id)
+    original = service.generate_application(root_id)
+    aliases = [_job(external_id=f"manual:existing-alias-{index}") for index in range(2)]
+    with session_scope() as session:
+        for alias_id in aliases:
+            alias = session.get(Job, alias_id)
+            alias.canonical_job_id = root_id
+            alias.duplicate_review_status = "confirmed"
+            mark_archived(session, alias_id)
+
+    report = service.rescue_jobs(aliases)
+
+    assert report["existing"] == report["skipped"] == 1
+    assert report["generated"] == report["failed"] == 0
+    assert report["application_ids"] == [original["application_id"]]
+
+
+def test_rescue_does_not_interrupt_active_generation(isolated_db) -> None:
+    job_id = _job(external_id="manual:restore-reserved")
+    with session_scope() as session:
+        mark_archived(session, job_id)
+        create_or_get_application(session, job_id)
+
+    report = DesktopService().rescue_job(job_id)
+
+    assert report["failed"] == 1
+    assert report["generated"] == report["rescued"] == 0
+    assert "déjà en cours" in report["errors"][0]["message"]
+    with session_scope() as session:
+        assert session.get(Job, job_id).archived_at is not None
+
+
+def test_rescue_reports_analysis_failure_and_continues_batch(
+    isolated_db, restoration_llm, monkeypatch
+) -> None:
+    first_id = _job(external_id="manual:restore-fails")
+    second_id = _job(external_id="manual:restore-succeeds")
+    with session_scope() as session:
+        for job_id in (first_id, second_id):
+            mark_archived(session, job_id)
+    from smartapply.pipeline import Pipeline
+
+    analyze = Pipeline.analyze_jobs
+
+    def fail_first(self, ids):
+        if ids == [first_id]:
+            return SimpleNamespace(
+                analyzed=0, already_analyzed=0, errors=[{"message": "API indisponible"}]
+            )
+        return analyze(self, ids)
+
+    monkeypatch.setattr(Pipeline, "analyze_jobs", fail_first)
+    report = DesktopService().rescue_jobs([first_id, second_id])
+
+    assert report["generated"] == report["failed"] == 1
+    assert "API indisponible" in report["errors"][0]["message"]
+    with session_scope() as session:
+        failed = session.get(Job, first_id)
+        assert failed.archived_at is None
+        assert failed.application is None
+        assert failed.analyzed_at is None
+
+
+def test_bridge_runs_single_rescue_in_background_and_opens_result() -> None:
+    bridge = DesktopBridge.__new__(DesktopBridge)
+    QObject.__init__(bridge)
+    bridge.service = SimpleNamespace(rescue_job=lambda job_id: None)
+    calls = []
+    bridge._run = lambda *args, **kwargs: calls.append((args, kwargs))
+    bridge.rescueJob(42)
+    args, kwargs = calls[0]
+    assert args[1:] == (bridge.service.rescue_job, 42)
+    assert kwargs["on_success"] == bridge._bulk_rescue_done
+    bridge._refresh_workflow = lambda: None
+    bridge._set_activity = lambda *args: None
+    opened = []
+    bridge.openApplication = opened.append
+    toasts = []
+    bridge.toastRequested.connect(lambda *args: toasts.append(args))
+    bridge._bulk_rescue_done(
+        {
+            "requested": 1,
+            "generated": 1,
+            "application_ids": [123],
+            "warnings": [{"job_id": 42, "message": "PDF indisponible"}],
+        }
+    )
+    assert opened == [123]
+    assert toasts[0][2] == "warning"
+    assert "PDF indisponible" in toasts[0][1]
 
 
 def test_manual_top_selection_persists_across_service_instances(isolated_db) -> None:

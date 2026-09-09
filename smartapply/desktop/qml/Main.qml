@@ -33,6 +33,7 @@ ApplicationWindow {
     property bool searchLoaded: false
     property bool duplicatesLoaded: false
     property bool jobsLoaded: false
+    property bool companiesLoaded: false
     property bool manualLoaded: false
     property bool profileLoaded: false
     property bool settingsLoaded: false
@@ -44,13 +45,14 @@ ApplicationWindow {
         {title: "Recherche", icon: Theme.icon("search"), route: "search"},
         {title: "Doublons", icon: Theme.icon("files"), route: "duplicates"},
         {title: "Offres", icon: Theme.icon("briefcase"), route: "jobs"},
+        {title: "Entreprises", icon: Theme.icon("database"), route: "companies"},
         {title: "Ajouter une offre", icon: Theme.icon("plus"), route: "manual"},
         {title: "Profil", icon: Theme.icon("user"), route: "profile"},
         {title: "Réglages", icon: Theme.icon("settings"), route: "settings"}
     ]
 
     function routeIndex(route) {
-        var routes = ["dashboard", "search", "duplicates", "jobs", "manual", "profile", "settings"]
+        var routes = ["dashboard", "search", "duplicates", "jobs", "companies", "manual", "profile", "settings"]
         var value = routes.indexOf(routePage(route))
         return value < 0 ? 0 : value
     }
@@ -70,6 +72,7 @@ ApplicationWindow {
     function refreshRoute(route) {
         var page = routePage(route)
         if (page === "dashboard") AppBridge.refreshDashboard()
+        if (page === "companies") AppBridge.loadCompanies()
         if (page === "duplicates") AppBridge.loadJobs("", "duplicate_review", "duplicate_confidence", false)
         if (page === "jobs") {
             var status = routeStatus(route) || jobsFilterStatus
@@ -85,6 +88,7 @@ ApplicationWindow {
         else if (page === "search") searchLoaded = true
         else if (page === "duplicates") duplicatesLoaded = true
         else if (page === "jobs") jobsLoaded = true
+        else if (page === "companies") companiesLoaded = true
         else if (page === "manual") manualLoaded = true
         else if (page === "profile") profileLoaded = true
         else if (page === "settings") settingsLoaded = true
@@ -154,6 +158,7 @@ ApplicationWindow {
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Recherche"; compactText: "Recherche"; iconSource: Theme.icon("search"); selected: window.currentRoute === "search"; onClicked: window.navigate("search") }
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Doublons"; compactText: "Doublons"; iconSource: Theme.icon("files"); selected: window.currentRoute === "duplicates"; onClicked: window.navigate("duplicates") }
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Offres"; compactText: "Offres"; iconSource: Theme.icon("briefcase"); selected: window.currentRoute === "jobs"; onClicked: window.navigate("jobs") }
+                RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Entreprises"; compactText: "Sociétés"; iconSource: Theme.icon("database"); selected: window.currentRoute === "companies"; onClicked: window.navigate("companies") }
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Ajouter une offre"; compactText: "Ajouter"; iconSource: Theme.icon("plus"); selected: window.currentRoute === "manual"; onClicked: window.navigate("manual") }
 
                 Item { Layout.fillHeight: true }
@@ -258,6 +263,11 @@ ApplicationWindow {
                                 onNavigateRequested: function(route) { window.navigate(route) }
                             }
                         }
+                    }
+                    Loader {
+                        active: window.companiesLoaded
+                        asynchronous: true
+                        sourceComponent: Component { CompaniesPage { } }
                     }
                     Loader {
                         active: window.manualLoaded

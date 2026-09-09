@@ -4,6 +4,9 @@ PY ?= python3
 VENV = .venv
 BIN = $(VENV)/bin
 DIRECTION ?= to-app
+COMPANIES_CSV ?= $(CURDIR)/data/company-targeting/companies.csv
+
+.PHONY: sync-companies check-companies-sync
 
 help:
 	@echo "Élan — commandes disponibles"
@@ -15,6 +18,8 @@ help:
 	@echo "  make refresh-embeddings  Pre-calcule les embeddings du profil et des projets"
 	@echo "  make check-profile-sync Compare le profil du depot avec celui d'Elan"
 	@echo "  make sync-profile     Copie le profil vers Elan avec sauvegarde (DIRECTION=from-app pour l'inverse)"
+	@echo "  make check-companies-sync Aperçu CSV vers base Élan, sans écriture"
+	@echo "  make sync-companies   Synchronise le CSV de référence vers Élan, préserve les fiches checked"
 	@echo "  make check            Verifie le code et lance les tests rapides"
 	@echo "  make test             Lance les tests"
 	@echo "  make test-fast        Tests rapides (skip integration)"
@@ -46,6 +51,12 @@ check-profile-sync:
 
 sync-profile:
 	$(BIN)/elan sync-profile --project-profile "$(CURDIR)/smartapply/profile/data" --direction "$(DIRECTION)"
+
+check-companies-sync:
+	$(BIN)/elan sync-companies --csv "$(COMPANIES_CSV)" --dry-run
+
+sync-companies:
+	$(BIN)/elan sync-companies --csv "$(COMPANIES_CSV)"
 
 check: lint test-fast
 

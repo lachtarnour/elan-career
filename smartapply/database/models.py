@@ -65,6 +65,29 @@ class AppSetting(Base):
     )
 
 
+class Company(Base):
+    """Prospecting companies, independently of scraped offers and applications."""
+
+    __tablename__ = "companies"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    name_key: Mapped[str] = mapped_column(String(255), unique=True)
+    sort_order: Mapped[int] = mapped_column(Integer)
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    priority_label: Mapped[str] = mapped_column(String(255), default="")
+    category: Mapped[str] = mapped_column(String(255), default="")
+    company_type: Mapped[str] = mapped_column(String(255), default="")
+    english_level: Mapped[str] = mapped_column(String(255), default="")
+    selectivity: Mapped[str] = mapped_column(String(255), default="")
+    ranking_reason: Mapped[str] = mapped_column(Text, default="")
+    checked: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
 class Job(Base):
     __tablename__ = "jobs"
     __table_args__ = (Index("ix_jobs_status_scraped_at", "status", "scraped_at"),)
