@@ -3,7 +3,7 @@
 These tests pin the behaviour the V1 contract is meant to guarantee:
 - No FAISS / Markov / RL skills on roles that don't ask for them.
 - Data Scientist roles keep a minimal ML/IA baseline.
-- Data Scientist offers with AI/NLP signals get NLP + Transformers + HF.
+- Data Scientist offers with AI/NLP signals get NLP + Transformers.
 - Analytics / Software offers strip Flask/FastAPI/NLP unless explicit.
 - LLM offers anchor RAG + FAISS + Vector search.
 - Explicit ``required_skills`` lifts the forbidden lock for that term.
@@ -133,6 +133,13 @@ def test_cv_title_classifier_uses_only_broad_professional_family():
     assert classify_title("Kubernetes Specialist") == "other"
 
 
+def test_langgraph_offer_is_recognized_as_llm_without_overriding_explicit_role():
+    analysis = _analysis(role_type="AI Engineer", required=["LangGraph"])
+    assert classify(analysis, title="AI Engineer") == "llm_engineer"
+    assert classify(analysis, title="LangGraph Developer") == "llm_engineer"
+    assert classify(analysis, title="Data Scientist") == "data_scientist"
+
+
 def test_specialist_offer_accepts_stable_ml_engineer_title():
     assert cv_title_family_is_compatible("llm_engineer", "ml_engineer")
     assert cv_title_family_is_compatible("computer_vision", "ml_engineer")
@@ -148,7 +155,7 @@ def test_ambiguous_title_family_does_not_create_false_warning():
 
 
 def test_data_scientist_anchors_ml_baseline():
-    """A DS offer that mentions no AI keyword still keeps PyTorch + Scikit-learn."""
+    """A DS offer that mentions no AI keyword still keeps PyTorch + scikit-learn."""
     cv = _cv({"data_analysis": ["Python", "SQL"]})
     analysis = _analysis(
         role_type="Data Scientist",
@@ -158,7 +165,7 @@ def test_data_scientist_anchors_ml_baseline():
     assert family == "data_scientist"
     selected = _selected_map(adapted)
     assert "PyTorch" in selected["ml_ai"]
-    assert "Scikit-learn" in selected["ml_ai"]
+    assert "scikit-learn" in selected["ml_ai"]
     assert "Python" in selected["data_analysis"]
     assert "NLP" not in selected.get("ml_ai", [])
 
@@ -178,3 +185,14 @@ def test_explicit_required_skill_lifts_forbidden_lock():
     adapted, _family = _apply(cv, analysis, "Analytics Engineer")
     selected = _selected_map(adapted)
     assert "NLP" in selected.get("ml_ai", [])
+
+
+def test_global_baseline_places_sql_in_its_catalogue_category():
+    adapted, _ = _apply(
+        _cv({}),
+        _analysis(role_type="Reinforcement Learning Engineer"),
+        "Reinforcement Learning Engineer",
+    )
+    selected = _selected_map(adapted)
+    assert "SQL" in selected["data_analysis"]
+    assert "SQL" not in selected.get("data_infra", [])

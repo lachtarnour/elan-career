@@ -9,7 +9,7 @@ The contract is a deterministic post-filter that:
    unless one of their skills survived as offer-anchored (i.e. it appeared in
    ``required_skills`` or ``cv_keywords_to_include``).
 3. Adds the ``must_show`` skills that are missing, anchoring a coherent
-   baseline for the role (e.g. PyTorch + Scikit-learn for a Data Scientist).
+   baseline for the role (e.g. PyTorch + scikit-learn for a Data Scientist).
 4. Fills a minimum number of skills from contract-approved fallback skills.
 5. Reorders ``selected_skills`` and ``skills_order`` with the role contract's
    ``category_order``. If a contract omits it, the order falls back to
@@ -23,36 +23,17 @@ ignored, so the contract can never reintroduce an unsupported claim.
 from __future__ import annotations
 
 import json
-import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from smartapply.cv.role_family import KNOWN_ROLE_FAMILIES, classify, has_data_scientist_ia_signal
 from smartapply.llm import AdaptedCV, JobAnalysis, SkillSelectionBlock
-from smartapply.utils.skill_terms import normalize_skill_term
+from smartapply.utils.skill_terms import skill_term_matches
 
 _CONTRACTS_PATH = Path(__file__).with_name("role_contracts.json")
 
-_DS_IA_EXTRA_SKILLS: tuple[str, ...] = ("NLP", "Transformers", "Hugging Face")
-
-_GENERIC_OFFER_ANCHOR_TERMS: set[str] = {
-    "test",
-    "tests",
-    "validation",
-    "validate",
-    "validated",
-    "integration",
-    "intégration",
-    "deployment",
-    "déploiement",
-    "model",
-    "models",
-    "modèle",
-    "modèles",
-    "solution",
-    "solutions",
-}
+_DS_IA_EXTRA_SKILLS: tuple[str, ...] = ("NLP", "Transformers")
 
 _PROJECT_SIGNAL_TERMS: dict[str, tuple[str, ...]] = {
     "proj_svc": ("speech", "vocoder", "hubert", "rmvpe", "hifi-gan"),
@@ -80,31 +61,8 @@ def _normalize(term: str) -> str:
 
 
 def _is_explicit_offer_skill(term: str, offer_terms: set[str]) -> bool:
-    """True if ``term`` matches an explicit offer term (exact or substring).
-
-    Mirrors the loose matching used by ``_ensure_supported_offer_skills`` so
-    the two post-filters agree on what counts as "the offer asked for it".
-    """
-    norm = normalize_skill_term(term)
-    offer_terms = {normalize_skill_term(other) for other in offer_terms}
-    if not norm:
-        return False
-    if norm in offer_terms:
-        return True
-    if len(norm) <= 2:
-        return False
-    for other in offer_terms:
-        if not other:
-            continue
-        if other in _GENERIC_OFFER_ANCHOR_TERMS:
-            continue
-        if len(other) <= 2:
-            continue
-        if norm == other or norm in other or other in norm:
-            return True
-        if re.search(rf"(?<![a-z0-9]){re.escape(norm)}(?![a-z0-9])", other):
-            return True
-    return False
+    """Use the same name matching as CV selection and prompt validation."""
+    return any(skill_term_matches(offer_term, term) for offer_term in offer_terms)
 
 
 def _augmented_must_show(

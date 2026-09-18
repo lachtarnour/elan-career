@@ -5,10 +5,12 @@
       "ml_ai": [
         "PyTorch",
         "TensorFlow",
-        "Scikit-learn"
+        "scikit-learn"
+      ],
+      "data_analysis": [
+        "SQL"
       ],
       "data_infra": [
-        "SQL",
         "Docker",
         "Git",
         "AWS"
@@ -32,13 +34,13 @@
     "must_show": {
       "ml_ai": [
         "PyTorch",
-        "Scikit-learn"
+        "scikit-learn"
       ],
       "data_analysis": [
         "Python",
         "SQL",
         "R",
-        "Pandas",
+        "pandas",
         "NumPy"
       ]
     },
@@ -46,7 +48,7 @@
     "fill_skills": {
       "ml_ai": [
         "PyTorch",
-        "Scikit-learn",
+        "scikit-learn",
         "Time-series modeling",
         "Anomaly detection"
       ],
@@ -54,7 +56,7 @@
         "Python",
         "SQL",
         "R",
-        "Pandas",
+        "pandas",
         "NumPy",
         "Statistical analysis",
         "Forecasting"
@@ -69,9 +71,9 @@
       "FAISS",
       "Vector search",
       "Markov chains",
-      "Whisper",
+      "Speech-to-text",
       "Pyannote",
-      "OpenSMILE"
+      "openSMILE"
     ]
   },
   "ml_engineer": {
@@ -89,7 +91,7 @@
     "must_show": {
       "ml_ai": [
         "PyTorch",
-        "Scikit-learn"
+        "scikit-learn"
       ],
       "data_infra": [
         "FastAPI",
@@ -102,7 +104,7 @@
     "fill_skills": {
       "ml_ai": [
         "PyTorch",
-        "Scikit-learn",
+        "scikit-learn",
         "TensorFlow",
         "NLP",
         "Fine-tuning"
@@ -110,7 +112,7 @@
       "data_analysis": [
         "Python",
         "SQL",
-        "Pandas",
+        "pandas",
         "NumPy"
       ],
       "data_infra": [
@@ -126,9 +128,9 @@
       "FAISS",
       "Vector search",
       "Markov chains",
-      "Whisper",
+      "Speech-to-text",
       "Pyannote",
-      "OpenSMILE"
+      "openSMILE"
     ]
   },
   "llm_engineer": {
@@ -148,8 +150,7 @@
     "must_show": {
       "ml_ai": [
         "NLP",
-        "Transformers",
-        "Hugging Face"
+        "Transformers"
       ],
       "generative_agentic_ai": [
         "LangChain",
@@ -166,10 +167,9 @@
       "ml_ai": [
         "NLP",
         "Transformers",
-        "Hugging Face",
         "Fine-tuning",
         "PyTorch",
-        "Scikit-learn"
+        "scikit-learn"
       ],
       "generative_agentic_ai": [
         "LangChain",
@@ -180,7 +180,7 @@
       "data_analysis": [
         "Python",
         "SQL",
-        "Pandas",
+        "pandas",
         "NumPy"
       ],
       "data_infra": [
@@ -193,9 +193,9 @@
     "forbidden": [
       "Markov chains",
       "ARIMA/SARIMA",
-      "Whisper",
+      "Speech-to-text",
       "Pyannote",
-      "OpenSMILE"
+      "openSMILE"
     ]
   },
   "data_analyst": {
@@ -213,7 +213,7 @@
         "SQL",
         "Python",
         "R",
-        "Pandas"
+        "pandas"
       ]
     },
     "min_total_skills": 10,
@@ -222,15 +222,11 @@
         "SQL",
         "Python",
         "R",
-        "Pandas",
+        "pandas",
         "NumPy",
         "Statistical analysis",
-        "Statistical modeling",
         "Forecasting",
         "Streamlit"
-      ],
-      "stats_signal": [
-        "Time-series analysis"
       ]
     },
     "forbidden": [
@@ -239,20 +235,19 @@
       "Vector search",
       "NLP",
       "Transformers",
-      "Hugging Face",
       "Markov chains",
       "Docker",
       "Git",
-      "Whisper",
+      "Speech-to-text",
       "Pyannote",
-      "OpenSMILE",
+      "openSMILE",
       "FastAPI",
       "Flask",
       "CI/CD",
       "AWS",
       "Spark",
       "ARIMA/SARIMA",
-      "Model quantization (ONNX)",
+      "Model quantization",
       "Grafana"
     ]
   },
@@ -271,13 +266,13 @@
     "must_show": {
       "ml_ai": [
         "PyTorch",
-        "Scikit-learn"
+        "scikit-learn"
       ],
       "data_analysis": [
         "SQL",
         "Python",
         "R",
-        "Pandas"
+        "pandas"
       ],
       "data_infra": [
         "Git",
@@ -288,13 +283,13 @@
     "fill_skills": {
       "ml_ai": [
         "PyTorch",
-        "Scikit-learn"
+        "scikit-learn"
       ],
       "data_analysis": [
         "SQL",
         "Python",
         "R",
-        "Pandas",
+        "pandas",
         "NumPy",
         "Statistical analysis"
       ],
@@ -310,13 +305,12 @@
       "Vector search",
       "NLP",
       "Transformers",
-      "Hugging Face",
       "Markov chains",
       "Anomaly detection",
       "Time-series modeling",
       "FastAPI",
       "Flask",
-      "Model quantization (ONNX)",
+      "Model quantization",
       "Grafana"
     ]
   },
@@ -347,7 +341,7 @@
       "data_analysis": [
         "Python",
         "SQL",
-        "Pandas",
+        "pandas",
         "NumPy"
       ],
       "data_infra": [
@@ -360,21 +354,20 @@
     "forbidden": [
       "PyTorch",
       "TensorFlow",
-      "Scikit-learn",
+      "scikit-learn",
       "NLP",
       "Transformers",
-      "Hugging Face",
       "Fine-tuning",
       "FAISS",
       "RAG",
       "Vector search",
       "Markov chains",
-      "Whisper",
+      "Speech-to-text",
       "Pyannote",
-      "OpenSMILE",
+      "openSMILE",
       "FastAPI",
       "Flask",
-      "Model quantization (ONNX)"
+      "Model quantization"
     ]
   },
   "mlops": {
@@ -415,12 +408,12 @@
       "data_analysis": [
         "Python",
         "SQL",
-        "Pandas",
+        "pandas",
         "NumPy"
       ],
       "ml_ai": [
         "PyTorch",
-        "Scikit-learn"
+        "scikit-learn"
       ]
     },
     "forbidden": [
@@ -428,9 +421,9 @@
       "RAG",
       "Vector search",
       "Markov chains",
-      "Whisper",
+      "Speech-to-text",
       "Pyannote",
-      "OpenSMILE"
+      "openSMILE"
     ]
   },
   "software_engineer": {
@@ -458,7 +451,7 @@
       "data_analysis": [
         "Python",
         "SQL",
-        "Pandas",
+        "pandas",
         "NumPy"
       ],
       "data_infra": [
@@ -473,15 +466,14 @@
       "Vector search",
       "NLP",
       "Transformers",
-      "Hugging Face",
       "Markov chains",
       "ARIMA/SARIMA",
-      "Whisper",
+      "Speech-to-text",
       "Pyannote",
-      "OpenSMILE",
+      "openSMILE",
       "FastAPI",
       "Flask",
-      "Model quantization (ONNX)",
+      "Model quantization",
       "Grafana"
     ]
   },
@@ -518,14 +510,13 @@
         "CNNs",
         "OpenCV",
         "Image processing",
-        "Classification",
         "Segmentation",
         "Object detection"
       ],
       "ml_ai": [
         "PyTorch",
         "TensorFlow",
-        "Scikit-learn",
+        "scikit-learn",
         "Fine-tuning"
       ],
       "data_analysis": [
@@ -543,9 +534,9 @@
       "RAG",
       "Vector search",
       "Markov chains",
-      "Whisper",
+      "Speech-to-text",
       "Pyannote",
-      "OpenSMILE"
+      "openSMILE"
     ]
   },
   "speech_audio": {
@@ -565,8 +556,7 @@
     "must_show": {
       "speech_audio": [
         "Speech processing",
-        "Audio processing",
-        "Whisper"
+        "Speech-to-text"
       ],
       "ml_ai": [
         "PyTorch"
@@ -579,16 +569,14 @@
     "fill_skills": {
       "speech_audio": [
         "Speech processing",
-        "Audio processing",
-        "Whisper",
-        "Pyannote",
         "Speech-to-text",
+        "Pyannote",
         "Speaker diarization"
       ],
       "ml_ai": [
         "PyTorch",
         "TensorFlow",
-        "Scikit-learn",
+        "scikit-learn",
         "NLP"
       ],
       "data_analysis": [
@@ -599,7 +587,7 @@
         "Git",
         "Docker",
         "FastAPI",
-        "Model quantization (ONNX)"
+        "Model quantization"
       ]
     },
     "forbidden": [
@@ -630,7 +618,7 @@
     "must_show": {
       "ml_ai": [
         "PyTorch",
-        "Scikit-learn"
+        "scikit-learn"
       ],
       "data_analysis": [
         "Python",
@@ -642,25 +630,25 @@
     "fill_skills": {
       "ml_ai": [
         "PyTorch",
-        "Scikit-learn",
+        "scikit-learn",
         "NLP",
         "Time-series modeling",
         "Anomaly detection"
       ],
       "speech_audio": [
         "Speech processing",
-        "Whisper",
+        "Speech-to-text",
         "Pyannote"
       ],
       "computer_vision": [
-        "Facial analysis",
+        "Facial affect estimation",
         "Image processing"
       ],
       "data_analysis": [
         "Python",
         "SQL",
         "R",
-        "Pandas",
+        "pandas",
         "NumPy",
         "Statistical analysis"
       ],
@@ -690,12 +678,12 @@
     ],
     "must_show": {
       "rl": [
-        "Q-Learning",
-        "Monte Carlo Tree Search (MCTS)"
+        "Q-learning",
+        "MCTS"
       ],
       "ml_ai": [
         "PyTorch",
-        "Scikit-learn"
+        "scikit-learn"
       ],
       "data_analysis": [
         "Python",
@@ -705,31 +693,30 @@
     "min_total_skills": 9,
     "fill_skills": {
       "rl": [
-        "Q-Learning",
-        "Monte Carlo Tree Search (MCTS)"
+        "Q-learning",
+        "MCTS"
       ],
       "ml_ai": [
         "PyTorch",
-        "Scikit-learn"
+        "scikit-learn"
       ],
       "data_analysis": [
         "Python",
         "NumPy",
-        "Pandas"
+        "pandas"
       ],
       "stats_signal": [
         "Monte Carlo methods",
-        "Markov chains",
-        "Optimization"
+        "Markov chains"
       ]
     },
     "forbidden": [
       "FAISS",
       "RAG",
       "Vector search",
-      "Whisper",
+      "Speech-to-text",
       "Pyannote",
-      "OpenSMILE"
+      "openSMILE"
     ]
   },
   "other": {
@@ -747,12 +734,12 @@
     "must_show": {
       "ml_ai": [
         "PyTorch",
-        "Scikit-learn"
+        "scikit-learn"
       ],
       "data_analysis": [
         "Python",
         "SQL",
-        "Pandas",
+        "pandas",
         "NumPy"
       ],
       "data_infra": [
@@ -765,14 +752,14 @@
     "fill_skills": {
       "ml_ai": [
         "PyTorch",
-        "Scikit-learn",
+        "scikit-learn",
         "TensorFlow",
         "NLP"
       ],
       "data_analysis": [
         "Python",
         "SQL",
-        "Pandas",
+        "pandas",
         "NumPy",
         "Statistical analysis"
       ],
@@ -788,32 +775,27 @@
       "Time-series modeling",
       "Anomaly detection",
       "Fine-tuning",
-      "Hugging Face",
       "FAISS",
       "RAG",
       "Vector search",
       "CNNs",
       "OpenCV",
       "Image processing",
-      "Classification",
       "Segmentation",
       "Object detection",
-      "Facial analysis",
+      "Facial affect estimation",
       "Speech processing",
-      "Audio processing",
-      "Whisper",
-      "Speaker diarization",
       "Speech-to-text",
-      "OpenSMILE",
+      "Speaker diarization",
+      "openSMILE",
       "Pyannote",
       "Markov chains",
       "ARIMA/SARIMA",
       "Forecasting",
-      "Time-series analysis",
       "FastAPI",
       "Flask",
       "Spark",
-      "Model quantization (ONNX)",
+      "Model quantization",
       "Grafana",
       "Weights & Biases"
     ]

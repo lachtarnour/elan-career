@@ -6,18 +6,19 @@ Verifies anti-hallucination, persistence, and artifact files.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from smartapply.llm import (
-    AdaptedBullet,
-    AdaptedCV,
-    AdaptedExperience,
-    ApplicationDraft,
+    CVPersonalization,
+    DocumentTextReview,
     JobAnalysis,
     MockLLMProvider,
+    MotivationLetter,
 )
+from smartapply.profile import get_profile
 from smartapply.ranking import MockEmbeddingsProvider
 
 
@@ -144,53 +145,13 @@ def _register_llm_fixtures() -> None:
     )
     MockLLMProvider.register(
         "cv_adaptation",
-        AdaptedCV(
+        CVPersonalization(
             cv_title="Data Scientist – NLP & Multimodal AI",
             professional_summary=(
                 "Data Scientist with 2 years in NLP and machine learning. "
                 "Built RAG and speech pipelines and evaluated multimodal "
                 "classifiers with 0.82 accuracy on synthetic test samples."
             ),
-            selected_experiences=[
-                AdaptedExperience(
-                    source_id="exp_aurore_ds_2024",
-                    bullets=[
-                        AdaptedBullet(
-                            source_id="blt_aurore_ds_multimodal",
-                            text=(
-                                "Built a multimodal classifier for synthetic image and text "
-                                "samples, reaching 0.82 accuracy on a labeled test set."
-                            ),
-                        ),
-                        AdaptedBullet(
-                            source_id="blt_aurore_ds_speech",
-                            text=(
-                                "Developed speech transcription and document-tagging "
-                                "pipelines using Whisper, PyTorch and Flask APIs."
-                            ),
-                        ),
-                        AdaptedBullet(
-                            source_id="blt_aurore_ds_documentation",
-                            text=(
-                                "Documented model evaluation protocols and reproducible "
-                                "experiments on synthetic datasets."
-                            ),
-                        ),
-                    ],
-                ),
-                AdaptedExperience(
-                    source_id="exp_aurore_intern_2023",
-                    bullets=[
-                        AdaptedBullet(
-                            source_id="blt_aurore_intern_anomaly",
-                            text=(
-                                "Built an anomaly detection pipeline for identifying missing "
-                                "and corrupted samples in synthetic sensor data."
-                            ),
-                        ),
-                    ],
-                ),
-            ],
             selected_project_ids=[
                 "proj_evidence_rag",
                 "proj_ner_camembert",
@@ -201,63 +162,10 @@ def _register_llm_fixtures() -> None:
         ),
     )
     MockLLMProvider.register(
-        "application_draft",
-        ApplicationDraft(
-            cv_title="Data Scientist – NLP & Multimodal AI",
-            professional_summary=(
-                "Data Scientist with 2 years in NLP and machine learning. "
-                "Built RAG and speech pipelines and evaluated multimodal "
-                "classifiers with 0.82 accuracy on synthetic test samples."
-            ),
-            selected_experiences=[
-                AdaptedExperience(
-                    source_id="exp_aurore_ds_2024",
-                    bullets=[
-                        AdaptedBullet(
-                            source_id="blt_aurore_ds_multimodal",
-                            text=(
-                                "Built a multimodal classifier for synthetic image and text "
-                                "samples, reaching 0.82 accuracy on a labeled test set."
-                            ),
-                        ),
-                        AdaptedBullet(
-                            source_id="blt_aurore_ds_speech",
-                            text=(
-                                "Developed speech transcription and document-tagging "
-                                "pipelines using Whisper, PyTorch and Flask APIs."
-                            ),
-                        ),
-                        AdaptedBullet(
-                            source_id="blt_aurore_ds_documentation",
-                            text=(
-                                "Documented model evaluation protocols and reproducible "
-                                "experiments on synthetic datasets."
-                            ),
-                        ),
-                    ],
-                ),
-                AdaptedExperience(
-                    source_id="exp_aurore_intern_2023",
-                    bullets=[
-                        AdaptedBullet(
-                            source_id="blt_aurore_intern_anomaly",
-                            text=(
-                                "Built an anomaly detection pipeline for identifying missing "
-                                "and corrupted samples in synthetic sensor data."
-                            ),
-                        ),
-                    ],
-                ),
-            ],
-            selected_project_ids=[
-                "proj_evidence_rag",
-                "proj_ner_camembert",
-                "proj_gpt2",
-            ],
-            skills_order=["ml_ai", "data_infra", "stats_signal"],
-            warnings=[],
-            motivation_letter_subject="Candidature - Data Scientist NLP - Camille Martin",
-            motivation_letter_body=(
+        "motivation_letter",
+        MotivationLetter(
+            subject="Candidature - Data Scientist NLP - Camille Martin",
+            body=(
                 "Bonjour,\n\n"
                 "Je vous adresse ma candidature pour le poste de Data Scientist NLP. "
                 "Mes deux années chez Aurore Labs m'ont permis de construire des pipelines "
@@ -272,6 +180,15 @@ def _register_llm_fixtures() -> None:
                 "Cordialement,\n"
                 "Camille Martin"
             ),
+        ),
+    )
+    MockLLMProvider.register(
+        "document_review",
+        DocumentTextReview(
+            issues=[],
+            professional_summary=None,
+            motivation_letter_subject=None,
+            motivation_letter_body=None,
         ),
     )
 
@@ -328,6 +245,7 @@ def test_full_pipeline_on_realistic_sample(tmp_path: Path) -> None:
         assert Path(report.docx_path).parent.name == str(report.application_id)
         # Anti-hallucination: no validation errors after auto-fix
         assert not report.validation_errors
+        assert report.document_review
 
     # ---- Step 4: Verify generated CV contains the fixture's profile facts ----
     from docx import Document
@@ -356,6 +274,18 @@ def test_full_pipeline_on_realistic_sample(tmp_path: Path) -> None:
         app = s.get(Application, reports[0].application_id)
         assert app is not None
         assert app.cv_json  # full structured CV is persisted
+        assert app.cv_json["selected_experiences"] == [
+            {
+                "source_id": experience.id,
+                "bullets": [
+                    {"source_id": bullet.id, "text": bullet.text} for bullet in experience.bullets
+                ],
+            }
+            for experience in get_profile().experiences
+        ]
         assert app.status == "ready_for_form_submission"
         assert app.cv_pdf_path and Path(app.cv_pdf_path).exists()
-        assert len(app.documents) >= 7  # CV, letter, HTML/PDF sources and CV JSON
+        assert len(app.documents) >= 8  # CV/letter artifacts, CV JSON and semantic review
+        reviews = [document for document in app.documents if document.doc_type == "document_review"]
+        assert len(reviews) == 1
+        assert json.loads(reviews[0].content) == reports[0].document_review

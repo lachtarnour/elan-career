@@ -1,0 +1,16 @@
+Review these final text fields against the sources below.
+
+CURRENT TEXT FIELDS
+{{ text_fields_json }}
+
+READ-ONLY FINAL DOCUMENT AND IDENTIFIED SOURCES
+{{ context_json }}
+
+STRUCTURAL OBSERVATIONS TO CHECK
+{{ validation_issues_json }}
+
+{% if allow_corrections %}
+CORRECTIONS ALLOWED: propose only minimal full-field replacements for documented issues. Use null for unchanged fields.
+{% else %}
+CORRECTIONS DISABLED: all three replacement fields must be null. Assess only the current text.
+{% endif %}

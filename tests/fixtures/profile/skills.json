@@ -6,7 +6,7 @@
       "skills": [
         "PyTorch",
         "TensorFlow",
-        "Scikit-learn",
+        "scikit-learn",
         "NLP",
         "Transformers",
         "Hugging Face",
@@ -34,7 +34,7 @@
         "Python",
         "SQL",
         "R",
-        "Pandas",
+        "pandas",
         "NumPy",
         "SciPy",
         "Statistical analysis",
@@ -64,7 +64,7 @@
       "skills": [
         "Time-series analysis",
         "Optimization",
-        "Mathematical Optimization",
+        "Mathematical optimization",
         "Linear Programming",
         "Mixed-Integer Programming",
         "Monte Carlo methods",
@@ -76,7 +76,7 @@
       "name": "Computer Vision",
       "skills": [
         "OpenCV",
-        "Facial analysis",
+        "Facial affect estimation",
         "RetinaFace",
         "FaceNet"
       ]
@@ -87,14 +87,14 @@
       "skills": [
         "Whisper",
         "Pyannote",
-        "OpenSMILE"
+        "openSMILE"
       ]
     }
   ],
   "core": {
     "ml_ai": [
       "PyTorch",
-      "Scikit-learn"
+      "scikit-learn"
     ],
     "data_analysis": [
       "Python",
@@ -109,13 +109,13 @@
       "category_skills": {
         "ml_ai": [
           "PyTorch",
-          "Scikit-learn",
+          "scikit-learn",
           "NLP"
         ],
         "data_analysis": [
           "Python",
           "SQL",
-          "Pandas"
+          "pandas"
         ]
       }
     },
@@ -144,7 +144,7 @@
         "ml_ai": [
           "PyTorch",
           "TensorFlow",
-          "Scikit-learn"
+          "scikit-learn"
         ],
         "data_infra": [
           "Docker",
@@ -173,7 +173,7 @@
         "data_analysis": [
           "Python",
           "SQL",
-          "Pandas",
+          "pandas",
           "Streamlit"
         ],
         "stats_signal": [
@@ -201,7 +201,7 @@
       "category_skills": {
         "computer_vision": [
           "OpenCV",
-          "Facial analysis"
+          "Facial affect estimation"
         ],
         "ml_ai": [
           "PyTorch"
@@ -225,7 +225,7 @@
       "description": "Fictional test preset for medical ai.",
       "category_skills": {
         "computer_vision": [
-          "Facial analysis"
+          "Facial affect estimation"
         ],
         "ml_ai": [
           "PyTorch",
@@ -239,7 +239,7 @@
       "description": "Fictional test preset for operations research.",
       "category_skills": {
         "stats_signal": [
-          "Mathematical Optimization",
+          "Mathematical optimization",
           "Linear Programming",
           "Mixed-Integer Programming",
           "Optimization",

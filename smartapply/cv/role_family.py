@@ -53,6 +53,7 @@ _TITLE_PATTERNS: Final[list[tuple[RoleFamily, list[str]]]] = [
             r"\bvector (db|search|database|store)\b",
             r"\bprompt engineer",
             r"\blangchain\b",
+            r"\blanggraph\b",
             r"\bllamaindex\b",
         ],
     ),
@@ -218,6 +219,7 @@ _SPECIALIST_EXTENDED_PATTERNS: Final[list[tuple[RoleFamily, list[str]]]] = [
             r"\bvector (db|search|database|store)\b",
             r"\bprompt engineer",
             r"\blangchain\b",
+            r"\blanggraph\b",
             r"\bllamaindex\b",
         ],
     ),
@@ -328,7 +330,7 @@ _EXTENDED_PATTERNS: Final[list[tuple[RoleFamily, list[str]]]] = [
 
 
 # Offer signals that turn on extra ml_ai display for Data Scientist roles
-# (NLP / Transformers / Hugging Face on top of the base PyTorch + Scikit-learn).
+# (NLP / Transformers on top of the base PyTorch + scikit-learn).
 _DS_IA_SIGNAL_PATTERNS: Final[list[str]] = [
     r"\bnlp\b",
     r"\bllm\b",
@@ -473,8 +475,8 @@ def has_data_scientist_ia_signal(
 ) -> bool:
     """True when a Data Scientist offer also asks for AI/NLP/LLM/GenAI.
 
-    Used to augment the data_scientist contract with NLP + Transformers +
-    Hugging Face on the ml_ai block. A vanilla DS role (forecasting or
+    Used to augment the data_scientist contract with NLP + Transformers
+    on the ml_ai block. A vanilla DS role (forecasting or
     classical statistics) gets a leaner ml_ai baseline.
     """
     haystack = _haystack(analysis, title)

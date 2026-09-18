@@ -150,6 +150,43 @@ make test-fast
 
 The CV content comes from your profile. Presentation is configured separately for each export format:
 
+Experience descriptions are static: every experience and bullet from `experiences.json`
+is inserted verbatim, in profile order, for both CV-only and CV-plus-letter generation.
+The LLM receives these facts as read-only context; its response schema has no experience
+field. It personalizes the headline, summary, skills selection and project selection,
+and writes the letter when requested. Generated-text length limits do not shorten
+approved experience descriptions. To change an experience, edit the source profile
+explicitly and generate a new CV; existing documents and history are retained.
+
+Application generation uses three sequential LLM stages:
+
+1. Generate the CV personalization, apply the existing Skills and project
+   reconstruction rules, and validate the assembled CV.
+2. Write the letter from that finalized CV, the full offer text, the complete
+   declared Skills catalogue and the facts of its experiences/selected projects.
+   Declared competence does not require a project citation. A claim that a tool
+   was used at a specific employer or in a specific project does require that
+   attribution in the corresponding source. Letter voice is first-person and
+   separate from the CV style guide.
+3. Independently review the summary and letter against these sources. Findings
+   must identify an exact passage, a reason and valid source references. The
+   reviewer can propose replacements only for the summary, subject and body;
+   it cannot change the headline, experiences, Skills or selected projects.
+
+If a revision is proposed, one additional review checks it without permission
+to revise again. An unconfirmed or structurally invalid revision is discarded.
+Unavailable reviews and unresolved findings leave the documents available with
+the `quality_rejected` status rather than marking them ready. The review attempts
+are retained in `generated_documents` as `document_review`, and actionable issues
+are also exposed in the application's validation messages. This checks source
+consistency, not the real-world truth of the candidate's declarations.
+
+The normal path has three LLM calls; a confirmed correction has four (excluding
+provider-level transport retries). The previous joint `application_draft` call
+and one-defect letter repair are no longer used by the application pipeline.
+CV-only generation remains available. No historical document or stored analysis
+is migrated automatically when this generation code changes.
+
 | What to customize | Where to edit |
 | --- | --- |
 | HTML/PDF layout, colors, typography, margins, and section order | [`smartapply/cv/templates/cv.html.j2`](../smartapply/cv/templates/cv.html.j2), using HTML/CSS and preserving the Jinja variables |

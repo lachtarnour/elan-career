@@ -1,11 +1,13 @@
-"""Pydantic schemas for LLM structured outputs.
+"""Pydantic schemas for LLM outputs and assembled application documents.
 
-These define the EXACT shape we ask the model to produce — and that we
-validate after the call. Keep them small, flat, and JSON-Schema friendly
-(OpenAI strict mode rejects exotic types).
+LLM response models define exactly what the model may produce. AdaptedCV
+is the final assembled snapshot, including static profile experiences.
+Keep response models small, flat and JSON-Schema friendly for strict mode.
 """
 
 from __future__ import annotations
+
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -114,7 +116,7 @@ class AdaptedBullet(BaseModel):
             "from the candidate profile). REQUIRED — used by validator."
         )
     )
-    text: str = Field(description="Rewritten bullet text, faithful to source")
+    text: str = Field(description="Profile bullet text copied verbatim during CV assembly")
 
 
 class AdaptedExperience(BaseModel):
@@ -131,7 +133,9 @@ class SkillSelectionBlock(BaseModel):
     skills: list[str] = Field(description="Exact display skills selected from allowed_skills")
 
 
-class AdaptedCV(BaseModel):
+class CVPersonalization(BaseModel):
+    """Only the CV fields the LLM is allowed to produce."""
+
     model_config = _strict
 
     cv_title: str = Field(description="Headline shown under the candidate name")
@@ -141,14 +145,12 @@ class AdaptedCV(BaseModel):
             "in the candidate profile."
         )
     )
-    selected_experiences: list[AdaptedExperience] = Field(
-        description="Experiences to keep, in order"
-    )
     selected_project_ids: list[str] = Field(
         description=(
-            "IDs of profile projects to keep. Select 2 to 4 relevant projects "
-            "when at least 2 useful profile projects are available; include a "
-            "third or fourth project only when it adds clear value for the role."
+            "IDs of profile projects to keep. Select 3 to 4 projects when at "
+            "least 3 profile projects are available. Choose the three strongest "
+            "matches; include a fourth only when it adds clear value for the role. "
+            "If fewer than 3 projects are provided, select all available projects."
         )
     )
     skills_profile_id: str = Field(
@@ -174,6 +176,18 @@ class AdaptedCV(BaseModel):
     )
 
 
+class AdaptedCV(CVPersonalization):
+    """Complete CV snapshot used by validation, persistence and rendering.
+
+    Never use this model as an LLM response schema. Experience descriptions
+    are supplied by the application from the approved profile.
+    """
+
+    selected_experiences: list[AdaptedExperience] = Field(
+        description="Complete profile experiences copied verbatim in profile order"
+    )
+
+
 class MotivationLetter(BaseModel):
     model_config = _strict
 
@@ -181,7 +195,8 @@ class MotivationLetter(BaseModel):
     body: str = Field(
         description=(
             "220-300 words, natural and professional. Must be grounded in the "
-            "selected CV/project evidence."
+            "candidate's declared skills and read-only profile evidence; specific "
+            "realizations must follow the relevant experience or selected project."
         )
     )
 
@@ -195,6 +210,48 @@ class MotivationLetterRepair(BaseModel):
         description=(
             "Repaired motivation-letter body only. Preserve the original language "
             "and facts while correcting the single requested defect."
+        )
+    )
+
+
+class DocumentReviewIssue(BaseModel):
+    """A source-grounded finding on one editable document text field."""
+
+    model_config = _strict
+
+    field: Literal[
+        "professional_summary", "motivation_letter_subject", "motivation_letter_body"
+    ] = Field(description="The existing text field containing the problem")
+    passage: str = Field(description="Exact, non-empty quote from the current field")
+    reason: str = Field(
+        description="Concrete explanation of the problem and its relation to cited sources"
+    )
+    source_ids: list[str] = Field(
+        description="IDs from the supplied source index supporting this finding"
+    )
+
+
+class DocumentTextReview(BaseModel):
+    """Review with optional full-field replacements; no structural CV edits."""
+
+    model_config = _strict
+
+    issues: list[DocumentReviewIssue] = Field(
+        description="Material problems found in the current text; empty when none are found"
+    )
+    professional_summary: str | None = Field(
+        description=(
+            "Complete minimally corrected summary, or null when unchanged or corrections "
+            "are disabled. Preserve CV positioning and the frozen Skills/project selection."
+        )
+    )
+    motivation_letter_subject: str | None = Field(
+        description="Complete minimally corrected subject, or null when unchanged or disabled"
+    )
+    motivation_letter_body: str | None = Field(
+        description=(
+            "Complete minimally corrected letter body, or null when unchanged or disabled; "
+            "keep the requested language and exactly 3 paragraphs, 220-300 words"
         )
     )
 
@@ -223,67 +280,17 @@ class FormQuestionAnswers(BaseModel):
     )
 
 
-class ApplicationDraft(BaseModel):
-    model_config = _strict
+class ApplicationDraft(CVPersonalization):
+    """LLM-generated personalization and letter, without experience output."""
 
-    cv_title: str = Field(description="Headline shown under the candidate name")
-    professional_summary: str = Field(
-        description=(
-            "Offer-adapted professional summary, max 2 lines and grounded only "
-            "in the candidate profile."
-        )
-    )
-    selected_experiences: list[AdaptedExperience] = Field(
-        description="Experiences to keep, in order"
-    )
-    selected_project_ids: list[str] = Field(
-        description=(
-            "IDs of profile projects to keep. Select 2 to 4 relevant projects "
-            "when at least 2 useful profile projects are available; include a "
-            "third or fourth project only when it adds clear value for the role."
-        )
-    )
-    skills_profile_id: str = Field(
-        default="",
-        description=(
-            "ID of the skill display profile to use in the CV skills section, "
-            "e.g. mixed, llm, machine_learning, reinforcement_learning, data_analyst."
-        ),
-    )
-    selected_skills: list[SkillSelectionBlock] = Field(
-        default_factory=list,
-        description=(
-            "Exact skills to display in the CV, grouped by profile skill category id. "
-            "Each skill must come from allowed_skills. Include every offer-required "
-            "skill that exists in the candidate whitelist."
-        ),
-    )
-    skills_order: list[str] = Field(
-        description="Ordered list of profile skill category ids — most relevant first"
-    )
-    warnings: list[str] = Field(
-        description="Any concern the model wants to surface to the validator"
-    )
     motivation_letter_subject: str = Field(description="Motivation letter subject line")
     motivation_letter_body: str = Field(
         description=(
             "Natural and professional motivation letter, usually 250-350 words. "
-            "Must reuse evidence from selected_experiences or selected_project_ids "
+            "Must reuse evidence from read-only profile experiences or selected_project_ids "
             "without going into project details."
         )
     )
-
-    def to_cv(self) -> AdaptedCV:
-        return AdaptedCV(
-            cv_title=self.cv_title,
-            professional_summary=self.professional_summary,
-            selected_experiences=self.selected_experiences,
-            selected_project_ids=self.selected_project_ids,
-            skills_profile_id=self.skills_profile_id,
-            selected_skills=self.selected_skills,
-            skills_order=self.skills_order,
-            warnings=self.warnings,
-        )
 
     def to_motivation_letter(self) -> MotivationLetter:
         return MotivationLetter(

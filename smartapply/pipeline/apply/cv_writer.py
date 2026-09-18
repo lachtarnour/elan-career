@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from smartapply.cv.letter_writer import ApplicationTextWriter
 from smartapply.cv.motivation_validator import normalize_french_elisions
 from smartapply.cv.role_family import (
     classify,
@@ -138,18 +139,59 @@ class CvWriterMixin:
         analysis: JobAnalysis,
         offer_language: str,
         document_company: str,
+        report: ApplyReport,
         refresh_cache: bool = False,
     ) -> tuple[Any, MotivationLetter]:
-        """Generate the adapted CV and motivation letter together."""
-        adapted, letter_draft, _selection = self.adapter.adapt_application(
+        """Finalize the CV, then write and independently review the letter."""
+        adapted, _selection = self.adapter.adapt(
             analysis,
             job_title=job.title,
             job_company=document_company,
+            job_id=job.id,
+            refresh_cache=refresh_cache,
+        )
+        adapted = self._validate_with_auto_fix(adapted, report)
+        context = dict(
+            job_title=job.title,
+            job_company=document_company,
+            job_description=job.description or job.cleaned_description or "",
             language=offer_language,
             job_id=job.id,
             refresh_cache=refresh_cache,
         )
-        return adapted, letter_draft
+        writer = ApplicationTextWriter(self.profile, self.llm)
+        letter = writer.generate_letter(adapted, analysis, **context)
+        return self._review_generated_text(adapted, letter, analysis, report=report, **context)
+
+    def _review_generated_text(
+        self,
+        adapted: AdaptedCV,
+        letter: MotivationLetter,
+        analysis: JobAnalysis,
+        *,
+        job_title: str,
+        job_company: str,
+        job_description: str,
+        language: str,
+        job_id: int | None,
+        report: ApplyReport,
+        refresh_cache: bool = False,
+    ) -> tuple[AdaptedCV, MotivationLetter]:
+        result = ApplicationTextWriter(self.profile, self.llm).review(
+            adapted,
+            letter,
+            analysis,
+            job_title=job_title,
+            job_company=job_company,
+            job_description=job_description,
+            language=language,
+            job_id=job_id,
+            refresh_cache=refresh_cache,
+        )
+        report.document_review.extend(result.attempts)
+        report.validation_errors.extend(result.errors)
+        report.validation_warnings.extend(result.warnings)
+        return result.cv, result.letter
 
     def _validate_with_auto_fix(self, adapted, report: ApplyReport):
         result = self.validator.validate(adapted)

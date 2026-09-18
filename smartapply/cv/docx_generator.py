@@ -101,6 +101,7 @@ class CvDocxRenderer:
 
     def render(self, adapted: AdaptedCV) -> DocxDocument:
         doc = Document()
+        doc.styles["Normal"].font.bold = False
         self._set_margins(doc)
         self._write_header(doc, adapted)
         self._write_section(
@@ -136,7 +137,7 @@ class CvDocxRenderer:
     def _write_header(self, doc: DocxDocument, adapted: AdaptedCV) -> None:
         p_name = doc.add_paragraph()
         run = p_name.add_run(self.profile.identity.full_name)
-        run.bold = True
+        run.bold = False
         run.font.size = Pt(self.style.title_font_size)
         run.font.name = self.style.font_family
         run.font.color.rgb = RGBColor.from_string(self.style.text_color_hex)
@@ -156,9 +157,9 @@ class CvDocxRenderer:
             r.font.color.rgb = RGBColor.from_string(self.style.text_color_hex)
 
         contact_bits = [
-            self.profile.identity.location,
-            self.profile.identity.phone,
             self.profile.identity.email,
+            self.profile.identity.phone,
+            self.profile.identity.location,
             self.profile.identity.github,
             self.profile.identity.linkedin,
             self.profile.identity.website,
@@ -174,7 +175,7 @@ class CvDocxRenderer:
         doc.add_paragraph()  # spacer
         p = doc.add_paragraph()
         run = p.add_run(title)
-        run.bold = True
+        run.bold = False
         run.font.size = Pt(self.style.section_font_size)
         run.font.color.rgb = RGBColor.from_string(self.style.primary_color_hex)
         run.font.name = self.style.font_family
@@ -216,7 +217,7 @@ class CvDocxRenderer:
             def _writer(cell, src=src, exp_adapted=exp_adapted, links_by_id=source_links_by_id):
                 p_title = cell.paragraphs[0]
                 r1 = p_title.add_run(f"{src.title}, ")
-                r1.bold = True
+                r1.bold = False
                 r1.font.size = Pt(self.style.body_font_size + 0.5)
                 r2 = p_title.add_run(src.company)
                 r2.font.size = Pt(self.style.body_font_size + 0.5)
@@ -257,7 +258,7 @@ class CvDocxRenderer:
             def _writer(cell, deg: EducationDisplay = deg):
                 p = cell.paragraphs[0]
                 r1 = p.add_run(deg.title)
-                r1.bold = True
+                r1.bold = False
                 r1.font.size = Pt(self.style.body_font_size + 0.5)
                 if deg.field:
                     r2 = p.add_run(f" – {deg.field}")
@@ -279,7 +280,7 @@ class CvDocxRenderer:
                     continue
                 p = doc.add_paragraph()
                 r1 = p.add_run(f"{cat.name}: ")
-                r1.bold = True
+                r1.bold = False
                 r1.font.size = Pt(self.style.body_font_size)
                 r2 = p.add_run(", ".join(skills))
                 r2.font.size = Pt(self.style.body_font_size)
@@ -298,7 +299,7 @@ class CvDocxRenderer:
                     continue
                 p = doc.add_paragraph()
                 r1 = p.add_run(f"{cat.name}: ")
-                r1.bold = True
+                r1.bold = False
                 r1.font.size = Pt(self.style.body_font_size)
                 r2 = p.add_run(", ".join(skills))
                 r2.font.size = Pt(self.style.body_font_size)
@@ -311,7 +312,7 @@ class CvDocxRenderer:
             cat = by_id[cid]
             p = doc.add_paragraph()
             r1 = p.add_run(f"{cat.name}: ")
-            r1.bold = True
+            r1.bold = False
             r1.font.size = Pt(self.style.body_font_size)
             r2 = p.add_run(", ".join(cat.skills))
             r2.font.size = Pt(self.style.body_font_size)
@@ -364,7 +365,7 @@ class CvDocxRenderer:
         bullet_run = p.add_run("• ")
         bullet_run.font.size = Pt(self.style.body_font_size)
         name = p.add_run(proj.name)
-        name.bold = True
+        name.bold = False
         name.font.size = Pt(self.style.body_font_size)
         desc = p.add_run(f"  {proj.description}")
         desc.font.size = Pt(self.style.body_font_size)
@@ -381,7 +382,7 @@ class CvDocxRenderer:
         for cert in self.profile.certificates:
             p = doc.add_paragraph()
             r1 = p.add_run(cert.name)
-            r1.bold = True
+            r1.bold = False
             r1.font.size = Pt(self.style.body_font_size)
             if cert.url:
                 _add_hyperlink_run(p, " ↗", str(cert.url), Pt(self.style.body_font_size))

@@ -1,6 +1,7 @@
 """Anti-hallucination validator for adapted CVs.
 
 Hard rules (errors → reject / auto-fix):
+- Experiences and bullets must exactly match the profile, including their order.
 - Every experience source_id must exist in the profile.
 - Every bullet source_id must exist in the profile (experiences OR projects).
 - Every bullet must belong to the experience it's nested under.
@@ -16,7 +17,7 @@ Soft rules (warnings → keep but flag):
   >= 40 against at least one allowed claim).
 - For non-verified evidence (``self_reported``, ``inferred``), require a
   stricter overlap to avoid over-claiming.
-- Bullet length capped at style_guide.max_bullet_length.
+- Approved source bullets are never shortened to meet generated-text limits.
 - Summary length capped at style_guide.max_summary_length.
 - Summary line count capped at style_guide.max_summary_lines.
 """
@@ -28,6 +29,7 @@ from dataclasses import dataclass, field
 
 from rapidfuzz import fuzz
 
+from smartapply.cv.assembly import profile_experiences
 from smartapply.llm import AdaptedCV, SkillSelectionBlock
 from smartapply.profile import Profile
 
@@ -91,20 +93,32 @@ class CvValidator:
         warnings: list[str] = []
 
         # ---- Experiences and bullets ----
+        if [exp.source_id for exp in cv.selected_experiences] != list(self.exp_index):
+            errors.append("experience_order_mismatch:expected complete profile order")
         for exp in cv.selected_experiences:
             if exp.source_id not in self.exp_index:
                 errors.append(f"unknown_experience_id:{exp.source_id}")
                 continue
+            source_experience = self.exp_index[exp.source_id]
+            if [b.source_id for b in exp.bullets] != [b.id for b in source_experience.bullets]:
+                errors.append(f"experience_bullets_mismatch:{exp.source_id}")
             for blt in exp.bullets:
                 src_bullet = self.bullet_index.get(blt.source_id)
                 if src_bullet is None:
                     errors.append(f"unknown_bullet_id:{blt.source_id}")
                     continue
                 src_exp = self.profile.experience_for_bullet(blt.source_id)
-                if src_exp is not None and src_exp.id != exp.source_id:
+                if src_exp is None or src_exp.id != exp.source_id:
                     errors.append(
-                        f"bullet_wrong_parent:{blt.source_id} expected {src_exp.id} got {exp.source_id}"
+                        f"bullet_wrong_parent:{blt.source_id} "
+                        f"expected {src_exp.id if src_exp else 'profile experience'} "
+                        f"got {exp.source_id}"
                     )
+                if blt.text == src_bullet.text:
+                    # Static, approved source content is not subject to LLM
+                    # paraphrase checks or generated-bullet length limits.
+                    continue
+                errors.append(f"experience_text_mismatch:{blt.source_id}")
 
                 # Numbers preservation
                 out_numbers = _extract_numbers(blt.text)
@@ -172,27 +186,11 @@ class CvValidator:
         return ValidationResult(ok=len(errors) == 0, errors=errors, warnings=warnings)
 
     def auto_fix(self, cv: AdaptedCV) -> tuple[AdaptedCV, list[str]]:
-        """Best-effort fix that strips invalid items so the CV remains usable."""
+        """Restore static experiences and strip unsupported generated selections."""
         removed: list[str] = []
-        cleaned_experiences = []
-        for exp in cv.selected_experiences:
-            if exp.source_id not in self.exp_index:
-                removed.append(f"experience:{exp.source_id}")
-                continue
-            valid_bullets = []
-            for blt in exp.bullets:
-                if blt.source_id not in self.bullet_index:
-                    removed.append(f"bullet:{blt.source_id}")
-                    continue
-                src_exp = self.profile.experience_for_bullet(blt.source_id)
-                if src_exp is not None and src_exp.id != exp.source_id:
-                    removed.append(f"misplaced_bullet:{blt.source_id}")
-                    continue
-                valid_bullets.append(blt)
-            if valid_bullets:
-                cleaned_experiences.append(exp.model_copy(update={"bullets": valid_bullets}))
-            else:
-                removed.append(f"empty_experience:{exp.source_id}")
+        cleaned_experiences = profile_experiences(self.profile)
+        if cv.selected_experiences != cleaned_experiences:
+            removed.append("experience_content:restored_from_profile")
 
         valid_projects = [pid for pid in cv.selected_project_ids if pid in self.project_ids]
         for pid in cv.selected_project_ids:

@@ -4,21 +4,17 @@ Each bullet exposes:
 - ``allowed_claims``: the exhaustive list of claims you may make about it.
   Any sentence that goes beyond these claims is treated as a hallucination.
 - ``evidence_level``: how strong the underlying evidence is.
-  - ``verified``: reformulate freely while staying faithful.
+  - ``verified``: factual evidence for generated summaries and letters.
   - ``self_reported``: keep the claim narrow, don't generalize.
   - ``inferred``: be conservative; avoid asserting it strongly.
 """
 
 from __future__ import annotations
 
-import re
-
-from smartapply.cv.constants import NON_DISPLAY_DOMAIN_TERMS
 from smartapply.llm.prompts.loader import load_prompt, render_prompt
 from smartapply.llm.prompts.skill_profiles import format_skill_profiles
 from smartapply.llm.schemas import JobAnalysis
 from smartapply.profile import Bullet, Experience, Profile, Project
-from smartapply.utils.skill_terms import normalize_skill_term
 
 SYSTEM = load_prompt("cv_adaptation/system.j2")
 
@@ -26,14 +22,9 @@ SYSTEM = load_prompt("cv_adaptation/system.j2")
 def _format_bullet(bullet: Bullet) -> str:
     claims = "\n".join(f"      * {c}" for c in bullet.effective_allowed_claims)
     numbers = f" numbers={bullet.numbers}" if bullet.numbers else ""
-    link_line = ""
-    if bullet.links:
-        anchors = ", ".join(f'"{link.anchor}"' for link in bullet.links)
-        link_line = f"    keep_anchors_verbatim: {anchors}\n"
     return (
         f"  - id={bullet.id} (evidence={bullet.evidence_level}){numbers}\n"
         f"    source_text: {bullet.text}\n"
-        f"{link_line}"
         f"    allowed_claims:\n{claims}"
     )
 
@@ -85,51 +76,6 @@ def _format_matching_keywords(profile: Profile) -> str:
     )
 
 
-def _term_supported_by_allowed_skill(term: str, allowed_skills: set[str]) -> bool:
-    normalized = normalize_skill_term(term)
-    if not normalized:
-        return True
-    for skill in allowed_skills:
-        skill_norm = normalize_skill_term(skill)
-        if not skill_norm:
-            continue
-        if len(skill_norm) <= 2:
-            if normalized == skill_norm:
-                return True
-            continue
-        if normalized == skill_norm:
-            return True
-        if skill_norm in normalized or normalized in skill_norm:
-            return True
-        if re.search(rf"(?<![a-z0-9]){re.escape(skill_norm)}(?![a-z0-9])", normalized):
-            return True
-    return False
-
-
-def _format_unsupported_offer_terms(profile: Profile, analysis: JobAnalysis) -> str:
-    """Terms from the offer that should not become candidate claims."""
-    allowed = profile.skills.allowed_skills
-    terms: list[str] = []
-    seen: set[str] = set()
-    for term in list(analysis.required_skills) + list(analysis.cv_keywords_to_include):
-        clean = " ".join((term or "").split())
-        key = clean.lower()
-        if not clean or key in seen:
-            continue
-        seen.add(key)
-        if key in NON_DISPLAY_DOMAIN_TERMS:
-            continue
-        if _term_supported_by_allowed_skill(clean, allowed):
-            continue
-        # Skip broad education phrases; they are not skills to claim or block.
-        if "equivalent" in key or "education" in key or "degree" in key:
-            continue
-        terms.append(clean)
-    if not terms:
-        return "- none"
-    return "\n".join(f"- {term}" for term in terms)
-
-
 def build_user_prompt(
     *,
     profile: Profile,
@@ -148,7 +94,6 @@ def build_user_prompt(
     skill_catalog = _format_skill_catalog(profile)
     core_skills = _format_core_skills(profile)
     matching_keywords = _format_matching_keywords(profile)
-    unsupported_offer_terms = _format_unsupported_offer_terms(profile, analysis)
 
     return render_prompt(
         "cv_adaptation/user.j2",
@@ -165,7 +110,6 @@ def build_user_prompt(
         core_skills=core_skills,
         skill_profiles=skill_profiles,
         matching_keywords=matching_keywords,
-        unsupported_offer_terms=unsupported_offer_terms,
         candidate_title=profile.identity.title,
         summary_source=profile.identity.summary,
         experiences_block=_format_experiences(selected_experiences),

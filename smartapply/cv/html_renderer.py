@@ -23,7 +23,7 @@ from smartapply.llm import AdaptedCV, MotivationLetter
 from smartapply.profile import Profile
 
 TEMPLATES_DIR = Path(__file__).with_name("templates")
-MIN_PROJECTS = 2
+MIN_PROJECTS = 3
 
 _PDF_COUNT_RE = re.compile(rb"/Count\s+(\d+)")
 
@@ -280,9 +280,9 @@ class HtmlApplicationRenderer:
     def _contact_items(self) -> list[dict[str, str | None]]:
         identity = self.profile.identity
         bits = [
-            {"label": identity.location, "href": None},
-            {"label": identity.phone, "href": None} if identity.phone else None,
             {"label": str(identity.email), "href": f"mailto:{identity.email}"},
+            {"label": identity.phone, "href": None} if identity.phone else None,
+            {"label": identity.location, "href": None},
             {"label": "GitHub", "href": str(identity.github)} if identity.github else None,
             {"label": "LinkedIn", "href": str(identity.linkedin)} if identity.linkedin else None,
             (

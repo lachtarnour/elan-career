@@ -85,17 +85,7 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
             analysis=analysis,
             offer_language=offer_language,
             document_company=document_company,
-            refresh_cache=refresh_cache,
-        )
-        adapted = self._validate_with_auto_fix(adapted, report)
-        letter = self._repair_letter_once(
-            letter,
-            adapted,
-            analysis,
-            job_title=job.title,
-            job_company=document_company,
-            language=offer_language,
-            job_id=job.id,
+            report=report,
             refresh_cache=refresh_cache,
         )
         self._validate_letter(letter, adapted, analysis, report)

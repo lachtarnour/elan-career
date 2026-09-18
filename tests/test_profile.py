@@ -72,12 +72,12 @@ def test_profile_has_targeted_skill_profiles() -> None:
     assert "Time-series analysis" in data_analyst.category_skills["stats_signal"]
     medical_ai = profile.skills.profile_by_id("medical_ai")
     assert medical_ai is not None
-    assert "Facial analysis" in medical_ai.category_skills["computer_vision"]
+    assert "Facial affect estimation" in medical_ai.category_skills["computer_vision"]
     operations_research = profile.skills.profile_by_id("operations_research")
     assert operations_research is not None
     assert operations_research.category_skills == {
         "stats_signal": [
-            "Mathematical Optimization",
+            "Mathematical optimization",
             "Linear Programming",
             "Mixed-Integer Programming",
             "Optimization",
@@ -105,14 +105,14 @@ def test_new_skills_are_local_to_categories_and_operations_research_profile() ->
 
     profile = load_profile()
     by_category = {category.id: set(category.skills) for category in profile.skills.categories}
-    assert "Mathematical Optimization" in by_category["stats_signal"]
+    assert "Mathematical optimization" in by_category["stats_signal"]
     assert "Linear Programming" in by_category["stats_signal"]
     assert "Mixed-Integer Programming" in by_category["stats_signal"]
     assert "PySpark" in by_category["data_infra"]
     assert "Clinical Trial Reporting" in by_category["data_analysis"]
 
     new_skills = {
-        "Mathematical Optimization",
+        "Mathematical optimization",
         "Linear Programming",
         "Mixed-Integer Programming",
         "PySpark",

@@ -1,13 +1,12 @@
 """Pydantic schemas for the candidate profile.
 
 Each piece of content reusable in a generated CV has a stable ``id`` (the
-*source_id*). The CV adapter must reference this id for every generated
-bullet so the validator can verify nothing was hallucinated.
+*source_id*). Experience descriptions are copied verbatim from the profile;
+the validator checks their text, completeness and order.
 
 Each ``Bullet`` carries:
-- ``evidence_level``: how strong the underlying evidence is. The LLM should
-  reformulate ``verified`` bullets freely but be conservative with
-  ``inferred`` ones.
+- ``evidence_level``: how strong the underlying evidence is when grounding
+  generated summaries and letters. It never permits rewriting CV experiences.
 - ``allowed_claims``: explicit list of claims the LLM is allowed to make
   about this bullet. Anything outside this list is treated as an invention.
 """
@@ -146,10 +145,8 @@ class Skills(BaseModel):
         """Merge a profile's offer-specific skills with the core baseline.
 
         Order within each category: profile additions first (most relevant to
-        the offer), then core skills. This way, when the renderer caps display
-        per category, the offer-specific additions are surfaced first while the
-        core baseline still fills the remaining slots. Skills absent from the
-        canonical category catalog are ignored.
+        the offer), then core skills. Skills absent from the canonical category
+        catalog are ignored.
         """
         profile = self.profile_by_id(profile_id)
         profile_skills: dict[str, list[str]] = (
@@ -181,8 +178,7 @@ class BulletLink(BaseModel):
 
     Renderers scan the bullet's output text for ``anchor`` (case-insensitive,
     first occurrence) and wrap the matched span as a hyperlink to ``url``.
-    If the anchor isn't present in the adapted output, the link is dropped
-    silently — keeping the renderer robust to LLM paraphrases.
+    If the anchor isn't present in the text, the link is dropped silently.
     """
 
     anchor: str = Field(min_length=1)
@@ -192,8 +188,8 @@ class BulletLink(BaseModel):
 class Bullet(BaseModel):
     """A single bullet of evidence the candidate can claim.
 
-    ``evidence_level`` and ``allowed_claims`` let the CV adapter make safe
-    reformulations without inventing new facts.
+    ``evidence_level`` and ``allowed_claims`` ground generated summaries and
+    letters. Experience bullets themselves are inserted verbatim into the CV.
     """
 
     id: str = Field(min_length=3)
