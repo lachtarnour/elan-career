@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from math import isfinite
 
 import requests
 
@@ -14,7 +15,7 @@ from smartapply.scrapers.wttj.contracts import WTTJAuthenticationError, WTTJScra
 from smartapply.scrapers.wttj.matches_api import fetch_matches_api_page
 
 SERPAPI_ACCOUNT_URL = "https://serpapi.com/account.json"
-APIFY_CURRENT_USER_URL = "https://api.apify.com/v2/users/me"
+APIFY_USER_LIMITS_URL = "https://api.apify.com/v2/users/me/limits"
 
 
 @dataclass(frozen=True)
@@ -142,15 +143,33 @@ def _remaining_serpapi_searches(payload: dict) -> int | None:
 
 def _check_apify(settings: Settings, *, timeout: int) -> SourceHealth:
     response = requests.get(
-        APIFY_CURRENT_USER_URL,
+        APIFY_USER_LIMITS_URL,
         headers={"Authorization": f"Bearer {settings.apify_token}"},
         timeout=timeout,
     )
     response.raise_for_status()
     payload = response.json()
     if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
-        raise ValueError("Réponse de compte Apify invalide.")
-    return _available("Compte et jeton Apify valides.")
+        raise ValueError("Réponse de quota Apify invalide.")
+    data = payload["data"]
+    current, limits = data.get("current"), data.get("limits")
+    if not isinstance(current, dict) or not isinstance(limits, dict):
+        raise ValueError("Quota Apify impossible à vérifier.")
+    used, maximum = current.get("monthlyUsageUsd"), limits.get("maxMonthlyUsageUsd")
+    if not all(
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and isfinite(value)
+        and value >= 0
+        for value in (used, maximum)
+    ):
+        raise ValueError("Quota Apify impossible à vérifier.")
+    usage = f"{used:.3f} / {maximum:g} USD".replace(".", ",")
+    if used >= maximum:
+        return _unavailable(
+            f"Limite mensuelle Apify atteinte ({usage}). Vérifiez le quota dans Apify."
+        )
+    return _available(f"Compte et jeton Apify valides · {usage} utilisés.")
 
 
 def _check_france_travail(settings: Settings, *, timeout: int) -> SourceHealth:

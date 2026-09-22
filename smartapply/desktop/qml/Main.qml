@@ -79,7 +79,7 @@ ApplicationWindow {
             AppBridge.loadJobs("", status, "score", false)
         }
         if (page === "profile") AppBridge.refreshProfile()
-        if (page === "settings") AppBridge.refreshDiagnostics()
+        if (page === "settings" || page === "search") AppBridge.refreshDiagnostics()
     }
 
     function ensureRouteLoaded(route) {
@@ -321,8 +321,30 @@ ApplicationWindow {
                         }
                         ColumnLayout {
                             Layout.fillWidth: true; spacing: 2
-                            Text { Layout.fillWidth: true; text: toast.titleText; color: "#F5F3F8"; font.pixelSize: 13; font.weight: Font.DemiBold; wrapMode: Text.WordWrap }
-                            Text { visible: toast.messageText.length > 0; Layout.fillWidth: true; text: toast.messageText; color: "#A9A6B2"; font.pixelSize: 11; wrapMode: Text.WordWrap }
+                            Text {
+                                objectName: "toastTitle"
+                                Layout.fillWidth: true
+                                text: toast.titleText
+                                textFormat: Text.PlainText
+                                color: "#F5F3F8"
+                                font.pixelSize: 13
+                                font.weight: Font.DemiBold
+                                wrapMode: Text.Wrap
+                                maximumLineCount: 2
+                                elide: Text.ElideRight
+                            }
+                            Text {
+                                objectName: "toastMessage"
+                                visible: toast.messageText.length > 0
+                                Layout.fillWidth: true
+                                text: toast.messageText
+                                textFormat: Text.PlainText
+                                color: "#A9A6B2"
+                                font.pixelSize: 11
+                                wrapMode: Text.Wrap
+                                maximumLineCount: 4
+                                elide: Text.ElideRight
+                            }
                         }
                     }
                     AppButton {

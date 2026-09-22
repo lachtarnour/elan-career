@@ -37,9 +37,9 @@ Item {
                 Layout.fillWidth: true
                 title: "Réglages"
                 AppButton {
-                    text: "Actualiser"
+                    text: AppBridge.diagnosticsChecking ? "Vérification…" : "Actualiser"
                     iconSource: Theme.icon("refresh")
-                    enabled: !AppBridge.busy
+                    enabled: !AppBridge.diagnosticsChecking
                     onClicked: AppBridge.refreshDiagnostics()
                 }
             }

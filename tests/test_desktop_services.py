@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from threading import Barrier, get_ident
+from threading import Barrier, Event, get_ident
 from types import SimpleNamespace
 
 import pytest
@@ -527,7 +527,8 @@ def test_bridge_runs_single_rescue_in_background_and_opens_result() -> None:
     )
     assert opened == [123]
     assert toasts[0][2] == "warning"
-    assert "PDF indisponible" in toasts[0][1]
+    assert "1 dossier avec des points à vérifier" in toasts[0][1]
+    assert "Détails dans le volet du dossier" in toasts[0][1]
 
 
 def test_manual_top_selection_persists_across_service_instances(isolated_db) -> None:
@@ -834,9 +835,11 @@ def test_generate_applications_returns_document_warnings(
     assert report["warnings"] == [
         {
             "job_id": job_id,
+            "application_id": 73,
             "title": "Machine Learning Engineer",
             "company": "Acme",
             "message": "cv_pdf_not_generated",
+            "issues": ["cv_pdf_not_generated"],
         }
     ]
 
@@ -962,6 +965,59 @@ def test_generate_application_returns_existing_dossier_for_stale_screen(
     }
 
 
+def test_regenerate_application_reuses_ready_dossier_and_persisted_folder(
+    isolated_db, tmp_path, monkeypatch
+) -> None:
+    from smartapply.pipeline import ApplyReport
+
+    job_id = _job(external_id="manual:regenerate-ready")
+    legacy_folder = tmp_path / "previous-output" / "application-42"
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        application = create_or_get_application(session, job_id)
+        application.status = JobStatus.READY_FOR_FORM_SUBMISSION
+        application.cv_pdf_path = str(legacy_folder / "CV.pdf")
+        application.form_submission_url = "https://example.test/form"
+        job.status = JobStatus.READY_FOR_FORM_SUBMISSION
+        application_id = application.id
+
+    calls = []
+
+    class FakePipeline:
+        def apply_to(
+            self,
+            received_job_id,
+            *,
+            form_url,
+            force_regenerate,
+            artifact_dir,
+        ):
+            calls.append(
+                {
+                    "job_id": received_job_id,
+                    "form_url": form_url,
+                    "force_regenerate": force_regenerate,
+                    "artifact_dir": artifact_dir,
+                }
+            )
+            return ApplyReport(job_id=received_job_id, application_id=application_id)
+
+    monkeypatch.setattr("smartapply.pipeline.Pipeline", FakePipeline)
+
+    report = DesktopService().regenerate_application(job_id)
+
+    assert report["regenerated"] is True
+    assert calls == [
+        {
+            "job_id": job_id,
+            "form_url": "https://example.test/form",
+            "force_regenerate": True,
+            "artifact_dir": legacy_folder.resolve(),
+        }
+    ]
+
+
 def test_bridge_opens_existing_application_instead_of_reporting_creation() -> None:
     bridge = DesktopBridge.__new__(DesktopBridge)
     QObject.__init__(bridge)
@@ -1048,6 +1104,46 @@ def test_search_collects_sources_in_parallel_then_persists_serially(
         ("linkedin", caller_thread),
     ]
     assert phase_calls == [("persist", []), ("persist", []), ("filter", [1, 2])]
+    assert not result.errors
+
+
+def test_search_progress_keeps_linkedin_visible_while_wttj_finishes(
+    isolated_db,
+    monkeypatch,
+) -> None:
+    from smartapply.pipeline.ingest import IngestCollection, IngestReport
+
+    linkedin_visible = Event()
+    messages = []
+
+    def progress(message):
+        messages.append(message)
+        if message == "Recherche en cours : LinkedIn…":
+            linkedin_visible.set()
+
+    class FakePipeline:
+        def collect_source(self, source, *args, **kwargs):  # noqa: ARG002
+            if source == "linkedin":
+                assert linkedin_visible.wait(timeout=2)
+            return IngestCollection(source=source, raw_jobs=[])
+
+        def persist_collection(self, collection):
+            return IngestReport(source=collection.source, fetched=0, persisted=0)
+
+    monkeypatch.setattr("smartapply.pipeline.Pipeline", FakePipeline)
+    result = DesktopService().search_jobs(
+        query="Data Scientist",
+        location="Paris",
+        sources=["linkedin", "welcometothejungle"],
+        max_results=100,
+        date_posted="week",
+        progress=progress,
+    )
+
+    assert messages[:2] == [
+        "Recherche en cours : LinkedIn, Welcome to the Jungle…",
+        "Recherche en cours : LinkedIn…",
+    ]
     assert not result.errors
 
 

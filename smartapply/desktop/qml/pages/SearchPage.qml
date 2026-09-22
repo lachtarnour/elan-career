@@ -106,6 +106,13 @@ Item {
                             Layout.fillWidth: true
                             spacing: 4
                             Text { Layout.fillWidth: true; text: "Résultats par source"; color: Theme.inkSoft; font.pixelSize: 13; font.weight: Font.DemiBold }
+                            Text {
+                                Layout.fillWidth: true
+                                text: "LinkedIn (Apify) et France Travail : limite par requête, sans plafond total."
+                                color: Theme.inkSoft
+                                font.pixelSize: 12
+                                wrapMode: Text.WordWrap
+                            }
                         }
                         AppSpinBox { id: maxResults; from: 1; to: 100; value: 20; Layout.preferredWidth: 132 }
                     }
@@ -126,7 +133,17 @@ Item {
                     Layout.fillWidth: true
                     Layout.preferredWidth: 2
                     Layout.alignment: Qt.AlignTop
-                    SectionTitle { title: "Sources" }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        SectionTitle { Layout.fillWidth: true; title: "Sources" }
+                        AppButton {
+                            objectName: "refreshSourcesButton"
+                            text: AppBridge.diagnosticsChecking ? "Vérification…" : "Actualiser"
+                            iconSource: Theme.icon("refresh")
+                            enabled: !AppBridge.diagnosticsChecking
+                            onClicked: AppBridge.refreshDiagnostics()
+                        }
+                    }
                     Repeater {
                         model: [
                             {label: "Google Jobs", symbol: "G", key: "serpapi"},
@@ -134,18 +151,27 @@ Item {
                             {label: "LinkedIn", symbol: "in", key: "linkedin"},
                             {label: "Welcome to the Jungle", symbol: "W", key: "welcometothejungle"}
                         ]
-                        delegate: RowLayout {
+                        delegate: ColumnLayout {
                             required property var modelData
                             readonly property bool available: Boolean((AppBridge.diagnostics.source_ready || ({}))[modelData.key])
+                            readonly property var health: (AppBridge.diagnostics.source_health || ({}))[modelData.key] || ({})
                             Layout.fillWidth: true
-                            spacing: 8
+                            spacing: 4
                             ChoiceChip {
+                                objectName: "sourceChip_" + modelData.key
                                 Layout.fillWidth: true
                                 text: modelData.label
                                 symbol: modelData.symbol
                                 enabled: parent.available
-                                checked: enabled && root.selectedSourceKeys.indexOf(modelData.key) >= 0
+                                checked: root.selectedSourceKeys.indexOf(modelData.key) >= 0
                                 onToggled: root.setSourceSelected(modelData.key, checked)
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                text: parent.health.message || "Vérification en cours…"
+                                color: Theme.inkMuted
+                                font.pixelSize: 11
+                                wrapMode: Text.Wrap
                             }
                         }
                     }
