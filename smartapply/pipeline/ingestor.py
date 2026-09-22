@@ -45,6 +45,7 @@ class Ingestor:
         *,
         max_results: int | None = 20,
         split_or: bool = True,
+        include_research_cdd: bool = False,
         stop_requested: Callable[[], bool] | None = None,
         **search_kwargs,
     ) -> IngestReport:
@@ -54,6 +55,7 @@ class Ingestor:
             location,
             max_results=max_results,
             split_or=split_or,
+            include_research_cdd=include_research_cdd,
             stop_requested=stop_requested,
             **search_kwargs,
         )
@@ -67,6 +69,7 @@ class Ingestor:
         *,
         max_results: int | None = 20,
         split_or: bool = True,
+        include_research_cdd: bool = False,
         stop_requested: Callable[[], bool] | None = None,
         **search_kwargs,
     ) -> IngestCollection:
@@ -77,8 +80,19 @@ class Ingestor:
                 f"Source {source!r} is not configured. "
                 "Check your .env (SERPAPI_API_KEY, FRANCETRAVAIL_* or APIFY_TOKEN)."
             )
-        query_plan = build_source_query_plan(source, query, split_or=split_or)
+        query_plan = build_source_query_plan(
+            source,
+            query,
+            split_or=split_or,
+            include_research_cdd=include_research_cdd,
+        )
         queries = list(query_plan.all_queries)
+        if include_research_cdd and source.strip().lower() == "linkedin":
+            # The LinkedIn actor defaults to Full-time via LINKEDIN_CONTRACT_TYPE.
+            # Include its Contract/Temporary selectors so CDD-like doctoral
+            # offers reach the local filter; ordinary incompatible contracts are
+            # still rejected there.
+            search_kwargs.setdefault("contract_type", ["F", "T", "C"])
         logger.info(
             "Ingesting from %s: q=%r primary_queries=%d fallback_queries=%d location=%r",
             source,
@@ -115,7 +129,7 @@ class Ingestor:
             skipped_existing_during_collect=collect_result.skipped_existing,
             hit_raw_seen_cap=collect_result.hit_raw_seen_cap,
             cancelled=collect_result.cancelled,
-            warnings=source_warnings,
+            warnings=[*collect_result.warnings, *source_warnings],
         )
 
     def persist_collection(self, collection: IngestCollection) -> IngestReport:

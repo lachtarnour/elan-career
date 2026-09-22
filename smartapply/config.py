@@ -134,3 +134,21 @@ def get_settings() -> Settings:
     s = Settings()
     s.ensure_dirs()
     return s
+
+
+def get_source_settings() -> Settings:
+    """Reload source configuration without changing the active application runtime.
+
+    Credentials and source options follow the normal environment-over-dotenv
+    precedence on every call. All other settings remain pinned to the cached
+    runtime, so refreshing a source cannot switch a database, profile or model
+    underneath an ongoing operation. Existing settings/scrapers are untouched.
+    """
+    source_fields = {
+        name
+        for name in Settings.model_fields
+        if name == "apify_token"
+        or name.startswith(("serpapi_", "francetravail_", "linkedin_", "wttj_"))
+    }
+    runtime = get_settings().model_dump(exclude=source_fields)
+    return Settings(_env_file=str(ENV_FILE), **runtime)

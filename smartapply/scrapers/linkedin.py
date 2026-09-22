@@ -9,13 +9,12 @@ from datetime import datetime
 from typing import Any
 
 import requests
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from smartapply.config import get_settings
+from smartapply.config import get_source_settings
 from smartapply.logging_setup import get_logger
 from smartapply.offers import RawJob, make_external_id
 from smartapply.parsing.cleaner import normalize_whitespace, strip_html
-from smartapply.scrapers.base import Scraper, ScraperConfigError
+from smartapply.scrapers.base import Scraper, ScraperConfigError, ScraperError
 from smartapply.scrapers.serpapi import normalize_date_posted
 from smartapply.utils.contracts import normalize_source_contract_type
 
@@ -119,7 +118,7 @@ class LinkedInJobsScraper(Scraper):
         url: str = APIFY_LINKEDIN_JOBS_URL,
         timeout: int | None = None,
     ):
-        settings = get_settings()
+        settings = get_source_settings()
         self.token = token or settings.apify_token
         self.url = url
         self.timeout = timeout if timeout is not None else settings.linkedin_timeout
@@ -133,25 +132,38 @@ class LinkedInJobsScraper(Scraper):
     def is_available(self) -> bool:
         return bool(self.token)
 
-    @retry(
-        retry=retry_if_exception_type(requests.RequestException),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=8),
-        reraise=True,
-    )
     def _fetch(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
-        response = requests.post(
-            self.url,
-            headers={"Authorization": f"Bearer {self.token}"},
-            json=payload,
-            timeout=self.timeout,
-        )
-        if _is_non_retryable_apify_response(response):
-            raise ScraperConfigError(_apify_http_error_message(response))
-        response.raise_for_status()
-        data = response.json()
+        # Starting an Actor is not idempotent. A lost response can leave the
+        # original paid run active, so never submit the POST again automatically.
+        try:
+            response = requests.post(
+                self.url,
+                headers={"Authorization": f"Bearer {self.token}"},
+                json=payload,
+                timeout=self.timeout,
+            )
+        except requests.Timeout:
+            raise ScraperError(
+                "LinkedIn : délai de réponse Apify dépassé. La recherche peut encore "
+                "être en cours sur Apify ; vérifiez son état avant de la relancer. "
+                "Aucune relance automatique n’a été effectuée."
+            ) from None
+        except requests.RequestException:
+            raise ScraperError(
+                "LinkedIn : connexion à Apify interrompue. L’état de la recherche "
+                "est inconnu ; vérifiez Apify avant de la relancer. "
+                "Aucune relance automatique n’a été effectuée."
+            ) from None
+        if _is_apify_configuration_error(response):
+            raise ScraperConfigError(_apify_http_error_message(response, token=self.token))
+        if response.status_code >= 400:
+            raise ScraperError(_apify_http_error_message(response, token=self.token))
+        try:
+            data = response.json()
+        except ValueError:
+            raise ScraperError("LinkedIn : réponse Apify invalide (JSON illisible).") from None
         if not isinstance(data, list):
-            raise ScraperConfigError("LinkedIn Apify actor did not return a list")
+            raise ScraperError("LinkedIn : réponse Apify invalide (liste d’offres attendue).")
         return [item for item in data if isinstance(item, dict)]
 
     def search(
@@ -202,13 +214,11 @@ class LinkedInJobsScraper(Scraper):
         ]
         skip_job_ids = list(dict.fromkeys(initial_skip_job_ids))
         base_payload: dict[str, Any] = {
-            "title": query.strip(),
+            "keywords": query.strip(),
             "location": (location or "").strip() or None,
             "datePosted": _to_apify_date_posted(
                 date_posted if date_posted is not None else self.default_date_posted
             ),
-            "contractType": contract_values,
-            "remote": remote_values,
             "urlPath": url_path,
         }
 
@@ -229,7 +239,9 @@ class LinkedInJobsScraper(Scraper):
             payload = _clean_payload(
                 {
                     **base_payload,
-                    "experienceLevel": experience_pass,
+                    "urlParam": _search_url_params(
+                        contract_values, experience_pass, remote_values
+                    ),
                     "limit": remaining,
                     "skipJobId": list(skip_job_ids),
                 }
@@ -238,8 +250,8 @@ class LinkedInJobsScraper(Scraper):
             request_started = time.monotonic()
             logger.info(
                 "LinkedIn Apify request start: q=%r experience=%s limit=%s timeout=%ss",
-                payload.get("title"),
-                payload.get("experienceLevel"),
+                payload.get("keywords"),
+                experience_pass,
                 payload.get("limit"),
                 self.timeout,
             )
@@ -255,8 +267,8 @@ class LinkedInJobsScraper(Scraper):
                 )
                 logger.error(
                     "LinkedIn Apify request failed: q=%r experience=%s elapsed=%.1fs error=%s",
-                    payload.get("title"),
-                    payload.get("experienceLevel"),
+                    payload.get("keywords"),
+                    experience_pass,
                     elapsed,
                     detail,
                     exc_info=True,
@@ -265,8 +277,8 @@ class LinkedInJobsScraper(Scraper):
 
             logger.info(
                 "LinkedIn Apify request done: q=%r experience=%s items=%d elapsed=%.1fs",
-                payload.get("title"),
-                payload.get("experienceLevel"),
+                payload.get("keywords"),
+                experience_pass,
                 len(items),
                 time.monotonic() - request_started,
             )
@@ -277,7 +289,11 @@ class LinkedInJobsScraper(Scraper):
                     return
                 raw_id = _text(raw.get("id"))
                 raw_experience_code = _linkedin_experience_code(raw.get("experienceLevel"))
-                if raw_experience_code and raw_experience_code not in experience_pass:
+                if (
+                    experience_pass
+                    and raw_experience_code
+                    and raw_experience_code not in experience_pass
+                ):
                     skipped_experience_mismatch += 1
                     continue
                 if raw_id and raw_id not in skip_job_ids:
@@ -291,18 +307,20 @@ class LinkedInJobsScraper(Scraper):
                     "api_payload": payload,
                     "experience_pass": pass_index,
                     "experience_fallback_used": pass_index > 1,
-                    "title": payload.get("title"),
+                    "title": payload.get("keywords"),
                     "location": payload.get("location"),
                     "datePosted": payload.get("datePosted"),
-                    "contractType": payload.get("contractType"),
-                    "experienceLevel": payload.get("experienceLevel"),
-                    "remote": payload.get("remote"),
+                    "contractType": list(contract_values),
+                    "experienceLevel": list(experience_pass),
+                    "remote": list(remote_values),
                     "limit": payload.get("limit"),
                 }
                 yield job.model_copy(update={"source_data": source_data})
                 yielded += 1
-                if yielded >= limit:
-                    return
+
+            # The limit belongs to the API request. Drain the complete response
+            # even if Apify returns more items than requested; never discard
+            # already-fetched offers to enforce a local quota.
 
             if skipped_experience_mismatch:
                 logger.info(
@@ -432,22 +450,56 @@ def _clean_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in payload.items() if value not in ("", None, [])}
 
 
-def _is_non_retryable_apify_response(response: requests.Response) -> bool:
+def _search_url_params(
+    contract_type: list[str], experience_level: list[str], remote: list[str]
+) -> list[dict[str, str]]:
+    """Send legacy LinkedIn selectors through the Actor's supported URL input.
+
+    LinkedIn may ignore URL filters; the experience check on returned facts
+    remains necessary and never treats a requested filter as a job fact.
+    """
+    return [
+        {"key": key, "value": ",".join(values)}
+        for key, values in (
+            ("f_JT", contract_type),
+            ("f_E", experience_level),
+            ("f_WT", remote),
+        )
+        if values
+    ]
+
+
+def _is_apify_configuration_error(response: requests.Response) -> bool:
     status_code = response.status_code
     if status_code < 400:
         return False
     return status_code not in {408, 429} and status_code < 500
 
 
-def _apify_http_error_message(response: requests.Response) -> str:
+def _apify_http_error_message(response: requests.Response, *, token: str = "") -> str:
     status_code = response.status_code
     detail = _apify_error_detail(response)
+    if token:
+        detail = detail.replace(token, "[redacted]")
+    if status_code in {401, 403}:
+        explanation = "Vérifiez le jeton APIFY_TOKEN et l’accès à l’acteur LinkedIn."
+    elif status_code == 402:
+        explanation = "Vérifiez les crédits et l’abonnement du compte Apify."
+    elif status_code == 429:
+        explanation = "Quota ou limite de requêtes Apify atteint."
+    elif status_code == 408 or status_code >= 500:
+        explanation = (
+            "La réponse de la recherche n’a pas pu être récupérée. "
+            "Vérifiez l’état de l’exécution sur Apify avant de la relancer."
+        )
+    else:
+        explanation = "Vérifiez les paramètres de recherche et l’accès à l’acteur Apify."
     message = (
-        f"LinkedIn Apify actor failed with HTTP {status_code}. "
-        "Check APIFY_TOKEN, actor access/subscription, and Apify account credits."
+        f"LinkedIn : erreur Apify HTTP {status_code}. {explanation} "
+        "Aucune relance automatique n’a été effectuée."
     )
     if detail:
-        message = f"{message} Apify says: {detail}"
+        message = f"{message} Détail Apify : {detail}"
     return message
 
 

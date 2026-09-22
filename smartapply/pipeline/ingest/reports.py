@@ -26,8 +26,8 @@ class IngestReport:
     skipped_known_during_collect: int = 0
     # True when the collector stopped because it hit the raw-fetch safety
     # cap instead of either reaching ``max_results`` new offers or exhausting
-    # the source. LinkedIn/SerpApi use a strict cap equal to ``max_results``;
-    # other sources may use extra scan headroom to skip known duplicates.
+    # the source. SerpApi uses a strict cap equal to ``max_results``;
+    # LinkedIn/France Travail have no global cap; other sources use extra scan headroom.
     hit_raw_seen_cap: bool = False
     # True when collection stopped because the UI/user cancellation callback
     # requested a cooperative stop.
@@ -57,8 +57,8 @@ class IngestCollection:
 
 
 # How many raw offers a single non-strict source run is allowed to *examine*
-# before giving up. LinkedIn/SerpApi are intentionally stricter in
-# ``collection.py`` to avoid unexpected paid API usage.
+# before giving up. SerpApi is intentionally stricter in ``collection.py``;
+# LinkedIn/France Travail instead bound each query without capping the combined results.
 _RAW_SEEN_MULTIPLIER = 10
 _RAW_SEEN_MIN = 50
 
@@ -72,3 +72,4 @@ class _CollectResult:
     skipped_existing: int
     hit_raw_seen_cap: bool
     cancelled: bool = False
+    warnings: list[str] = field(default_factory=list)

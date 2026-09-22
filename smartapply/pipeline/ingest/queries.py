@@ -11,6 +11,7 @@ from smartapply.pipeline.ingest.role_families import (
 )
 
 OR_SPLIT_RE = re.compile(r"\s+\bOR\b\s+", flags=re.IGNORECASE)
+RESEARCH_CDD_SEARCH_TERMS = ("thèse", "doctorat", "PhD")
 
 
 @dataclass(frozen=True)
@@ -55,14 +56,24 @@ def build_source_queries(
     query: str,
     *,
     split_or: bool = True,
+    include_research_cdd: bool = False,
 ) -> list[str]:
     """Build the concrete query lanes required by one source.
 
     Family detection always examines individual ``OR`` terms. SerpAPI receives
     their expanded union as one boolean query, France Travail and LinkedIn use
-    one lane per title, and WTTJ keeps its single query-agnostic feed.
+    one lane per title, and WTTJ keeps its single query-agnostic feed. When
+    ``include_research_cdd`` is enabled, dedicated doctoral-title lanes are
+    added without a CDI suffix so CDD thesis offers can reach the local filter.
     """
-    return list(build_source_query_plan(source, query, split_or=split_or).all_queries)
+    return list(
+        build_source_query_plan(
+            source,
+            query,
+            split_or=split_or,
+            include_research_cdd=include_research_cdd,
+        ).all_queries
+    )
 
 
 def build_source_query_plan(
@@ -70,6 +81,7 @@ def build_source_query_plan(
     query: str,
     *,
     split_or: bool = True,
+    include_research_cdd: bool = False,
 ) -> SourceQueryPlan:
     """Separate explicit role searches from interleaved alias fallbacks."""
     source_key = source.strip().lower()
@@ -82,15 +94,42 @@ def build_source_query_plan(
     family_terms = [re.sub(r"\s+cdi$", "", part, flags=re.IGNORECASE).strip() for part in parts]
     primary_terms = _stable_unique_terms(family_terms)
     expanded = expand_role_terms(family_terms)
-    if all_cdi and source_key != "serpapi":
+    if all_cdi and source_key != "serpapi" and not include_research_cdd:
         expanded = [f"{candidate} CDI" for candidate in expanded]
     if source_key == "serpapi":
-        return SourceQueryPlan(primary=(" OR ".join(expanded),))
+        if include_research_cdd:
+            expanded = expanded + _research_query_variants(primary_terms)
+        return SourceQueryPlan(primary=(" OR ".join(_unique_queries(expanded)),))
     primary_count = min(len(primary_terms), len(expanded))
+    primary = expanded[:primary_count]
+    fallbacks = expanded[primary_count:]
+    if include_research_cdd:
+        primary = primary + _research_query_variants(primary)
+        fallbacks = fallbacks + _research_query_variants(fallbacks)
     return SourceQueryPlan(
-        primary=tuple(expanded[:primary_count]),
-        fallbacks=tuple(expanded[primary_count:]),
+        primary=tuple(primary),
+        fallbacks=tuple(fallbacks),
     )
+
+
+def _research_query_variants(terms: list[str]) -> list[str]:
+    return [
+        f"{term} {research_term}"
+        for term in terms
+        for research_term in RESEARCH_CDD_SEARCH_TERMS
+    ]
+
+
+def _unique_queries(queries: list[str]) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        key = re.sub(r"\s+", " ", query.strip()).casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(query.strip())
+    return unique
 
 
 def _stable_unique_terms(terms: list[str]) -> list[str]:

@@ -39,6 +39,21 @@ Paramètres importants :
 | `typeContrat` | Option explicite si fournie. |
 | `minCreationDate/maxCreationDate` | Conversion de `date_posted` (`today`, `3days`, `week`, `month`). |
 
+## Limite par requête
+
+Le champ « Résultats par source » s'applique **à chaque recherche par intitulé**
+pour France Travail, comme pour LinkedIn/Apify. Toutes les recherches prévues
+sont parcourues, y compris les variantes d'intitulés et les recherches doctorales,
+sans plafond global sur leur cumul. Avec une limite de 100 et quatre recherches
+complètes, jusqu'à 400 offres sont collectées avant déduplication et filtrage local.
+
+Chaque recherche est paginée par lots de 50 maximum : une limite de 100 demande
+normalement deux pages de 50, une limite de 75 demande une page de 50 puis 25.
+Les réponses déjà reçues sont traitées intégralement, même si l'API dépasse la
+taille demandée. Une erreur sur une page conserve les pages précédentes et les
+autres recherches continuent, avec un avertissement. Les erreurs de configuration
+ou d'autorisation arrêtent les requêtes restantes sans supprimer les offres reçues.
+
 ## Mapping
 
 | Sortie | Champs France Travail |

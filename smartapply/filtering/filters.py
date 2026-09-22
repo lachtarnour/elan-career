@@ -24,6 +24,7 @@ from smartapply.filtering.filter_helpers import (
     _has_hidden_senior_role,
     _has_independent_contract_context,
     _has_part_time_contract_context,
+    _has_research_degree_title,
     _has_stage_contract_context,
     _norm,
     _prestataire_is_corroborated,
@@ -69,6 +70,7 @@ __all__ = [
     "_has_freelance_contract_context",
     "_has_independent_contract_context",
     "_has_part_time_contract_context",
+    "_has_research_degree_title",
     "_has_stage_contract_context",
     "_visible_blocked_contract_marker",
 ]
@@ -91,8 +93,23 @@ class JobFilter:
         remote = _norm(remote_value)
         combined = f"{title}\n{description}"
 
+        structured_contract = facts.structured_contract_type
+        structured_contract_norm = _norm(structured_contract)
+        structured_contract_tags = _structured_contract_tags(facts)
+        raw_contract_tags = contract_type_tags(job.contract_type)
+        research_cdd_exception = _has_research_degree_title(title) and (
+            bool((raw_contract_tags | structured_contract_tags) & CDD_EQUIVALENT_TAGS)
+            or (
+                not raw_contract_tags
+                and not structured_contract_tags
+                and _has_cdd_contract_context(title, description)
+            )
+        )
+
         reasons: list[str] = []
         score = 0.5  # neutral baseline
+        if research_cdd_exception:
+            reasons.append("contract_exception:research_degree_title_cdd")
         if rome_context := _rome_context_reason(facts):
             reasons.append(rome_context)
         if search_context := _search_context_reason(facts):
@@ -145,13 +162,14 @@ class JobFilter:
         incompatible_tags = sorted(
             blocked_contract_tags(job.contract_type, self.rules.accepted_contract_types)
         )
+        if research_cdd_exception:
+            incompatible_tags = [
+                tag for tag in incompatible_tags if tag not in CDD_EQUIVALENT_TAGS
+            ]
         if contract and incompatible_tags:
             reasons.append(f"blocked_contract_type:{contract} (tag '{incompatible_tags[0]}')")
             return FilterResult(kept=False, score=0.0, reasons=reasons)
 
-        structured_contract = facts.structured_contract_type
-        structured_contract_norm = _norm(structured_contract)
-        structured_contract_tags = _structured_contract_tags(facts)
         if structured_contract_norm == "prestataire":
             if _prestataire_is_corroborated(
                 title=title,
@@ -168,6 +186,10 @@ class JobFilter:
                 self.rules.accepted_contract_types,
             )
         )
+        if research_cdd_exception:
+            structured_incompatible = [
+                tag for tag in structured_incompatible if tag not in CDD_EQUIVALENT_TAGS
+            ]
         if structured_contract_norm and structured_incompatible:
             reasons.append(
                 f"blocked_contract_structured:{structured_contract_norm} "
@@ -195,9 +217,17 @@ class JobFilter:
             reasons.append("blocked_work_time_visible_text:part_time")
             return FilterResult(kept=False, score=0.0, reasons=reasons)
 
-        if contract and self.rules.blocked_contract_types:
+        blocked_contract_types = self.rules.blocked_contract_types
+        if research_cdd_exception:
+            blocked_contract_types = tuple(
+                marker
+                for marker in blocked_contract_types
+                if not (contract_type_tags(marker) & CDD_EQUIVALENT_TAGS)
+            )
+
+        if contract and blocked_contract_types:
             matched = next(
-                (b for b in self.rules.blocked_contract_types if b in contract),
+                (b for b in blocked_contract_types if b in contract),
                 None,
             )
             if matched:
@@ -207,20 +237,21 @@ class JobFilter:
         # Some sources put "Freelance" / "Indépendant" only in the title or
         # description while the structured contract is missing. Keep the same
         # configurable blocked_contract_types list, but search visible text too.
-        if self.rules.blocked_contract_types:
+        if blocked_contract_types:
             matched = _visible_blocked_contract_marker(
                 title=title,
                 description=description,
-                blocked_contract_types=self.rules.blocked_contract_types,
+                blocked_contract_types=blocked_contract_types,
             )
             if matched:
                 reasons.append(f"blocked_contract_visible_text:{matched}")
                 return FilterResult(kept=False, score=0.0, reasons=reasons)
 
         accepted_contract_tags = contract_types_to_tags(self.rules.accepted_contract_types)
-        if not (accepted_contract_tags & CDD_EQUIVALENT_TAGS) and _has_cdd_contract_context(
-            title,
-            description,
+        if (
+            not (accepted_contract_tags & CDD_EQUIVALENT_TAGS)
+            and not research_cdd_exception
+            and _has_cdd_contract_context(title, description)
         ):
             reasons.append("blocked_contract_visible_text:cdd")
             return FilterResult(kept=False, score=0.0, reasons=reasons)
@@ -407,7 +438,9 @@ class JobFilter:
         contract_for_matching = _contract_for_matching(job.contract_type, facts)
         contract = _norm(contract_for_matching)
         if self.rules.accepted_contract_types and contract:
-            if contract_matches_accepted(
+            if research_cdd_exception:
+                reasons.append(f"contract_ok:{contract}:research_degree_title")
+            elif contract_matches_accepted(
                 contract_for_matching,
                 self.rules.accepted_contract_types,
             ):
