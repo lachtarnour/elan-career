@@ -12,11 +12,12 @@ from pathlib import Path
 import pytest
 
 from smartapply.llm import (
-    CVPersonalization,
+    ApplicationTexts,
+    CVSelection,
     DocumentTextReview,
-    JobAnalysis,
+    JobFitAssessment,
     MockLLMProvider,
-    MotivationLetter,
+    OfferAnalysis,
 )
 from smartapply.profile import get_profile
 from smartapply.ranking import MockEmbeddingsProvider
@@ -115,8 +116,8 @@ SAMPLE_JOBS = [
 def _register_llm_fixtures() -> None:
     MockLLMProvider.clear()
     MockLLMProvider.register(
-        "job_analysis",
-        JobAnalysis(
+        "job_offer_analysis",
+        OfferAnalysis(
             role_type="Data Scientist NLP",
             seniority="mid",
             domain="HealthTech",
@@ -127,12 +128,6 @@ def _register_llm_fixtures() -> None:
             ],
             required_skills=["Python", "PyTorch", "RAG", "FAISS"],
             nice_to_have=["AWS", "Docker"],
-            match_reasons=[
-                "Forte expérience NLP/RAG",
-                "Projet Evidence RAG",
-                "Pipelines speech via Whisper",
-            ],
-            risks=["Pas d'expérience prod cloud à grande échelle"],
             cv_keywords_to_include=[
                 "PyTorch",
                 "Hugging Face",
@@ -144,30 +139,55 @@ def _register_llm_fixtures() -> None:
         ),
     )
     MockLLMProvider.register(
+        "job_fit_assessment",
+        JobFitAssessment(
+            fit_score=0.5,
+            match_reasons=[
+                "Forte expérience NLP/RAG",
+                "Projet Evidence RAG",
+                "Pipelines speech via Whisper",
+            ],
+            risks=["Pas d'expérience prod cloud à grande échelle"],
+        ),
+    )
+    MockLLMProvider.register(
         "cv_adaptation",
-        CVPersonalization(
+        CVSelection(
             cv_title="Data Scientist – NLP & Multimodal AI",
-            professional_summary=(
-                "Data Scientist with 2 years in NLP and machine learning. "
-                "Built RAG and speech pipelines and evaluated multimodal "
-                "classifiers with 0.82 accuracy on synthetic test samples."
-            ),
             selected_project_ids=[
                 "proj_evidence_rag",
                 "proj_ner_camembert",
                 "proj_gpt2",
+            ],
+            project_selection_reasons=[
+                {
+                    "project_id": project_id,
+                    "reason": "Demonstrates documented NLP model and pipeline work.",
+                    "offer_evidence": "Fine-tuner des modèles transformers",
+                    "complementary_value": "",
+                }
+                for project_id in ["proj_evidence_rag", "proj_ner_camembert", "proj_gpt2"]
             ],
             skills_order=["ml_ai", "data_infra", "stats_signal"],
             warnings=[],
         ),
     )
     MockLLMProvider.register(
-        "motivation_letter",
-        MotivationLetter(
-            subject="Candidature - Data Scientist NLP - Camille Martin",
-            body=(
-                "Bonjour,\n\n"
-                "Je vous adresse ma candidature pour le poste de Data Scientist NLP. "
+        "application_texts",
+        ApplicationTexts(
+            professional_summary=(
+                "Data Scientist with 2 years in NLP and machine learning. "
+                "Built RAG and speech pipelines and evaluated multimodal "
+                "classifiers with 0.82 accuracy on synthetic test samples."
+            ),
+            motivation_letter_subject="Candidature - Data Scientist NLP - Camille Martin",
+            motivation_letter_body=(
+                "Les missions de recherche documentaire et de traitement du langage "
+                "présentées dans votre offre m'intéressent par leur lien avec des "
+                "besoins concrets. Je souhaite contribuer à des systèmes dont les "
+                "réponses sont utiles et compréhensibles. Le travail sur les données "
+                "médicales demande une attention particulière à la qualité des sources "
+                "et à la manière de présenter les résultats aux utilisateurs.\n\n"
                 "Mes deux années chez Aurore Labs m'ont permis de construire des pipelines "
                 "NLP avec Whisper et PyTorch, ainsi que des classifieurs multimodaux "
                 "atteignant une exactitude de 0.82 sur un jeu de test synthétique. "
@@ -175,10 +195,13 @@ def _register_llm_fixtures() -> None:
                 "génération de réponses sourcées, rejoint directement les missions de "
                 "RAG, de fine-tuning et de déploiement que vous décrivez. Ce parcours "
                 "combine expérimentation, évaluation et intégration logicielle sur des "
-                "données complexes. Je serais ravi d'échanger sur la manière dont ce "
-                "profil peut contribuer à vos sujets NLP et IA appliquée.\n\n"
-                "Cordialement,\n"
-                "Camille Martin"
+                "données complexes.\n\n"
+                "Je souhaite poursuivre ce travail dans une équipe où les choix "
+                "techniques se discutent à partir des usages et des résultats observés. "
+                "Je pourrais contribuer aux expérimentations, à leur évaluation et à "
+                "la documentation des limites rencontrées. Je serais ravi d'échanger "
+                "sur vos priorités et sur la manière dont mon parcours pourrait "
+                "soutenir vos sujets NLP et IA appliquée."
             ),
         ),
     )
@@ -186,9 +209,6 @@ def _register_llm_fixtures() -> None:
         "document_review",
         DocumentTextReview(
             issues=[],
-            professional_summary=None,
-            motivation_letter_subject=None,
-            motivation_letter_body=None,
         ),
     )
 

@@ -11,12 +11,21 @@ Each bullet exposes:
 
 from __future__ import annotations
 
+import json
+
 from smartapply.llm.prompts.loader import load_prompt, render_prompt
 from smartapply.llm.prompts.skill_profiles import format_skill_profiles
 from smartapply.llm.schemas import JobAnalysis
 from smartapply.profile import Bullet, Experience, Profile, Project
 
-SYSTEM = load_prompt("cv_adaptation/system.j2")
+
+def build_system_prompt() -> str:
+    """Render selection instructions; prose is written after CV assembly."""
+    return render_prompt(
+        "cv_adaptation/system.j2",
+        recruiter_text_rules=load_prompt("shared/recruiter_text_rules.j2"),
+        project_selection_rules=load_prompt("cv_adaptation/project_selection_rules.j2"),
+    )
 
 
 def _format_bullet(bullet: Bullet) -> str:
@@ -44,6 +53,10 @@ def _format_projects(projects: list[Project]) -> str:
     for proj in projects:
         header = f"- id={proj.id} :: {proj.name}" + (f" ({proj.status})" if proj.status else "")
         out.append(header)
+        out.append(
+            "  selection_policy: "
+            + json.dumps(proj.selection_policy.model_dump(), ensure_ascii=False)
+        )
         if proj.keywords:
             out.append(f"  keywords: {', '.join(proj.keywords)}")
         for b in proj.bullets:
@@ -84,6 +97,7 @@ def build_user_prompt(
     job_company: str,
     selected_experiences: list[Experience],
     selected_projects: list[Project],
+    job_description: str = "",
 ) -> str:
     allowed = ", ".join(sorted(profile.skills.allowed_skills))
     style = profile.style_guide
@@ -99,6 +113,7 @@ def build_user_prompt(
         "cv_adaptation/user.j2",
         job_title=job_title,
         job_company=job_company,
+        job_description=job_description,
         role_type=analysis.role_type,
         seniority=analysis.seniority,
         domain=analysis.domain,
@@ -116,8 +131,6 @@ def build_user_prompt(
         projects_block=_format_projects(selected_projects),
         tone=style.tone,
         voice=style.voice,
-        max_summary_lines=style.max_summary_lines,
-        max_summary_length=style.max_summary_length,
         do=do,
         dont=dont,
     )

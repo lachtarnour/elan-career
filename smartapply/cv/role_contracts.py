@@ -25,22 +25,17 @@ from __future__ import annotations
 import json
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from smartapply.cv.role_family import KNOWN_ROLE_FAMILIES, classify, has_data_scientist_ia_signal
-from smartapply.llm import AdaptedCV, JobAnalysis, SkillSelectionBlock
+from smartapply.llm import CVSelection, JobAnalysis, SkillSelectionBlock
 from smartapply.utils.skill_terms import skill_term_matches
+
+_CV = TypeVar("_CV", bound=CVSelection)
 
 _CONTRACTS_PATH = Path(__file__).with_name("role_contracts.json")
 
 _DS_IA_EXTRA_SKILLS: tuple[str, ...] = ("NLP", "Transformers")
-
-_PROJECT_SIGNAL_TERMS: dict[str, tuple[str, ...]] = {
-    "proj_svc": ("speech", "vocoder", "hubert", "rmvpe", "hifi-gan"),
-    "proj_scifact_rag": ("rag", "faiss", "vector search", "bm25"),
-    "proj_aal_stock_forecasting": ("arima/sarima", "forecasting", "time-series analysis"),
-    "proj_rl_gym": ("openai gym", "reinforcement learning", "game-based tasks"),
-}
 
 
 @lru_cache(maxsize=1)
@@ -110,7 +105,7 @@ def _offer_anchored_skills(analysis: JobAnalysis) -> set[str]:
 
 
 def offer_anchored_categories(
-    adapted: AdaptedCV,
+    adapted: _CV,
     analysis: JobAnalysis,
 ) -> set[str]:
     """Return categories containing skills explicitly requested by the offer."""
@@ -401,48 +396,15 @@ def _final_category_order(
     return [cid for cid in candidates if filtered.get(cid)]
 
 
-def _strip_forbidden_cv_content(
-    adapted: AdaptedCV,
-    *,
-    forbidden_active: set[str],
-    offer_terms: set[str],
-) -> AdaptedCV:
-    if not forbidden_active:
-        return adapted
-
-    cleaned_project_ids = []
-    for project_id in adapted.selected_project_ids:
-        signals = _PROJECT_SIGNAL_TERMS.get(project_id, ())
-        signal_norms = {_normalize(signal) for signal in signals}
-        has_forbidden_signal = bool(signal_norms & forbidden_active)
-        has_offer_anchored_signal = any(
-            _is_explicit_offer_skill(signal, offer_terms) for signal in signal_norms
-        )
-        if signals and has_forbidden_signal and not has_offer_anchored_signal:
-            continue
-        cleaned_project_ids.append(project_id)
-
-    if cleaned_project_ids == adapted.selected_project_ids:
-        return adapted
-    warnings = list(adapted.warnings)
-    warnings.append("contract_removed_forbidden_projects")
-    return adapted.model_copy(
-        update={
-            "selected_project_ids": cleaned_project_ids,
-            "warnings": warnings,
-        }
-    )
-
-
 def apply_contract(
-    adapted: AdaptedCV,
+    adapted: _CV,
     *,
     analysis: JobAnalysis,
     job_title: str,
     allowed_skills_lower: set[str],
     supported_skills_by_category: dict[str, list[str]] | None = None,
     contracts: dict[str, dict[str, Any]] | None = None,
-) -> tuple[AdaptedCV, str]:
+) -> tuple[_CV, str]:
     """Apply the role-family contract for ``analysis``.
 
     Returns the updated CV plus the family id used.
@@ -457,11 +419,6 @@ def apply_contract(
     allowed_categories = set(contract.get("allowed_categories", []))
     forbidden_active = _active_forbidden(contract, analysis)
     offer_terms = _offer_anchored_skills(analysis)
-    adapted = _strip_forbidden_cv_content(
-        adapted,
-        forbidden_active=forbidden_active,
-        offer_terms=offer_terms,
-    )
     must_show = _augmented_must_show(family, contract, analysis, job_title)
 
     # Build the filtered selection. Preserve LLM ordering for kept categories.

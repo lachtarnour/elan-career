@@ -167,7 +167,7 @@ class ApplicationPersistenceMixin:
                 application.id,
                 doc_type="document_review",
                 content=json.dumps(report.document_review, ensure_ascii=False),
-                extra={"scope": "professional_summary_and_motivation_letter"},
+                extra={"scope": "cv_title_professional_summary_and_motivation_letter"},
             )
             # Keep a selected offer in the first-class ``shortlisted`` state;
             # the application itself carries the review/sent lifecycle.

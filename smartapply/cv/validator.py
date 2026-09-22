@@ -18,22 +18,26 @@ Soft rules (warnings → keep but flag):
 - For non-verified evidence (``self_reported``, ``inferred``), require a
   stricter overlap to avoid over-claiming.
 - Approved source bullets are never shortened to meet generated-text limits.
-- Summary length capped at style_guide.max_summary_length.
-- Summary line count capped at style_guide.max_summary_lines.
+- Summary length above style_guide.max_summary_length is reported, never truncated.
+- Summary line count above style_guide.max_summary_lines is reported.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import TypeVar
 
 from rapidfuzz import fuzz
 
 from smartapply.cv.assembly import profile_experiences
-from smartapply.llm import AdaptedCV, SkillSelectionBlock
+from smartapply.cv.project_selection import project_policy_errors
+from smartapply.cv.text_hygiene import evidence_metadata_warnings
+from smartapply.llm import AdaptedCV, AssembledCV, SkillSelectionBlock
 from smartapply.profile import Profile
 
 _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
+_CV = TypeVar("_CV", AssembledCV, AdaptedCV)
 
 
 @dataclass
@@ -76,7 +80,6 @@ class CvValidator:
         self.profile = profile
         self.bullet_index = profile.bullet_index()
         self.exp_index = {e.id: e for e in profile.experiences}
-        self.project_ids = {p.id for p in profile.projects}
         self.skill_category_ids = {c.id for c in profile.skills.categories}
         self.skill_profile_ids = profile.skills.profile_ids
         self.allowed_skills_lower = {s.lower() for s in profile.skills.allowed_skills}
@@ -88,7 +91,7 @@ class CvValidator:
         self.max_summary_len = profile.style_guide.max_summary_length
         self.max_summary_lines = profile.style_guide.max_summary_lines
 
-    def validate(self, cv: AdaptedCV) -> ValidationResult:
+    def validate(self, cv: AssembledCV | AdaptedCV) -> ValidationResult:
         errors: list[str] = []
         warnings: list[str] = []
 
@@ -152,9 +155,7 @@ class CvValidator:
                     warnings.append(f"bullet_too_long:{blt.source_id} len={len(blt.text)}")
 
         # ---- Projects ----
-        for pid in cv.selected_project_ids:
-            if pid not in self.project_ids:
-                errors.append(f"unknown_project_id:{pid}")
+        errors.extend(project_policy_errors(cv.selected_project_ids, self.profile))
 
         # ---- Skill categories ----
         if (
@@ -176,26 +177,27 @@ class CvValidator:
                 if skill.lower() not in self.allowed_skills_lower:
                     warnings.append(f"unknown_selected_skill:{skill}")
 
-        # ---- Summary length ----
-        if len(cv.professional_summary) > self.max_summary_len:
-            warnings.append(f"summary_too_long:len={len(cv.professional_summary)}")
-        summary_lines = [line for line in cv.professional_summary.splitlines() if line.strip()]
-        if len(summary_lines) > self.max_summary_lines:
-            warnings.append(f"summary_too_many_lines:lines={len(summary_lines)}")
+        fields = {"cv_title": cv.cv_title}
+        if isinstance(cv, AdaptedCV):
+            fields["professional_summary"] = cv.professional_summary
+        warnings.extend(evidence_metadata_warnings(fields))
+
+        # Summary checks apply only after the second call; never seed or slice it.
+        if isinstance(cv, AdaptedCV):
+            if len(cv.professional_summary) > self.max_summary_len:
+                warnings.append(f"summary_too_long:len={len(cv.professional_summary)}")
+            summary_lines = [line for line in cv.professional_summary.splitlines() if line.strip()]
+            if len(summary_lines) > self.max_summary_lines:
+                warnings.append(f"summary_too_many_lines:lines={len(summary_lines)}")
 
         return ValidationResult(ok=len(errors) == 0, errors=errors, warnings=warnings)
 
-    def auto_fix(self, cv: AdaptedCV) -> tuple[AdaptedCV, list[str]]:
-        """Restore static experiences and strip unsupported generated selections."""
+    def auto_fix(self, cv: _CV) -> tuple[_CV, list[str]]:
+        """Restore static experiences and skills; project failures require a new draft."""
         removed: list[str] = []
         cleaned_experiences = profile_experiences(self.profile)
         if cv.selected_experiences != cleaned_experiences:
             removed.append("experience_content:restored_from_profile")
-
-        valid_projects = [pid for pid in cv.selected_project_ids if pid in self.project_ids]
-        for pid in cv.selected_project_ids:
-            if pid not in self.project_ids:
-                removed.append(f"project:{pid}")
 
         valid_skills = [cid for cid in cv.skills_order if cid in self.skill_category_ids]
         valid_selected_skills = []
@@ -228,7 +230,6 @@ class CvValidator:
         cleaned = cv.model_copy(
             update={
                 "selected_experiences": cleaned_experiences,
-                "selected_project_ids": valid_projects,
                 "skills_profile_id": skill_profile_id,
                 "selected_skills": valid_selected_skills,
                 "skills_order": valid_skills,

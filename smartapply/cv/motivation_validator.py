@@ -4,21 +4,10 @@ from __future__ import annotations
 
 import re
 
+from smartapply.cv.text_hygiene import evidence_metadata_warnings
 from smartapply.cv.validator import ValidationResult
 from smartapply.llm import AdaptedCV, JobAnalysis, MotivationLetter
 from smartapply.profile import Profile
-
-_SELF_DEPRECATION_PATTERNS = {
-    "although_gap": r"\b(although|even though|while)\b[^.]{0,120}\b(i|my|this profile)\b[^.]{0,120}\b(do not|don't|does not|lack|lacks|limited|still learning|new to)\b",
-    "no_experience_en": r"\b(i|my profile)\b[^.]{0,80}\b(do not|don't|have not|haven't|lack|lacks)\b[^.]{0,80}\b(experience|knowledge|expertise)\b",
-    "limited_knowledge_en": r"\b(limited knowledge|limited experience|still learning|ready to learn|willing to learn|learning curve)\b",
-    "aware_gap_en": r"\b(i am aware|i recognize|i acknowledge|i understand)\b[^.]{0,140}\b(requires?|may require|could require|limited|lack|gap)\b",
-    "bien_que_fr": r"\b(bien que|même si)\b[^.]{0,160}\b(je|mon profil|ma connaissance|mon expérience)\b[^.]{0,160}\b(n['’]ai[e]? pas|soit limitée?|reste limitée?|manque|début de carrière|dois apprendre)\b",
-    "je_nai_pas_fr": r"\bje n['’]ai[e]? pas\b[^.]{0,120}\b(expérience|connaissance|expertise|encore)\b",
-    "limite_fr": r"\b(connaissance limitée|expérience limitée|expérience directe limitée|domaine que je n['’]ai pas encore exploré)\b",
-    "aware_gap_fr": r"\b(je suis conscient|je reconnais|je comprends)\b[^.]{0,160}\b(nécessite|requiert|pourrait|peut nécessiter|limitée?|manque|plus approfondie)\b",
-    "ready_to_learn_fr": r"\b(prêt(?:e)? à apprendre|disposé(?:e)? à apprendre|m['’]adapter et à apprendre|en train de me former)\b",
-}
 
 _FOREIGN_SCRIPT_RANGES = {
     "arabic": r"\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF",
@@ -98,18 +87,17 @@ def mentioned_project_ids(text: str, profile: Profile) -> list[str]:
 
 
 class MotivationLetterValidator:
-    """Check letter structure, language hygiene and selected-evidence references.
+    """Check letter structure, language hygiene and explicit project selection.
 
-    Factual grounding is instructed in the generation prompts. Display skill
-    names and offer-keyword overlap cannot establish whether a claim is true.
+    Factual grounding and rhetorical judgments belong to the LLM review.
+    A motivation letter need not repeat CV evidence, and lexical overlap cannot
+    establish whether an attribution or expression of motivation is justified.
     """
 
-    def __init__(self, profile: Profile, min_words: int = 220, max_words: int = 300):
+    def __init__(self, profile: Profile, min_words: int = 180, max_words: int = 240):
         self.profile = profile
         self.min_words = min_words
         self.max_words = max_words
-        self.projects_by_id = {p.id: p for p in profile.projects}
-        self.experiences_by_id = {e.id: e for e in profile.experiences}
 
     def validate(
         self,
@@ -121,6 +109,14 @@ class MotivationLetterValidator:
         errors: list[str] = []
         warnings: list[str] = []
         body_lower = _normalize(letter.body)
+        warnings.extend(
+            evidence_metadata_warnings(
+                {
+                    "motivation_letter_subject": letter.subject,
+                    "motivation_letter_body": letter.body,
+                }
+            )
+        )
 
         for label in self._foreign_scripts(letter.body):
             errors.append(f"foreign_script_in_letter:{label}")
@@ -137,10 +133,6 @@ class MotivationLetterValidator:
         if count > max_words:
             warnings.append(f"letter_too_long:{count}")
 
-        for label, pattern in _SELF_DEPRECATION_PATTERNS.items():
-            if re.search(pattern, body_lower, flags=re.IGNORECASE):
-                warnings.append(f"letter_self_deprecation:{label}")
-
         if (analysis.offer_language or "fr").lower().startswith("fr"):
             for pattern in _MISSING_APOSTROPHE_PATTERNS:
                 if re.search(pattern, letter.body):
@@ -149,9 +141,6 @@ class MotivationLetterValidator:
 
         for project_id in self._unselected_projects_mentioned(body_lower, cv):
             warnings.append(f"unselected_project_in_letter:{project_id}")
-
-        if not self._references_selected_evidence(body_lower, cv):
-            warnings.append("letter_may_not_reference_selected_evidence")
 
         return ValidationResult(ok=not errors, errors=errors, warnings=warnings)
 
@@ -169,27 +158,3 @@ class MotivationLetterValidator:
             for project_id in mentioned_project_ids(body_lower, self.profile)
             if project_id not in selected
         ]
-
-    def _references_selected_evidence(self, body_lower: str, cv: AdaptedCV) -> bool:
-        evidence_terms: set[str] = set()
-        for project_id in cv.selected_project_ids:
-            project = self.projects_by_id.get(project_id)
-            if project:
-                evidence_terms.add(project.name)
-                evidence_terms.update(project.keywords[:4])
-            evidence_terms.add(project_id)
-
-        for exp in cv.selected_experiences:
-            source = self.experiences_by_id.get(exp.source_id)
-            if source:
-                evidence_terms.add(source.company)
-                evidence_terms.add(source.title)
-                evidence_terms.update(source.keywords[:4])
-            evidence_terms.add(exp.source_id)
-            for bullet in exp.bullets:
-                evidence_terms.add(bullet.source_id)
-
-        normalized_terms = [
-            _normalize(term) for term in evidence_terms if len(_normalize(term)) >= 4
-        ]
-        return any(term in body_lower for term in normalized_terms)

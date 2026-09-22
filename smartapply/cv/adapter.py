@@ -5,12 +5,17 @@ from __future__ import annotations
 import re
 
 from smartapply.cv.assembly import assemble_cv
-from smartapply.cv.motivation_validator import mentioned_project_ids
+from smartapply.cv.project_selection import (
+    MIN_PROJECTS,
+    selectable_project_capacity,
+    validate_project_selection,
+)
 from smartapply.cv.role_contracts import apply_contract
 from smartapply.cv.selector import CvBlockSelector, SelectionResult
 from smartapply.llm import (
     AdaptedCV,
-    CVPersonalization,
+    AssembledCV,
+    CVSelection,
     JobAnalysis,
     LLMError,
     LLMProvider,
@@ -25,9 +30,6 @@ from smartapply.ranking.embeddings import (
     get_embeddings_provider,
 )
 from smartapply.utils.skill_terms import normalize_skill_term, skill_term_matches
-
-_MIN_PROJECT_COUNT = 3
-_MAX_PROJECT_COUNT = 4
 
 
 class CvAdapter:
@@ -48,36 +50,60 @@ class CvAdapter:
         *,
         job_title: str,
         job_company: str,
+        job_description: str = "",
         job_id: int | None = None,
         refresh_cache: bool = False,
-    ) -> tuple[AdaptedCV, SelectionResult]:
+    ) -> tuple[AssembledCV, SelectionResult]:
+        capacity = selectable_project_capacity(self.profile)
+        if capacity < MIN_PROJECTS:
+            raise LLMError(
+                f"Insufficient eligible projects: policy allows {capacity}, "
+                f"but each CV requires at least {MIN_PROJECTS}"
+            )
         selection = self.selector.select(self.profile, analysis)
         prompt = cv_adaptation.build_user_prompt(
             profile=self.profile,
             analysis=analysis,
             job_title=job_title,
             job_company=job_company,
+            job_description=job_description,
             # Keep the profile prefix complete and in canonical order so it is
             # identical across offers and eligible for OpenAI prompt caching.
             selected_experiences=list(self.profile.experiences),
             selected_projects=list(self.profile.projects),
         )
-        personalization = self.llm.complete_json(
-            system=cv_adaptation.SYSTEM,
-            user=prompt,
-            schema=CVPersonalization,
-            model=self.llm.smart_model,
-            temperature=0.3,
-            purpose="cv_adaptation",
-            job_id=job_id,
-            refresh_cache=refresh_cache,
-        )
+        # Finalize the complete selection before any summary or letter is written.
+        for attempt in range(2):
+            personalization = self.llm.complete_json(
+                system=cv_adaptation.build_system_prompt(),
+                user=prompt,
+                schema=CVSelection,
+                model=self.llm.smart_model,
+                temperature=0.3,
+                purpose="cv_adaptation",
+                job_id=job_id,
+                refresh_cache=refresh_cache or attempt > 0,
+            )
+            errors = validate_project_selection(
+                personalization, self.profile, analysis, job_description=job_description
+            )
+            if not errors:
+                break
+            if attempt == 1:
+                raise LLMError("Project selection could not be finalized: " + "; ".join(errors))
+            prompt += (
+                "\n\nThe previous personalization violated project selection rules:\n- "
+                + "\n- ".join(errors)
+                + "\nRegenerate the complete CV selection, without a summary, "
+                "using exactly three unique eligible projects and grounded reasons. "
+                "Prefer direct matches, then the strongest primary projects with "
+                "honest transferable relevance. Never invent a direct specialty match."
+            )
         adapted = assemble_cv(personalization, self.profile)
         adapted = self._ensure_supported_offer_skills(adapted, analysis)
-        adapted = self._ensure_summary_skills_visible(adapted)
         adapted = self._apply_role_family_contract(adapted, analysis, job_title)
-        adapted = self._enforce_project_count(adapted)
-        adapted = self._enforce_summary_length(adapted)
+        project_by_id = {project.id: project for project in self.profile.projects}
+        selection.projects = [project_by_id[pid] for pid in adapted.selected_project_ids]
         return adapted, selection
 
     def adapt_application(
@@ -93,24 +119,26 @@ class CvAdapter:
     ) -> tuple[AdaptedCV, MotivationLetter, SelectionResult]:
         """Compatibility entry point using the same sequential, reviewed flow.
 
-        The application pipeline additionally persists review diagnostics. This
-        tuple-only API raises rather than returning an unreviewed application.
+        Text checks remain advisory for document availability. This tuple-only
+        API retains diagnostics in CV warnings; the pipeline also persists the
+        complete review audit.
         """
         from smartapply.cv.letter_writer import ApplicationTextWriter
         from smartapply.cv.validator import CvValidator
 
-        adapted, selection = self.adapt(
+        assembled, selection = self.adapt(
             analysis,
             job_title=job_title,
             job_company=job_company,
+            job_description=job_description,
             job_id=job_id,
             refresh_cache=refresh_cache,
         )
         validator = CvValidator(self.profile)
-        if not validator.validate(adapted).ok:
-            adapted, _ = validator.auto_fix(adapted)
-        if not validator.validate(adapted).ok:
-            raise LLMError("CV structure could not be finalized before letter generation")
+        if not validator.validate(assembled).ok:
+            assembled, _ = validator.auto_fix(assembled)
+        if not validator.validate(assembled).ok:
+            raise LLMError("CV structure could not be finalized before text generation")
         writer = ApplicationTextWriter(self.profile, self.llm)
         context = dict(
             job_title=job_title,
@@ -120,142 +148,21 @@ class CvAdapter:
             job_id=job_id,
             refresh_cache=refresh_cache,
         )
-        letter = writer.generate_letter(adapted, analysis, **context)
+        adapted, letter = writer.generate_texts(assembled, analysis, **context)
         reviewed = writer.review(adapted, letter, analysis, **context)
-        if reviewed.errors:
-            raise LLMError("Application text review failed: " + "; ".join(reviewed.errors))
-        return reviewed.cv, reviewed.letter, selection
-
-    def _ensure_letter_projects_visible(
-        self,
-        adapted: AdaptedCV,
-        letter: MotivationLetter,
-        *,
-        max_projects: int = _MAX_PROJECT_COUNT,
-    ) -> AdaptedCV:
-        """Keep the CV project list consistent with projects named in the letter."""
-        mentioned = mentioned_project_ids(letter.body, self.profile)
-        if not mentioned:
-            return adapted
-
-        selected = list(adapted.selected_project_ids)
-        priority: list[str] = []
-        for project_id in mentioned + selected:
-            if project_id not in priority:
-                priority.append(project_id)
-
-        aligned = priority[:max_projects]
-        if aligned == selected:
-            return adapted
-        return adapted.model_copy(update={"selected_project_ids": aligned})
-
-    def _enforce_project_count(
-        self,
-        adapted: AdaptedCV,
-        *,
-        min_count: int = _MIN_PROJECT_COUNT,
-        max_count: int = _MAX_PROJECT_COUNT,
-    ) -> AdaptedCV:
-        """Keep the rendered Projects section within the configured range."""
-        project_by_id = {project.id: project for project in self.profile.projects}
-        max_count = min(max_count, len(project_by_id))
-        min_count = min(min_count, max_count)
-        if max_count <= 0:
-            return adapted
-
-        selected: list[str] = []
-        seen: set[str] = set()
-        for project_id in adapted.selected_project_ids:
-            if project_id in project_by_id and project_id not in seen:
-                selected.append(project_id)
-                seen.add(project_id)
-
-        if len(selected) < min_count:
-            context = self._adapted_project_context(adapted)
-            remaining = [project for project in self.profile.projects if project.id not in seen]
-            remaining.sort(
-                key=lambda project: self._project_relevance(project, context),
-                reverse=True,
+        warnings = list(
+            dict.fromkeys(
+                [
+                    *reviewed.cv.warnings,
+                    *reviewed.warnings,
+                    *(f"validation_error:{error}" for error in reviewed.errors),
+                ]
             )
-            for project in remaining:
-                selected.append(project.id)
-                seen.add(project.id)
-                if len(selected) >= min_count:
-                    break
-
-        selected = selected[:max_count]
-        if selected == adapted.selected_project_ids:
-            return adapted
-
-        warnings = list(adapted.warnings)
-        marker = f"project_count_enforced:{len(selected)}"
-        if marker not in warnings:
-            warnings.append(marker)
-        return adapted.model_copy(
-            update={
-                "selected_project_ids": selected,
-                "warnings": warnings,
-            }
         )
-
-    def _adapted_project_context(self, adapted: AdaptedCV) -> str:
-        return " ".join(
-            [
-                adapted.cv_title,
-                adapted.professional_summary,
-                " ".join(adapted.selected_project_ids),
-                " ".join(
-                    bullet.text for exp in adapted.selected_experiences for bullet in exp.bullets
-                ),
-            ]
-        ).lower()
-
-    @staticmethod
-    def _project_relevance(project, context: str) -> tuple[int, int]:
-        keywords = [kw.lower() for kw in getattr(project, "keywords", [])]
-        name_tokens = re.findall(r"[a-z0-9]+", getattr(project, "name", "").lower())
-        description_tokens = re.findall(
-            r"[a-z0-9]+",
-            getattr(project, "description", "").lower(),
-        )
-        score = sum(1 for keyword in keywords if keyword and keyword in context)
-        score += sum(1 for token in name_tokens if len(token) > 2 and token in context)
-        score += sum(1 for token in description_tokens if len(token) > 4 and token in context)
-        return (score, len(keywords))
-
-    def _enforce_summary_length(self, adapted: AdaptedCV) -> AdaptedCV:
-        """Trim overlong summaries deterministically at a word boundary."""
-        limit = self.profile.style_guide.max_summary_length
-        summary = (adapted.professional_summary or "").strip()
-        if len(summary) <= limit:
-            return adapted
-
-        truncated = summary[:limit].rstrip()
-        for separator in (". ", "; ", ", "):
-            idx = truncated.rfind(separator)
-            if idx >= max(60, int(limit * 0.55)):
-                truncated = truncated[: idx + 1].rstrip()
-                break
-        else:
-            idx = truncated.rfind(" ")
-            if idx > 0:
-                truncated = truncated[:idx].rstrip()
-
-        if not truncated.endswith((".", "!", "?")):
-            truncated = truncated.rstrip(" ,;:") + "."
-        warnings = [
-            warning for warning in adapted.warnings if not warning.startswith("summary_too_long")
-        ]
-        warnings.append(f"summary_trimmed:len={len(summary)}")
-        return adapted.model_copy(
-            update={
-                "professional_summary": truncated,
-                "warnings": warnings,
-            }
-        )
+        return reviewed.cv.model_copy(update={"warnings": warnings}), reviewed.letter, selection
 
     def _ensure_summary_skills_visible(self, adapted: AdaptedCV) -> AdaptedCV:
-        """If a whitelisted skill is named in the summary, show it in Skills too."""
+        """Legacy utility; the two-stage generation never mutates skills from a summary."""
         summary = adapted.professional_summary or ""
         if not summary.strip():
             return adapted
@@ -310,9 +217,9 @@ class CvAdapter:
 
     def _ensure_supported_offer_skills(
         self,
-        adapted: AdaptedCV,
+        adapted: AssembledCV,
         analysis: JobAnalysis,
-    ) -> AdaptedCV:
+    ) -> AssembledCV:
         """Deterministically keep supported offer-required skills visible.
 
         The LLM decides the section, but this guard fixes a common miss:
@@ -366,10 +273,10 @@ class CvAdapter:
 
     def _apply_role_family_contract(
         self,
-        adapted: AdaptedCV,
+        adapted: AssembledCV,
         analysis: JobAnalysis,
         job_title: str,
-    ) -> AdaptedCV:
+    ) -> AssembledCV:
         """Strip off-role skills and anchor a coherent baseline per family."""
         allowed_skills_lower = {s.lower() for s in self.profile.skills.allowed_skills}
         supported_skills_by_category = {

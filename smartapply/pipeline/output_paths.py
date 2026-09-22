@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import shutil
+import unicodedata
 from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -20,6 +22,26 @@ _REPORT_PATH_FIELDS = (
 )
 
 
+def _filename_component(value: str, fallback: str) -> str:
+    value = unicodedata.normalize("NFC", value)
+    value = "".join(" " if unicodedata.category(char).startswith("C") else char for char in value)
+    value = re.sub(r'[<>:"/\\|?*]', "-", value)
+    return " ".join(value.split()).strip(" .-") or fallback
+
+
+def application_document_stems(candidate_name: str, job_title: str) -> tuple[str, str]:
+    """Readable, portable names using the offer title and the candidate's chosen name."""
+    name = _filename_component(candidate_name, "Candidate")
+    title = _filename_component(job_title, "Poste")
+    descriptor = f"{name} - {title}"
+    # Reserve room for the longest prefix and extension. Both documents retain
+    # the same descriptor, even with long titles or multibyte Unicode characters.
+    budget = 255 - len(b"Motivation - ") - len(".docx")
+    descriptor = descriptor.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+    descriptor = descriptor.rstrip(" .-")
+    return f"CV - {descriptor}", f"Motivation - {descriptor}"
+
+
 def application_output_dir(output_dir: Path, application_id: int | None) -> Path:
     """Return the artifact directory for one persisted application."""
     if application_id is None:
@@ -34,8 +56,20 @@ class AtomicApplicationOutput:
     persistence succeeds. ``rollback`` restores it when any later step fails.
     """
 
-    def __init__(self, output_dir: Path, application_id: int | None) -> None:
-        self.final_dir = application_output_dir(output_dir, application_id)
+    def __init__(
+        self,
+        output_dir: Path,
+        application_id: int | None,
+        *,
+        final_dir: Path | None = None,
+    ) -> None:
+        # During regeneration the persisted artifact location is the source
+        # of truth, even if the configured output directory has changed.
+        self.final_dir = (
+            Path(final_dir).expanduser().resolve()
+            if final_dir is not None
+            else application_output_dir(output_dir, application_id)
+        )
         self.final_dir.parent.mkdir(parents=True, exist_ok=True)
         token = uuid4().hex
         self.staging_dir = self.final_dir.parent / f".{self.final_dir.name}.staging-{token}"

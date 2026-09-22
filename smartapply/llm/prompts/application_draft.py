@@ -14,7 +14,14 @@ from smartapply.llm.prompts.skill_profiles import format_skill_profiles
 from smartapply.llm.schemas import JobAnalysis
 from smartapply.profile import Experience, Profile, Project
 
-SYSTEM = load_prompt("application_draft/system.j2")
+
+def build_system_prompt() -> str:
+    """Load the current instructions when preparing a request."""
+    return render_prompt(
+        "application_draft/system.j2",
+        project_selection_rules=load_prompt("cv_adaptation/project_selection_rules.j2"),
+    )
+
 
 _SUPPORTED_CANDIDATE_EVIDENCE = (
     "the PROFILE section above: summary_source, read-only profile experiences, "
@@ -48,13 +55,13 @@ def build_user_prompt(
     selected_experiences: list[Experience],
     selected_projects: list[Project],
     language: str = "fr",
+    job_description: str = "",
 ) -> str:
     allowed = ", ".join(sorted(profile.skills.allowed_skills))
     style = profile.style_guide
     dont = "\n  - ".join(style.dont)
     do = "\n  - ".join(style.do)
     main_tasks_block = "\n".join(f"- {t}" for t in analysis.main_tasks)
-    project_hint = ", ".join(p.name for p in selected_projects[:4])
     skill_profiles = format_skill_profiles(profile)
     skill_catalog = _format_skill_catalog(profile)
     core_skills = _format_core_skills(profile)
@@ -65,6 +72,7 @@ def build_user_prompt(
         "application_draft/user.j2",
         job_title=job_title,
         job_company=job_company,
+        job_description=job_description,
         role_title=job_title,
         company_name=job_company,
         role_type=analysis.role_type,
@@ -88,8 +96,7 @@ def build_user_prompt(
         experiences_block=_format_experiences(selected_experiences),
         projects_block=_format_projects(selected_projects),
         letter_language="French" if language == "fr" else "English",
-        target_word_count="220-300",
-        project_hint=project_hint,
+        target_word_count="180-240",
         tone=style.tone,
         voice=style.voice,
         max_summary_lines=style.max_summary_lines,

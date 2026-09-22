@@ -67,7 +67,7 @@
       --section-title-gap: 8px;
       --entry-gap: 16px;
       --entry-title-gap: 7px;
-      --project-gap: 7px;
+      --certificate-gap: 7px;
       --bullet-gap: 6px;
       --section-justify: space-between;
     }
@@ -80,7 +80,7 @@
       --section-title-gap: 7px;
       --entry-gap: 14px;
       --entry-title-gap: 6px;
-      --project-gap: 6px;
+      --certificate-gap: 6px;
       --bullet-gap: 5px;
       --section-justify: space-between;
     }
@@ -93,7 +93,7 @@
       --section-title-gap: 6px;
       --entry-gap: 12px;
       --entry-title-gap: 5px;
-      --project-gap: 5px;
+      --certificate-gap: 5px;
       --bullet-gap: 4px;
       --section-justify: space-between;
     }
@@ -107,7 +107,7 @@
       --section-title-gap: 5px;
       --entry-gap: 10px;
       --entry-title-gap: 4px;
-      --project-gap: 4px;
+      --certificate-gap: 4px;
       --bullet-gap: 3px;
       --section-justify: space-between;
     }
@@ -120,7 +120,7 @@
       --section-title-gap: 4px;
       --entry-gap: 8px;
       --entry-title-gap: 3px;
-      --project-gap: 3px;
+      --certificate-gap: 3px;
       --bullet-gap: 2px;
       --section-justify: space-between;
     }
@@ -132,8 +132,8 @@
 
     header {
       padding-top: 2px;
-      /* Use the same adaptive spacing scale as the CV sections. */
-      margin-bottom: var(--section-gap);
+      /* Give the summary slightly more space before the first section. */
+      margin-bottom: calc(var(--section-gap) + 6px);
       flex-shrink: 0;
     }
 
@@ -329,12 +329,14 @@
       break-inside: avoid;
     }
 
-    .skill-row {
+    .skill-row,
+    .project-row {
       margin: 0 0 var(--entry-gap) 0;
       break-inside: avoid;
     }
 
-    .skill-row:last-child {
+    .skill-row:last-child,
+    .project-row:last-child {
       margin-bottom: 0;
     }
 
@@ -342,12 +344,10 @@
       color: var(--body);
     }
 
-    .project-row,
     .certificates p {
-      margin: 0 0 var(--project-gap) 0;
+      margin: 0 0 var(--certificate-gap) 0;
     }
 
-    .project-row:last-child,
     .certificates p:last-child {
       margin-bottom: 0;
     }

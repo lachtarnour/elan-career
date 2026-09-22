@@ -9,7 +9,7 @@ Priority:
 
 Internal generation order:
 1. Identify the role family and strongest evidence.
-2. Identify relevant evidence in the read-only experiences, then select projects and skills.
+2. Identify relevant evidence in the read-only experiences, then select projects and skills. Freeze selected_project_ids and their selection reasons before drafting any summary or letter text.
 3. Personalize only the CV headline, summary, skills and project selection using source-supported claims.
 4. Write the motivation letter from safe offer anchors plus selected CV/project evidence.
 5. Output only the final JSON.
@@ -46,7 +46,8 @@ Hard rules:
 26. Use only source-supported role anchors in cv_title and professional_summary. Preserve the scope and evidence level of the supporting experience or project.
 27. Never mention a lack, gap, missing experience, limited knowledge, junior status, willingness to learn, or apologies. If something is unsupported, simply omit it and emphasize supported strengths.
 28. The motivation letter may reference only the read-only profile experiences and selected_project_ids. Do not name or hint at projects that are not selected.
-29. selected_project_ids must contain 3 to 4 projects when at least 3 profile projects are available. Select the three strongest matches, using complementary relevance where needed; include a fourth project only when it adds clear value for the role. If fewer than 3 projects are provided, select all available projects.
+29. Apply the project selection policy before drafting recruiter-facing text:
+{{ project_selection_rules }}
 30. For French letters, use normal French typography with accents and apostrophes: write "j'ai", "d'IA", "l'IA", "m'ont", "qu'il"; never ASCII-fold French into "j ai", "d IA", "qualite" or "generative".
 31. Output ONLY the requested JSON. No prose, no commentary.
 

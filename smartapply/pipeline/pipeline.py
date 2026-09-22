@@ -9,6 +9,7 @@ Phases:
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from smartapply.config import get_source_settings
@@ -305,12 +306,14 @@ class Pipeline:
         *,
         form_url: str | None = None,
         force_regenerate: bool = False,
+        artifact_dir: Path | None = None,
     ) -> ApplyReport:
         """Generate a CV-and-letter dossier for one analyzed offer."""
         return self._applier.apply(
             job_id,
             form_url=form_url,
             force_regenerate=force_regenerate,
+            artifact_dir=artifact_dir,
         )
 
     # =================================================================

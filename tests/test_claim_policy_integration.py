@@ -9,11 +9,12 @@ import pytest
 from smartapply.cv import CvAdapter, CvValidator
 from smartapply.cv.assembly import profile_experiences
 from smartapply.llm import (
+    ApplicationTexts,
     CVPersonalization,
+    CVSelection,
     DocumentTextReview,
     JobAnalysis,
     MockLLMProvider,
-    MotivationLetter,
     SkillSelectionBlock,
 )
 from smartapply.profile import Profile, load_profile
@@ -39,9 +40,9 @@ def _analysis(role: str, required: list[str], keywords: list[str]) -> JobAnalysi
     )
 
 
-def _response(title: str, summary: str) -> CVPersonalization:
+def _response(title: str, summary: str, offer_evidence: str) -> CVPersonalization:
     # Deliberately mixes relevant/off-role skills and duplicates. The adapter
-    # must still recover offer/summary skills, apply baselines and filter/order.
+    # must still recover offer skills, apply baselines and filter/order.
     selected = {
         "data_infra": ["Docker", "Git", "Git"],
         "ml_ai": ["NLP"],
@@ -52,7 +53,16 @@ def _response(title: str, summary: str) -> CVPersonalization:
     return CVPersonalization(
         cv_title=title,
         professional_summary=summary,
-        selected_project_ids=["proj_evidence_rag", "proj_ner_camembert"],
+        selected_project_ids=["proj_evidence_rag", "proj_ner_camembert", "proj_smartapply"],
+        project_selection_reasons=[
+            {
+                "project_id": project_id,
+                "reason": "Relevant documented evidence for the requested technical work.",
+                "offer_evidence": offer_evidence,
+                "complementary_value": "",
+            }
+            for project_id in ["proj_evidence_rag", "proj_ner_camembert", "proj_smartapply"]
+        ],
         skills_profile_id="mixed",
         selected_skills=[
             SkillSelectionBlock(category_id=category, skills=skills)
@@ -63,25 +73,48 @@ def _response(title: str, summary: str) -> CVPersonalization:
     )
 
 
+_LETTER_BODY = (
+    "I am interested in work that connects careful data preparation with useful applications. "
+    "The opportunity to discuss technical choices with people who will use the results "
+    "is especially appealing to me. I would like to contribute in a setting where teams "
+    "consider the available evidence, evaluate their assumptions and explain the limits "
+    "of a solution before deciding how to improve it.\n\n"
+    "I developed transcription pipelines using Whisper at Aurore Labs. "
+    "That work is one reason I want to continue exploring the relationship between "
+    "data processing and practical needs. I enjoy considering how each stage of a "
+    "pipeline affects the next and how the resulting information can be checked. "
+    "I would welcome the chance to deepen that approach through collaboration with "
+    "colleagues bringing different perspectives to the same problem.\n\n"
+    "I would be glad to contribute to clear implementation and evaluation practices, "
+    "while learning about the particular needs of your team. My interest is in "
+    "building useful solutions through deliberate technical choices and open discussion "
+    "of results. I would welcome a conversation about the role and the ways my "
+    "experience could support the work you are planning."
+)
+
+
 def _generate(
     profile: Profile,
     analysis: JobAnalysis,
     response: CVPersonalization,
     route: str,
     *,
-    letter_body: str = "I developed transcription pipelines using Whisper at Aurore Labs.",
+    letter_body: str = _LETTER_BODY,
 ):
     adapter = CvAdapter(
         profile,
         llm=MockLLMProvider(
             {
-                "cv_adaptation": response,
-                "motivation_letter": MotivationLetter(subject="Application", body=letter_body),
+                "cv_adaptation": CVSelection.model_validate(
+                    response.model_dump(exclude={"professional_summary"})
+                ),
+                "application_texts": ApplicationTexts(
+                    professional_summary=response.professional_summary,
+                    motivation_letter_subject="Application",
+                    motivation_letter_body=letter_body,
+                ),
                 "document_review": DocumentTextReview(
                     issues=[],
-                    professional_summary=None,
-                    motivation_letter_subject=None,
-                    motivation_letter_body=None,
                 ),
             }
         ),
@@ -113,13 +146,16 @@ def test_evidence_backed_headline_is_not_rewritten_by_vendor_blacklist(profile, 
     cv, _ = _generate(
         profile,
         _analysis(title, ["GCP", "SQL"], ["Reporting"]),
-        _response(title, summary),
+        _response(title, summary, "SQL"),
         route,
     )
     cv, _ = CvValidator(profile).auto_fix(cv)
 
     assert cv.cv_title == title
-    assert cv.professional_summary == summary
+    if route == "application":
+        assert cv.professional_summary == summary
+    else:
+        assert "professional_summary" not in cv.model_dump()
     assert cv.selected_experiences == profile_experiences(profile)
     assert profile.model_dump() == before
     assert not any(w.startswith("unsupported_cv_head_terms_replaced:") for w in cv.warnings)
@@ -133,12 +169,14 @@ def test_documented_letter_tool_does_not_open_the_display_catalogue(profile):
     )
     speech.skills = [skill for skill in speech.skills if skill != "Whisper"]
     speech.skills.append("Speech-to-text")
-    response = _response("Speech Engineer", "Developed transcription pipelines using Whisper.")
+    response = _response(
+        "Speech Engineer", "Developed transcription pipelines using Whisper.", "Whisper"
+    )
     response.selected_skills = [
         SkillSelectionBlock(category_id="speech_audio", skills=["Whisper", "Speech-to-text"])
     ]
     response.skills_order = ["speech_audio"]
-    letter_text = "I developed transcription pipelines using Whisper at Aurore Labs."
+    letter_text = _LETTER_BODY
 
     cv, letter = _generate(
         profile,
@@ -160,9 +198,10 @@ def test_documented_letter_tool_does_not_open_the_display_catalogue(profile):
     assert any("Whisper" in b.text for exp in cleaned.selected_experiences for b in exp.bullets)
 
 
-# Golden outputs captured from the adapter before removing the claim blacklist.
-# Keep these explicit: computing expectations with current contracts would hide
-# changes to recovery, role filtering, baseline completion or display ordering.
+# Keep the Skills contract explicit: offer recovery, role filtering, baseline
+# completion and display ordering happen before the summary is generated.
+# In the LLM case, Python was formerly inserted only because the summary named
+# it; that dependency is intentionally removed, preserving the selected content.
 _SKILLS_GOLDENS = [
     (
         "Data Scientist",
@@ -199,7 +238,7 @@ _SKILLS_GOLDENS = [
                 "scikit-learn",
             ],
             "data_infra": ["Docker", "Git", "FastAPI", "AWS"],
-            "data_analysis": ["pandas", "Python", "SQL"],
+            "data_analysis": ["pandas", "SQL"],
         },
     ),
 ]
@@ -207,11 +246,13 @@ _SKILLS_GOLDENS = [
 
 @pytest.mark.parametrize("route", ["cv", "application"])
 @pytest.mark.parametrize("role,required,keywords,expected", _SKILLS_GOLDENS)
-def test_fixed_response_keeps_pre_change_skills(profile, route, role, required, keywords, expected):
+def test_fixed_selection_skills_do_not_depend_on_summary(
+    profile, route, role, required, keywords, expected
+):
     cv, _ = _generate(
         profile,
         _analysis(role, required, keywords),
-        _response(role, "Built reproducible Python workflows."),
+        _response(role, "Built reproducible Python workflows.", required[0]),
         route,
     )
     cv, _ = CvValidator(profile).auto_fix(cv)
@@ -220,3 +261,6 @@ def test_fixed_response_keeps_pre_change_skills(profile, route, role, required, 
     assert [block.category_id for block in cv.selected_skills] == list(expected)
     assert cv.skills_order == list(expected)
     assert cv.selected_experiences == profile_experiences(profile)
+    if role == "LLM Engineer" and route == "application":
+        assert "Python" in cv.professional_summary
+        assert "Python" not in {skill for block in cv.selected_skills for skill in block.skills}

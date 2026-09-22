@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from smartapply.config import get_settings
 from smartapply.cv import CvAdapter, CvValidator
 from smartapply.cv.motivation_validator import MotivationLetterValidator
@@ -46,6 +48,7 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
         *,
         form_url: str | None = None,
         force_regenerate: bool = False,
+        artifact_dir: Path | None = None,
     ) -> ApplyReport:
         """Generate the CV and motivation letter for one analyzed offer."""
         report = ApplyReport(job_id=job_id, application_id=None)
@@ -58,6 +61,7 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
                 report=report,
                 form_url=form_url,
                 refresh_cache=force_regenerate,
+                artifact_dir=artifact_dir,
             )
         except Exception:
             if created_reservation:
@@ -74,6 +78,7 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
         report: ApplyReport,
         form_url: str | None = None,
         refresh_cache: bool = False,
+        artifact_dir: Path | None = None,
     ) -> ApplyReport:
         job_id = report.job_id
         job, analysis = self._load_job_analysis(job_id)
@@ -95,6 +100,7 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
         artifacts = AtomicApplicationOutput(
             self.settings.output_dir,
             report.application_id,
+            final_dir=artifact_dir,
         )
         try:
             self.renderer.render_all(
@@ -110,11 +116,10 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
             )
 
             artifacts.publish(report)
-            status = (
-                JobStatus.READY_FOR_FORM_SUBMISSION
-                if not report.validation_errors
-                else JobStatus.QUALITY_REJECTED
-            )
+            # Availability and validation are independent: keep every diagnostic
+            # and review decision, but never withhold a rendered dossier because
+            # its text needs checking. Invalid edits remain rejected by the reviewer.
+            status = JobStatus.READY_FOR_FORM_SUBMISSION
             report.status = status
             self._persist_application(
                 report=report,

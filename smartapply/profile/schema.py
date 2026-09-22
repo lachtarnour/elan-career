@@ -236,6 +236,14 @@ class Experience(BaseModel):
         return _validate_date(value)
 
 
+class ProjectSelectionPolicy(BaseModel):
+    """Editorial priority, independent of relevance to a particular offer."""
+
+    tier: Literal["primary", "specialized", "disabled"] = "primary"
+    rationale: str = ""
+    activation_conditions: list[str] = Field(default_factory=list)
+
+
 class Project(BaseModel):
     """Same anti-hallucination contract as Experience: bullets with stable ids."""
 
@@ -245,6 +253,7 @@ class Project(BaseModel):
     keywords: list[str] = Field(default_factory=list)
     status: str | None = None
     url: HttpUrl | None = None
+    selection_policy: ProjectSelectionPolicy = Field(default_factory=ProjectSelectionPolicy)
 
     @property
     def description(self) -> str:
@@ -304,7 +313,13 @@ class StyleGuide(BaseModel):
 
 
 class TemplateStyle(BaseModel):
-    """Visual style for the DOCX template — mirrors the candidate's CV."""
+    """Document presentation and optional filename naming preference."""
+
+    filename_candidate_name: str | None = Field(
+        default=None,
+        min_length=2,
+        description="Candidate name for document filenames only; defaults to identity.full_name",
+    )
 
     primary_color_hex: str = "3B82F6"
     text_color_hex: str = "1F2937"

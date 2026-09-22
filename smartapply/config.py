@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     llm_provider: str = Field(default="openai")
     openai_api_key: str = Field(default="")
     openai_model_cheap: str = Field(default="gpt-5.4-mini")
-    openai_model_smart: str = Field(default="gpt-4o")
+    openai_model_smart: str = Field(default="gpt-5.4")
     openai_model_embed: str = Field(default="text-embedding-3-small")
     openai_max_completion_tokens: int = Field(default=6000, ge=256, le=100_000)
     llm_cache_ttl_days: int = Field(default=15, ge=1, le=365)

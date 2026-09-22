@@ -1,18 +1,20 @@
-"""Prompt builder for job analysis — first LLM call after filtering."""
+"""Offer-only extraction prompts for the first LLM call after filtering."""
 
 from __future__ import annotations
 
-from smartapply.filtering.rules import CANDIDATE_SENIORITY_CONTEXT
 from smartapply.llm.prompts.loader import load_prompt, render_prompt
 from smartapply.offers import AnalyzerInput
 from smartapply.profile import Profile
 
-SYSTEM = load_prompt("job_analysis/system_long.j2")
+
+def build_system_prompt() -> str:
+    """Load the current instructions when preparing a request."""
+    return load_prompt("job_analysis/system_long.j2")
 
 
 def build_user_prompt(
     *,
-    profile: Profile,
+    profile: Profile | None = None,
     job_title: str,
     job_description: str,
     job_company: str = "",
@@ -20,18 +22,10 @@ def build_user_prompt(
     application_url: str | None = None,
     source_metadata: str | None = None,
 ) -> str:
-    profile_block = (
-        f"Candidate title: {profile.identity.title}\n"
-        f"Summary: {profile.identity.summary}\n"
-        f"Skills: {', '.join(sorted(profile.skills.allowed_skills))}\n"
-        f"Target roles: {', '.join(profile.preferences.target_roles)}\n"
-        f"Seniority: {CANDIDATE_SENIORITY_CONTEXT}\n"
-        f"Preferred locations: {job_location or 'unspecified'}\n"
-    )
+    """Extract the offer independently; ``profile`` is an ignored legacy argument."""
     source_metadata_block = _source_metadata_block(source_metadata)
     return render_prompt(
         "job_analysis/user.j2",
-        profile_block=profile_block,
         job_title=job_title,
         job_company=job_company,
         job_location=job_location or "",
@@ -43,12 +37,11 @@ def build_user_prompt(
 
 def build_user_prompt_from_input(
     *,
-    profile: Profile,
     analyzer_input: AnalyzerInput,
+    profile: Profile | None = None,
 ) -> str:
-    """Build the analyzer prompt from the canonical job-analysis input."""
+    """Build the offer-only prompt from canonical input, ignoring legacy profile data."""
     return build_user_prompt(
-        profile=profile,
         job_title=analyzer_input.title,
         job_company=analyzer_input.company,
         job_location=analyzer_input.location,

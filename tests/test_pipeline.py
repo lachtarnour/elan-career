@@ -15,11 +15,13 @@ from types import SimpleNamespace
 import pytest
 
 from smartapply.llm import (
-    CVPersonalization,
+    ApplicationTexts,
+    CVSelection,
     DocumentTextReview,
-    JobAnalysis,
+    JobFitAssessment,
     MockLLMProvider,
     MotivationLetter,
+    OfferAnalysis,
 )
 from smartapply.offers import RawJob
 from smartapply.ranking import MockEmbeddingsProvider
@@ -47,16 +49,14 @@ def _isolated_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def _register_llm_responses() -> None:
     MockLLMProvider.clear()
     MockLLMProvider.register(
-        "job_analysis",
-        JobAnalysis(
+        "job_offer_analysis",
+        OfferAnalysis(
             role_type="Data Scientist NLP",
             seniority="mid",
             domain="HealthTech",
             main_tasks=["Build RAG pipelines", "Productionize ML services"],
             required_skills=["Python", "PyTorch", "RAG"],
             nice_to_have=["AWS"],
-            match_reasons=["Strong NLP background", "Multimodal AI experience"],
-            risks=["No prior healthtech experience"],
             cv_keywords_to_include=["PyTorch", "RAG", "FAISS"],
             extracted_location="Paris",
             company_context=("Acme AI builds HealthTech tools for clinical NLP workflows."),
@@ -67,30 +67,59 @@ def _register_llm_responses() -> None:
         ),
     )
     MockLLMProvider.register(
+        "job_fit_assessment",
+        JobFitAssessment(
+            fit_score=0.5,
+            match_reasons=["Strong NLP background", "Multimodal AI experience"],
+            risks=["No prior healthtech experience"],
+        ),
+    )
+    MockLLMProvider.register(
         "cv_adaptation",
-        CVPersonalization(
+        CVSelection(
             cv_title="Data Scientist – NLP & Multimodal AI",
-            professional_summary=(
-                "Data Scientist with 2 years in NLP and machine learning. "
-                "Built RAG and speech pipelines on synthetic datasets."
-            ),
-            selected_project_ids=["proj_evidence_rag", "proj_ner_camembert"],
+            selected_project_ids=["proj_evidence_rag", "proj_ner_camembert", "proj_smartapply"],
+            project_selection_reasons=[
+                {
+                    "project_id": project_id,
+                    "reason": "Demonstrates documented NLP model and pipeline work.",
+                    "offer_evidence": "Build RAG pipelines",
+                    "complementary_value": "",
+                }
+                for project_id in ["proj_evidence_rag", "proj_ner_camembert", "proj_smartapply"]
+            ],
             skills_order=["ml_ai", "data_infra", "stats_signal"],
             warnings=[],
         ),
     )
     MockLLMProvider.register(
-        "motivation_letter",
-        MotivationLetter(
-            subject="Candidature - Data Scientist NLP - Camille Martin",
-            body=(
-                "Bonjour,\n\n"
-                "Je vous adresse ma candidature pour le poste de Data Scientist NLP. "
+        "application_texts",
+        ApplicationTexts(
+            professional_summary=(
+                "Data Scientist with 2 years in NLP and machine learning. "
+                "Built RAG and speech pipelines on synthetic datasets."
+            ),
+            motivation_letter_subject="Candidature - Data Scientist NLP - Camille Martin",
+            motivation_letter_body=(
+                "La conception de systèmes de recherche documentaire pour des équipes de santé "
+                "m'intéresse parce qu'elle relie la qualité des données à des usages concrets. "
+                "Je souhaite travailler dans une équipe où la préparation des sources, "
+                "l'évaluation des réponses et la compréhension du besoin sont traitées ensemble. "
+                "Le rôle proposé offre un cadre pertinent pour approfondir cette démarche et "
+                "contribuer à des outils utiles aux utilisateurs.\n\n"
                 "Mon expérience chez Aurore Labs en biomarqueurs cliniques et NLP, ainsi que mon "
                 "projet Evidence RAG, correspondent bien aux pipelines que vous décrivez. "
-                "Je serai ravi d'échanger sur la suite.\n\n"
-                "Cordialement,\n"
-                "Camille Martin"
+                "Ces travaux m'ont appris à préparer les données avec soin et à examiner "
+                "séparément les différentes étapes d'un traitement. Je souhaite continuer à "
+                "développer cette attention aux sources et aux résultats dans un environnement "
+                "où les choix techniques peuvent être discutés avec les équipes concernées. "
+                "Cette continuité entre expérimentation et utilisation concrète nourrit mon "
+                "intérêt pour votre proposition.\n\n"
+                "Je serais heureux de participer à la construction de pipelines lisibles et "
+                "à leur évaluation, tout en progressant au contact de profils complémentaires. "
+                "Je souhaite apporter une méthode attentive aux données disponibles et aux "
+                "limites des modèles, sans perdre de vue les attentes des utilisateurs. "
+                "Je serai ravi d'échanger sur la suite."
             ),
         ),
     )
@@ -98,9 +127,6 @@ def _register_llm_responses() -> None:
         "document_review",
         DocumentTextReview(
             issues=[],
-            professional_summary=None,
-            motivation_letter_subject=None,
-            motivation_letter_body=None,
         ),
     )
 
@@ -323,9 +349,10 @@ def test_ingestor_keeps_paid_serpapi_boolean_query_atomic(monkeypatch: pytest.Mo
     assert "Ingénieur modélisation des données" in expanded_roles
 
 
-def test_ingestor_does_not_open_alias_fallbacks_when_primary_roles_fill_target(
+def test_ingestor_collects_all_france_travail_aliases_after_primary_roles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from smartapply.pipeline.ingest import build_source_queries
     from smartapply.pipeline.ingestor import Ingestor
 
     calls: list[str] = []
@@ -359,13 +386,14 @@ def test_ingestor_does_not_open_alias_fallbacks_when_primary_roles_fill_target(
         max_results=4,
     )
 
-    assert calls == ["Data Scientist", "NLP Engineer"]
-    assert report.persisted == 4
+    assert calls == build_source_queries("francetravail", "Data Scientist OR NLP Engineer")
+    assert report.persisted == len(calls) * 3
 
 
-def test_ingestor_opens_interleaved_aliases_after_empty_primary_roles(
+def test_ingestor_collects_all_france_travail_aliases_after_empty_primary_roles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from smartapply.pipeline.ingest import build_source_queries
     from smartapply.pipeline.ingestor import Ingestor
 
     primary = {"Data Scientist", "NLP Engineer"}
@@ -401,15 +429,8 @@ def test_ingestor_opens_interleaved_aliases_after_empty_primary_roles(
         max_results=4,
     )
 
-    assert calls == [
-        "Data Scientist",
-        "NLP Engineer",
-        "Scientifique des données",
-        "Ingénieur NLP",
-        "Machine Learning Scientist",
-        "Natural Language Processing Engineer",
-    ]
-    assert report.persisted == 4
+    assert calls == build_source_queries("francetravail", "Data Scientist OR NLP Engineer")
+    assert report.persisted == len(calls) - len(primary)
 
 
 # ---- max_results semantics: "new offers", not "raw fetched" -----------------
@@ -513,7 +534,7 @@ def test_pipeline_uses_configured_linkedin_default_when_unbounded(
             calls.append(max_results)
             for i in range(max_results or 0):
                 yield RawJob(
-                    external_id=f"linkedin:{i}",
+                    external_id=f"linkedin:{query}:{i}",
                     title=f"Data Scientist {i}",
                     company="Acme",
                     location="Paris",
@@ -526,8 +547,11 @@ def test_pipeline_uses_configured_linkedin_default_when_unbounded(
 
     report = pipeline.ingest("linkedin", "Unmapped Specialist", max_results=None)
 
-    assert calls == [3]
-    assert report.fetched == 3
+    # Research CDD support adds dedicated doctoral-title lanes alongside the
+    # normal role lane, while preserving the configured per-call limit.
+    assert calls == [3, 3, 3, 3]
+    assert report.fetched == 12
+    assert report.persisted == 12
 
 
 def test_pipeline_rejects_linkedin_limit_above_configured_max(
@@ -608,19 +632,25 @@ def test_analysis_failure_is_returned_in_report(monkeypatch: pytest.MonkeyPatch)
 def test_analysis_replaces_job_board_company_with_extracted_employer() -> None:
     MockLLMProvider.clear()
     MockLLMProvider.register(
-        "job_analysis",
-        JobAnalysis(
+        "job_offer_analysis",
+        OfferAnalysis(
             role_type="Data Scientist IA",
             seniority="mid",
             domain="Industrie",
             main_tasks=["Construire des maquettes IA"],
             required_skills=["Python", "Machine Learning"],
             nice_to_have=[],
-            match_reasons=["Expérience IA alignée"],
-            risks=[],
             cv_keywords_to_include=["Python", "Machine Learning"],
             extracted_company_name="EXAMPLE INDUSTRY",
             offer_language="fr",
+        ),
+    )
+    MockLLMProvider.register(
+        "job_fit_assessment",
+        JobFitAssessment(
+            fit_score=0.5,
+            match_reasons=["Expérience IA alignée"],
+            risks=[],
         ),
     )
 
@@ -1060,19 +1090,19 @@ def test_force_regenerate_refreshes_the_application_llm_cache() -> None:
     assert second.application_id == first.application_id
     assert [call.get("purpose") for call in calls] == [
         "cv_adaptation",
-        "motivation_letter",
+        "application_texts",
         "document_review",
     ]
     assert all(call["refresh_cache"] is True for call in calls)
 
 
-def test_application_generates_cv_then_letter_then_persists_review() -> None:
+def test_application_selects_cv_then_generates_summary_and_letter_then_persists_review() -> None:
     _register_llm_responses()
 
     from sqlalchemy import select
 
     from smartapply.database import session_scope
-    from smartapply.database.models import Application, GeneratedDocument, JobStatus
+    from smartapply.database.models import Application, GeneratedDocument, Job, JobStatus
     from smartapply.pipeline import Pipeline
     from smartapply.profile import get_profile
 
@@ -1088,7 +1118,6 @@ def test_application_generates_cv_then_letter_then_persists_review() -> None:
         location="Paris",
     )
     job_id = ingested.job_ids[0]
-    pipeline.process_pending(top_k_analyze=1, job_ids=[job_id])
     calls: list[dict] = []
     original_complete_json = pipeline.llm.complete_json
 
@@ -1097,30 +1126,69 @@ def test_application_generates_cv_then_letter_then_persists_review() -> None:
         return original_complete_json(**kwargs)
 
     pipeline.llm.complete_json = record_generation
+    pipeline.process_pending(top_k_analyze=1, job_ids=[job_id])
+    assert pipeline.llm.cheap_model != pipeline.llm.smart_model
+    assert [call["purpose"] for call in calls] == [
+        "job_offer_analysis",
+        "job_fit_assessment",
+    ]
+    assert [call["schema"] for call in calls] == [OfferAnalysis, JobFitAssessment]
+    assert all(call["model"] == pipeline.llm.cheap_model for call in calls)
+    calls.clear()
+    with session_scope() as session:
+        stored_analysis = session.get(Job, job_id).analysis
+        assert stored_analysis.model_used == pipeline.llm.cheap_model
+        analysis_before = (
+            stored_analysis.id,
+            stored_analysis.created_at,
+            stored_analysis.raw_response,
+        )
     report = pipeline.apply_to(job_id)
 
     assert report.status == JobStatus.READY_FOR_FORM_SUBMISSION
     assert [call["purpose"] for call in calls] == [
         "cv_adaptation",
-        "motivation_letter",
+        "application_texts",
         "document_review",
     ]
     assert [call["schema"] for call in calls] == [
-        CVPersonalization,
-        MotivationLetter,
+        CVSelection,
+        ApplicationTexts,
         DocumentTextReview,
     ]
-    # This sentence is absent from the canned JobAnalysis: both later stages
+    assert [call["model"] for call in calls] == [
+        pipeline.llm.smart_model,
+        pipeline.llm.smart_model,
+        pipeline.llm.smart_model,
+    ]
+    # This sentence is absent from the canned OfferAnalysis: both later stages
     # must receive the original offer, not merely its extracted keywords.
     for call in calls[1:]:
         assert "The product must retain source citations for clinical teams." in call["user"]
 
     assert report.document_review
+    assert report.document_review[0]["model"] == pipeline.llm.smart_model
+    assert report.document_review[0]["schema_version"] == 2
+    assert report.document_review[0]["decision"] == "accepted"
+    assert report.document_review[0]["reference_date"]
     with session_scope() as session:
+        stored_analysis = session.get(Job, job_id).analysis
+        assert (
+            stored_analysis.id,
+            stored_analysis.created_at,
+            stored_analysis.raw_response,
+        ) == analysis_before
         application = session.get(Application, report.application_id)
         assert application is not None
         assert application.cv_json["selected_skills"]
-        final_cv = {key: value for key, value in application.cv_json.items() if key != "warnings"}
+        assert [reason["project_id"] for reason in application.cv_json["project_selection_reasons"]] == (
+            application.cv_json["selected_project_ids"]
+        )
+        final_cv = {
+            key: value
+            for key, value in application.cv_json.items()
+            if key not in {"warnings", "project_selection_reasons"}
+        }
         profile = get_profile()
         for call in calls[1:]:
             # Locate the structured source context independently of the prompt's
@@ -1128,7 +1196,12 @@ def test_application_generates_cv_then_letter_then_persists_review() -> None:
             source_position = call["user"].index('"source_index"')
             context_start = call["user"].rfind("{", 0, source_position)
             context, _ = json.JSONDecoder().raw_decode(call["user"][context_start:])
-            assert context["final_cv"]["data"] == final_cv
+            expected_cv = (
+                {key: value for key, value in final_cv.items() if key != "professional_summary"}
+                if call["purpose"] == "application_texts"
+                else final_cv
+            )
+            assert context["final_cv"]["data"] == expected_cv
             assert context["job_offer"]["full_description"] == offer_description
             assert {
                 category["id"]: category["skills"]
@@ -1153,7 +1226,311 @@ def test_application_generates_cv_then_letter_then_persists_review() -> None:
         assert json.loads(review.content) == report.document_review
 
 
-def test_unavailable_document_review_cannot_create_ready_application() -> None:
+@pytest.mark.parametrize("category", ["style", "structure"])
+def test_advisory_review_does_not_block_or_rewrite_application(category: str) -> None:
+    _register_llm_responses()
+    reason = "Optional improvement: make the transition between these sentences more direct."
+    MockLLMProvider.register(
+        "document_review",
+        DocumentTextReview(
+            issues=[
+                {
+                    "field": "motivation_letter_body",
+                    "passage": "Je serai ravi d'échanger sur la suite.",
+                    "reason": reason,
+                    "source_ids": ["style:letter"],
+                    "category": category,
+                    "replacement": None,
+                }
+            ]
+        ),
+    )
+
+    from smartapply.database import session_scope
+    from smartapply.database.models import Application, JobStatus
+    from smartapply.pipeline import Pipeline
+
+    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    ingested = pipeline.ingest_text(
+        text="Build RAG pipelines with Python and PyTorch for a product team.",
+        title="Data Scientist NLP",
+        company="AdvisoryReviewCo",
+        location="Paris",
+    )
+    job_id = ingested.job_ids[0]
+    pipeline.process_pending(top_k_analyze=1, job_ids=[job_id])
+    calls: list[dict] = []
+    original_complete_json = pipeline.llm.complete_json
+
+    def record_generation(**kwargs):
+        calls.append(kwargs)
+        return original_complete_json(**kwargs)
+
+    pipeline.llm.complete_json = record_generation
+    report = pipeline.apply_to(job_id)
+
+    assert report.status == JobStatus.READY_FOR_FORM_SUBMISSION
+    assert not report.validation_errors
+    assert any(reason in warning for warning in report.validation_warnings)
+    assert [call["purpose"] for call in calls] == [
+        "cv_adaptation",
+        "application_texts",
+        "document_review",
+    ]
+    with session_scope() as session:
+        application = session.get(Application, report.application_id)
+        assert application.status == JobStatus.READY_FOR_FORM_SUBMISSION
+        letter = next(
+            document
+            for document in application.documents
+            if document.doc_type == "motivation_letter"
+        )
+        assert "Je serai ravi d'échanger sur la suite." in letter.content
+        review = next(
+            document for document in application.documents if document.doc_type == "document_review"
+        )
+        assert json.loads(review.content) == report.document_review
+
+
+def test_confirmed_local_correction_survives_advisory_only_confirmation() -> None:
+    _register_llm_responses()
+
+    from smartapply.database import session_scope
+    from smartapply.database.models import Application, JobStatus
+    from smartapply.pipeline import Pipeline
+
+    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    ingested = pipeline.ingest_text(
+        text="Build RAG pipelines with Python and PyTorch for a product team.",
+        title="Data Scientist NLP",
+        company="LocalCorrectionCo",
+        location="Paris",
+    )
+    job_id = ingested.job_ids[0]
+    pipeline.process_pending(top_k_analyze=1, job_ids=[job_id])
+    original_complete_json = pipeline.llm.complete_json
+    calls: list[dict] = []
+    generated_letter: MotivationLetter | None = None
+    reviews = iter(
+        [
+            DocumentTextReview(
+                issues=[
+                    {
+                        "field": "motivation_letter_body",
+                        "passage": "Je souhaites échanger",
+                        "reason": "The first-person singular verb must be souhaite.",
+                        "source_ids": ["style:letter"],
+                        "category": "language",
+                        "replacement": "Je souhaite échanger",
+                    }
+                ]
+            ),
+            DocumentTextReview(
+                issues=[
+                    {
+                        "field": "motivation_letter_body",
+                        "passage": "correspondent bien aux pipelines que vous décrivez",
+                        "reason": "Optional style preference: a more direct transition is possible.",
+                        "source_ids": ["style:letter"],
+                        "category": "style",
+                        "replacement": None,
+                    }
+                ]
+            ),
+        ]
+    )
+
+    def respond(**kwargs):
+        nonlocal generated_letter
+        calls.append(kwargs)
+        if kwargs["purpose"] == "document_review":
+            return next(reviews)
+        response = original_complete_json(**kwargs)
+        if kwargs["purpose"] == "application_texts":
+            response = response.model_copy(
+                update={
+                    "motivation_letter_body": response.motivation_letter_body.replace(
+                        "Je serai ravi d'échanger", "Je souhaites échanger"
+                    )
+                }
+            )
+            generated_letter = MotivationLetter(
+                subject=response.motivation_letter_subject,
+                body=response.motivation_letter_body,
+            )
+            return response
+        return response
+
+    pipeline.llm.complete_json = respond
+    report = pipeline.apply_to(job_id)
+
+    assert generated_letter is not None
+    assert report.status == JobStatus.READY_FOR_FORM_SUBMISSION
+    assert not report.validation_errors
+    assert any("Optional style preference" in warning for warning in report.validation_warnings)
+    assert [call["purpose"] for call in calls] == [
+        "cv_adaptation",
+        "application_texts",
+        "document_review",
+        "document_review",
+    ]
+    assert [call["model"] for call in calls] == [
+        pipeline.llm.smart_model,
+        pipeline.llm.smart_model,
+        pipeline.llm.smart_model,
+        pipeline.llm.smart_model,
+    ]
+    with session_scope() as session:
+        application = session.get(Application, report.application_id)
+        letter = next(
+            document
+            for document in application.documents
+            if document.doc_type == "motivation_letter"
+        )
+        assert letter.content == generated_letter.body.replace(
+            "Je souhaites échanger", "Je souhaite échanger"
+        )
+        assert len(report.document_review) == 2
+        assert [attempt["decision"] for attempt in report.document_review] == [
+            "revision_proposed",
+            "accepted",
+        ]
+        review = next(
+            document for document in application.documents if document.doc_type == "document_review"
+        )
+        assert json.loads(review.content) == report.document_review
+
+
+def test_confirmed_cv_title_correction_is_persisted_and_rendered_without_reassembly() -> None:
+    _register_llm_responses()
+
+    from html import escape
+
+    from smartapply.database import session_scope
+    from smartapply.database.models import Application, JobStatus
+    from smartapply.pipeline import Pipeline
+
+    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    ingested = pipeline.ingest_text(
+        text="Build RAG pipelines with Python and PyTorch for a product team.",
+        title="Data Scientist NLP",
+        company="TitleCorrectionCo",
+        location="Paris",
+    )
+    job_id = ingested.job_ids[0]
+    pipeline.process_pending(top_k_analyze=1, job_ids=[job_id])
+    corrected_title = "Data Scientist – NLP & Multimodal AI"
+    original_title = f"Principal {corrected_title}"
+    original_complete_json = pipeline.llm.complete_json
+    calls: list[dict] = []
+    generated_letter: MotivationLetter | None = None
+    reviews = iter(
+        [
+            DocumentTextReview(
+                issues=[
+                    {
+                        "field": "cv_title",
+                        "passage": "Principal ",
+                        "reason": "The supplied candidate evidence does not support this seniority.",
+                        "source_ids": ["candidate:provided_evidence"],
+                        "category": "factual",
+                        "replacement": "",
+                    }
+                ]
+            ),
+            DocumentTextReview(issues=[]),
+        ]
+    )
+
+    def respond(**kwargs):
+        nonlocal generated_letter
+        calls.append(kwargs)
+        if kwargs["purpose"] == "document_review":
+            return next(reviews)
+        response = original_complete_json(**kwargs)
+        if kwargs["purpose"] == "cv_adaptation":
+            return response.model_copy(update={"cv_title": original_title})
+        if kwargs["purpose"] == "application_texts":
+            generated_letter = MotivationLetter(
+                subject=response.motivation_letter_subject,
+                body=response.motivation_letter_body,
+            )
+        return response
+
+    pipeline.llm.complete_json = respond
+    report = pipeline.apply_to(job_id)
+
+    assert report.status == JobStatus.READY_FOR_FORM_SUBMISSION
+    assert not report.validation_errors
+    assert [call["purpose"] for call in calls] == [
+        "cv_adaptation",
+        "application_texts",
+        "document_review",
+        "document_review",
+    ]
+    assert [call["model"] for call in calls] == [
+        pipeline.llm.smart_model,
+        pipeline.llm.smart_model,
+        pipeline.llm.smart_model,
+        pipeline.llm.smart_model,
+    ]
+    assert [attempt["decision"] for attempt in report.document_review] == [
+        "revision_proposed",
+        "accepted",
+    ]
+    source_contexts = []
+    for call in calls[1:]:
+        source_position = call["user"].index('"source_index"')
+        context_start = call["user"].rfind("{", 0, source_position)
+        context, _ = json.JSONDecoder().raw_decode(call["user"][context_start:])
+        source_contexts.append(context)
+    selected_cv = source_contexts[0]["final_cv"]["data"]
+    assert "professional_summary" not in selected_cv
+    original_cv = source_contexts[1]["final_cv"]["data"]
+    assert {
+        key: value for key, value in original_cv.items() if key != "professional_summary"
+    } == selected_cv
+    assert original_cv["cv_title"] == original_title
+    expected_cv = {**original_cv, "cv_title": corrected_title}
+    # The confirmation sees the corrected title and exactly the same summary,
+    # selected Skills, projects, static experiences, identifiers and order.
+    assert source_contexts[2]["final_cv"]["data"] == expected_cv
+
+    with session_scope() as session:
+        application = session.get(Application, report.application_id)
+        assert {
+            key: value
+            for key, value in application.cv_json.items()
+            if key not in {"warnings", "project_selection_reasons"}
+        } == expected_cv
+        assert [reason["project_id"] for reason in application.cv_json["project_selection_reasons"]] == (
+            application.cv_json["selected_project_ids"]
+        )
+        cv_document = next(
+            document for document in application.documents if document.doc_type == "cv_json"
+        )
+        assert json.loads(cv_document.content) == application.cv_json
+        letter_document = next(
+            document
+            for document in application.documents
+            if document.doc_type == "motivation_letter"
+        )
+        assert generated_letter is not None
+        assert letter_document.content == generated_letter.body
+        assert letter_document.extra["subject"] == generated_letter.subject
+        review_document = next(
+            document for document in application.documents if document.doc_type == "document_review"
+        )
+        assert json.loads(review_document.content) == report.document_review
+        assert review_document.extra["scope"] == "cv_title_professional_summary_and_motivation_letter"
+
+    headline = f'<p class="headline">{escape(corrected_title)}</p>'
+    assert headline in Path(report.cv_html_path).read_text(encoding="utf-8")
+    assert headline in Path(report.letter_html_path).read_text(encoding="utf-8")
+    assert escape(original_title) not in Path(report.letter_html_path).read_text(encoding="utf-8")
+
+
+def test_unavailable_review_keeps_dossier_available_with_incomplete_control() -> None:
     _register_llm_responses()
 
     from sqlalchemy import select
@@ -1184,17 +1561,27 @@ def test_unavailable_document_review_cannot_create_ready_application() -> None:
     pipeline.llm.complete_json = fail_review
     report = pipeline.apply_to(job_id)
 
-    assert purposes == ["cv_adaptation", "motivation_letter", "document_review"]
-    assert report.status == JobStatus.QUALITY_REJECTED
+    assert purposes == ["cv_adaptation", "application_texts", "document_review"]
+    assert report.status == JobStatus.READY_FOR_FORM_SUBMISSION
     assert any(error.startswith("text_review_unavailable:") for error in report.validation_errors)
-    assert any(attempt["status"] == "unavailable" for attempt in report.document_review)
+    assert "text_review_incomplete: contrôle non terminé" in report.validation_errors
+    assert not any(error.startswith("text_review:factual:") for error in report.validation_errors)
+    assert report.document_review[-1]["status"] == "incomplete"
+    assert report.document_review[-1]["decision"] == "incomplete"
     assert report.cv_pdf_path and Path(report.cv_pdf_path).exists()
     assert report.letter_pdf_path and Path(report.letter_pdf_path).exists()
     with session_scope() as session:
         application = session.scalar(select(Application).where(Application.job_id == job_id))
         assert application is not None
-        assert application.status == JobStatus.QUALITY_REJECTED
-        assert session.get(Job, job_id).status != JobStatus.READY_FOR_FORM_SUBMISSION
+        assert application.status == JobStatus.READY_FOR_FORM_SUBMISSION
+        assert (
+            "validation_error:text_review_incomplete: contrôle non terminé"
+            in application.validation_warnings
+        )
+        assert session.get(Job, job_id).status in (
+            JobStatus.READY_FOR_FORM_SUBMISSION,
+            JobStatus.SHORTLISTED,
+        )
         reviews = [
             document for document in application.documents if document.doc_type == "document_review"
         ]
@@ -1202,7 +1589,135 @@ def test_unavailable_document_review_cannot_create_ready_application() -> None:
         assert json.loads(reviews[0].content) == report.document_review
 
 
-def test_unresolved_document_review_persists_quality_rejection() -> None:
+@pytest.mark.parametrize("field", ["professional_summary", "motivation_letter_body"])
+def test_overlimit_documents_remain_available_with_diagnostics_without_truncation(field: str) -> None:
+    _register_llm_responses()
+
+    from smartapply.cv.motivation_validator import _word_count
+    from smartapply.database import session_scope
+    from smartapply.database.models import Application, JobStatus
+    from smartapply.pipeline import Pipeline
+
+    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    ingested = pipeline.ingest_text(
+        text="Build RAG pipelines with Python and PyTorch for a product team.",
+        title="Data Scientist NLP",
+        company="OverlimitReviewCo",
+        location="Paris",
+    )
+    job_id = ingested.job_ids[0]
+    pipeline.process_pending(top_k_analyze=1, job_ids=[job_id])
+    original_complete_json = pipeline.llm.complete_json
+    generated_text = ""
+    purposes: list[str] = []
+
+    def respond(**kwargs):
+        nonlocal generated_text
+        purposes.append(kwargs["purpose"])
+        response = original_complete_json(**kwargs)
+        if kwargs["purpose"] == "application_texts":
+            if field == "professional_summary":
+                generated_text = "x" * (pipeline.profile.style_guide.max_summary_length + 1)
+            else:
+                body = response.motivation_letter_body
+                generated_text = body + " context" * (241 - _word_count(body))
+                assert _word_count(generated_text) == 241
+            return response.model_copy(update={field: generated_text})
+        return response
+
+    pipeline.llm.complete_json = respond
+    report = pipeline.apply_to(job_id)
+
+    defect = "summary_too_long:" if field == "professional_summary" else "letter_too_long:241"
+    assert report.status == JobStatus.READY_FOR_FORM_SUBMISSION
+    assert any(defect in error for error in report.validation_errors)
+    assert not any(error.startswith("text_review:factual:") for error in report.validation_errors)
+    assert purposes == ["cv_adaptation", "application_texts", "document_review"]
+    assert report.document_review[-1]["status"] == "completed"
+    assert report.document_review[-1]["decision"] == "rejected"
+    with session_scope() as session:
+        application = session.get(Application, report.application_id)
+        assert application.status == JobStatus.READY_FOR_FORM_SUBMISSION
+        assert any(defect in warning for warning in application.validation_warnings)
+        if field == "professional_summary":
+            assert application.cv_json["professional_summary"] == generated_text
+        else:
+            letter = next(
+                document
+                for document in application.documents
+                if document.doc_type == "motivation_letter"
+            )
+            assert letter.content == generated_text
+        review = next(
+            document for document in application.documents if document.doc_type == "document_review"
+        )
+        assert json.loads(review.content) == report.document_review
+
+
+def test_invalid_review_source_persists_incomplete_control_without_factual_accusation() -> None:
+    _register_llm_responses()
+    allegation = "Unsupported allegation from an invalid reviewer response."
+    MockLLMProvider.register(
+        "document_review",
+        DocumentTextReview(
+            issues=[
+                {
+                    "field": "professional_summary",
+                    "passage": "Data Scientist with 2 years in NLP and machine learning.",
+                    "reason": allegation,
+                    "source_ids": ["project:does_not_exist"],
+                    "category": "factual",
+                    "replacement": "Data scientist working on language systems.",
+                }
+            ]
+        ),
+    )
+
+    from smartapply.database import session_scope
+    from smartapply.database.models import Application, JobStatus
+    from smartapply.pipeline import Pipeline
+
+    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    ingested = pipeline.ingest_text(
+        text="Build RAG pipelines with Python and PyTorch for a product team.",
+        title="Data Scientist NLP",
+        company="InvalidReviewSourceCo",
+        location="Paris",
+    )
+    job_id = ingested.job_ids[0]
+    pipeline.process_pending(top_k_analyze=1, job_ids=[job_id])
+    report = pipeline.apply_to(job_id)
+
+    assert report.status == JobStatus.READY_FOR_FORM_SUBMISSION
+    assert "text_review_invalid_source:professional_summary" in report.validation_errors
+    assert "text_review_incomplete: contrôle non terminé" in report.validation_errors
+    assert not any(error.startswith("text_review:factual:") for error in report.validation_errors)
+    assert allegation not in " ".join(report.validation_errors)
+    assert len(report.document_review) == 1
+    assert report.document_review[-1]["status"] == "incomplete"
+    assert report.document_review[-1]["decision"] == "incomplete"
+    assert allegation in json.dumps(report.document_review)
+    with session_scope() as session:
+        application = session.get(Application, report.application_id)
+        assert application.status == JobStatus.READY_FOR_FORM_SUBMISSION
+        assert application.cv_json["professional_summary"].startswith(
+            "Data Scientist with 2 years in NLP and machine learning."
+        )
+        assert (
+            "validation_error:text_review_incomplete: contrôle non terminé"
+            in application.validation_warnings
+        )
+        assert not any(
+            warning.startswith("validation_error:text_review:factual:")
+            for warning in application.validation_warnings
+        )
+        review = next(
+            document for document in application.documents if document.doc_type == "document_review"
+        )
+        assert json.loads(review.content) == report.document_review
+
+
+def test_unresolved_document_review_is_preserved_without_blocking_the_dossier() -> None:
     _register_llm_responses()
     MockLLMProvider.register(
         "document_review",
@@ -1213,11 +1728,10 @@ def test_unresolved_document_review_persists_quality_rejection() -> None:
                     "passage": "Data Scientist with 2 years in NLP and machine learning.",
                     "reason": "Unresolved claim: the wording needs qualification against the final CV.",
                     "source_ids": ["document:final_cv"],
+                    "category": "factual",
+                    "replacement": None,
                 }
             ],
-            professional_summary=None,
-            motivation_letter_subject=None,
-            motivation_letter_body=None,
         ),
     )
 
@@ -1237,13 +1751,13 @@ def test_unresolved_document_review_persists_quality_rejection() -> None:
 
     report = pipeline.apply_to(job_id)
 
-    assert report.status == JobStatus.QUALITY_REJECTED
+    assert report.status == JobStatus.READY_FOR_FORM_SUBMISSION
     assert report.validation_errors
     assert "Unresolved claim" in json.dumps(report.document_review)
     with session_scope() as session:
         application = session.get(Application, report.application_id)
         assert application is not None
-        assert application.status == JobStatus.QUALITY_REJECTED
+        assert application.status == JobStatus.READY_FOR_FORM_SUBMISSION
         assert application.cv_json["selected_experiences"]
         reviews = [
             document for document in application.documents if document.doc_type == "document_review"

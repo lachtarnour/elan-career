@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from functools import cache, lru_cache
+from functools import lru_cache
 from importlib.resources import files
 from typing import Any
 
@@ -20,9 +20,8 @@ def _environment() -> Environment:
     )
 
 
-@cache
 def load_prompt(template_name: str) -> str:
-    """Load a prompt template as plain text."""
+    """Read the current template; edits must affect the next request."""
     template_path = files("smartapply.llm.prompts").joinpath(
         _TEMPLATE_ROOT,
         template_name,
