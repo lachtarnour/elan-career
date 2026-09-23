@@ -15,6 +15,7 @@ from smartapply.cv import (
     CvValidator,
     HtmlApplicationRenderer,
 )
+from smartapply.cv.assembly import profile_experiences
 from smartapply.cv.education import english_institution_name
 from smartapply.cv.motivation_validator import (
     MotivationLetterValidator,
@@ -22,18 +23,19 @@ from smartapply.cv.motivation_validator import (
 from smartapply.llm import (
     AdaptedBullet,
     AdaptedCV,
-    AdaptedExperience,
-    ApplicationDraft,
+    ApplicationTexts,
+    CVSelection,
     JobAnalysis,
     MockLLMProvider,
     MotivationLetter,
     MotivationLetterRepair,
 )
-from smartapply.llm.prompts import application_draft, cv_adaptation
+from smartapply.llm.prompts import application_draft, application_texts, cv_adaptation
 from smartapply.pipeline.apply.cv_writer import CvWriterMixin
 from smartapply.pipeline.reports import ApplyReport
 from smartapply.profile import Degree, get_profile
 from smartapply.ranking import MockEmbeddingsProvider
+from smartapply.utils.skill_terms import skill_term_matches
 
 
 @pytest.fixture(autouse=True)
@@ -97,22 +99,8 @@ def _valid_adapted_cv() -> AdaptedCV:
             "Data Scientist with 2 years in NLP and machine learning. "
             "Built RAG and speech pipelines on synthetic datasets."
         ),
-        selected_experiences=[
-            AdaptedExperience(
-                source_id="exp_aurore_ds_2024",
-                bullets=[
-                    AdaptedBullet(
-                        source_id="blt_aurore_ds_multimodal",
-                        text="Built a multimodal classifier reaching 0.82 accuracy on synthetic test samples.",
-                    ),
-                    AdaptedBullet(
-                        source_id="blt_aurore_ds_speech",
-                        text="Developed speech transcription and document-tagging pipelines using Whisper and PyTorch.",
-                    ),
-                ],
-            )
-        ],
-        selected_project_ids=["proj_evidence_rag", "proj_ner_camembert"],
+        selected_experiences=profile_experiences(get_profile()),
+        selected_project_ids=["proj_evidence_rag", "proj_ner_camembert", "proj_smartapply"],
         skills_order=["ml_ai", "data_infra", "stats_signal"],
         warnings=[],
     )
@@ -122,7 +110,7 @@ def _empty_skills_cv() -> AdaptedCV:
     return AdaptedCV(
         cv_title="Adapted CV",
         professional_summary="Source-grounded summary.",
-        selected_experiences=[],
+        selected_experiences=profile_experiences(get_profile()),
         selected_project_ids=[],
         skills_profile_id="mixed",
         selected_skills=[],
@@ -167,11 +155,11 @@ def test_offer_skill_matching_prefers_specific_nested_skills() -> None:
         ("PySpark", "data_infra", ["PySpark"]),
         ("experience with PySpark", "data_infra", ["PySpark"]),
         ("Spark", "data_infra", ["Spark"]),
-        ("Mathematical Optimization", "stats_signal", ["Mathematical Optimization"]),
+        ("Mathematical Optimization", "stats_signal", ["Mathematical optimization"]),
         (
             "advanced mathematical optimization methods",
             "stats_signal",
-            ["Mathematical Optimization"],
+            ["Mathematical optimization"],
         ),
         ("Optimization", "stats_signal", ["Optimization"]),
         ("Experience with PyTorch", "ml_ai", ["PyTorch"]),
@@ -198,7 +186,6 @@ def test_graph_theory_translation_survives_cv_skill_filters(term: str) -> None:
     )
     adapter = CvAdapter(profile, llm=MockLLMProvider(), embeddings=MockEmbeddingsProvider())
 
-    assert cv_adaptation._format_unsupported_offer_terms(profile, analysis) == "- none"
     adapted = adapter._ensure_supported_offer_skills(_empty_skills_cv(), analysis)
     assert _selected_skill_map(adapted) == {"stats_signal": ["Graph Theory"]}
     adapted = adapter._apply_role_family_contract(adapted, analysis, "Ingénieur Optimisation")
@@ -208,31 +195,50 @@ def test_graph_theory_translation_survives_cv_skill_filters(term: str) -> None:
 
 
 def test_graph_theory_translation_does_not_infer_graph_tools_or_gnn_experience() -> None:
-    assert not cv_adaptation._term_supported_by_allowed_skill(
-        "théorie des graphes", {"Graph Neural Networks (GNNs)"}
-    )
+    assert not skill_term_matches("théorie des graphes", "Graph Neural Networks (GNNs)")
     for unsupported in ("NetworkX", "igraph", "graph-tool", "Graph Neural Networks (GNNs)"):
-        assert not cv_adaptation._term_supported_by_allowed_skill(unsupported, {"Graph Theory"})
+        assert not skill_term_matches(unsupported, "Graph Theory")
         assert (
             CvAdapter._matched_allowed_skill_keys(unsupported, {"graph theory": "Graph Theory"})
             == []
         )
 
 
-def test_adapter_can_produce_cv_and_letter_in_one_call() -> None:
+def test_adapter_produces_letter_after_final_cv_and_review() -> None:
+    from smartapply.llm import DocumentTextReview
+
     MockLLMProvider.clear()
     cv = _valid_adapted_cv()
     MockLLMProvider.register(
-        "application_draft",
-        ApplicationDraft(
+        "cv_adaptation",
+        CVSelection(
             cv_title=cv.cv_title,
-            professional_summary=cv.professional_summary,
-            selected_experiences=cv.selected_experiences,
             selected_project_ids=cv.selected_project_ids,
+            project_selection_reasons=[
+                {
+                    "project_id": project_id,
+                    "reason": "Demonstrates documented NLP pipeline work.",
+                    "offer_evidence": "Build RAG pipelines",
+                    "complementary_value": "",
+                }
+                for project_id in cv.selected_project_ids
+            ],
             skills_order=cv.skills_order,
             warnings=cv.warnings,
+        ),
+    )
+    MockLLMProvider.register(
+        "application_texts",
+        ApplicationTexts(
+            professional_summary=cv.professional_summary,
             motivation_letter_subject="Application: Data Scientist NLP",
-            motivation_letter_body="Hello,\n\nI am writing about this role." + " word" * 180,
+            motivation_letter_body=_repair_valid_body(),
+        ),
+    )
+    MockLLMProvider.register(
+        "document_review",
+        DocumentTextReview(
+            issues=[],
         ),
     )
     adapter = CvAdapter(get_profile(), embeddings=MockEmbeddingsProvider())
@@ -240,36 +246,58 @@ def test_adapter_can_produce_cv_and_letter_in_one_call() -> None:
         _sample_analysis(), job_title="Data Scientist NLP", job_company="Acme"
     )
     assert adapted.cv_title.startswith("Data Scientist")
+    assert adapted.professional_summary == cv.professional_summary
     assert letter.subject.startswith("Application")
     assert len(selection.experiences) >= 1
+    assert adapted.selected_project_ids == cv.selected_project_ids
 
 
-def test_adapter_keeps_project_count_between_two_and_four() -> None:
-    adapter = CvAdapter(get_profile(), embeddings=MockEmbeddingsProvider())
-    cv = _valid_adapted_cv().model_copy(
-        update={
-            "selected_project_ids": [
-                "proj_evidence_rag",
-                "proj_ner_camembert",
-                "proj_smartapply",
-                "proj_geometry",
-                "proj_gpt2",
-            ],
-        }
+def test_adapter_keeps_three_final_projects_in_llm_order() -> None:
+    profile = get_profile()
+    chosen = [project.id for project in reversed(profile.projects[:3])]
+    personalization = CVSelection(
+        cv_title="Data Scientist",
+        selected_project_ids=chosen,
+        project_selection_reasons=[
+            {
+                "project_id": project_id,
+                "reason": "Demonstrates documented machine learning work.",
+                "offer_evidence": "Productionize ML services",
+                "complementary_value": "",
+            }
+            for project_id in chosen
+        ],
+        skills_order=[],
+        warnings=[],
+    )
+    adapter = CvAdapter(
+        profile,
+        llm=MockLLMProvider({"cv_adaptation": personalization}),
+        embeddings=MockEmbeddingsProvider(),
     )
 
-    capped = adapter._enforce_project_count(cv)
-    assert capped.selected_project_ids == [
-        "proj_evidence_rag",
-        "proj_ner_camembert",
-        "proj_smartapply",
-        "proj_geometry",
-    ]
+    adapted, selection = adapter.adapt(
+        _sample_analysis(), job_title="Data Scientist NLP", job_company="Example"
+    )
 
-    short = cv.model_copy(update={"selected_project_ids": ["proj_evidence_rag"]})
-    expanded = adapter._enforce_project_count(short)
-    assert len(expanded.selected_project_ids) == 2
-    assert expanded.selected_project_ids[0] == "proj_evidence_rag"
+    assert "professional_summary" not in adapted.model_dump()
+    assert adapted.selected_project_ids == chosen
+    assert [project.id for project in selection.projects] == chosen
+
+
+@pytest.mark.parametrize("available_count", [0, 1, 2, 5])
+def test_html_keeps_empty_project_selection_regardless_of_catalogue(available_count: int) -> None:
+    profile = get_profile().model_copy(
+        update={"projects": get_profile().projects[:available_count]}
+    )
+    renderer = HtmlApplicationRenderer(profile)
+    cv = _valid_adapted_cv().model_copy(update={"selected_project_ids": []})
+
+    selected = renderer._select_projects(
+        adapted=cv, project_by_id={project.id: project for project in profile.projects}
+    )
+
+    assert selected == []
 
 
 # ---------------- Validator ----------------
@@ -294,7 +322,7 @@ def test_validator_rejects_unknown_bullet_id() -> None:
     assert any("unknown_bullet_id" in e for e in result.errors)
 
 
-def test_motivation_letter_validator_flags_short_and_unsupported_terms() -> None:
+def test_motivation_letter_validator_keeps_quality_checks_without_lexical_verdicts() -> None:
     analysis = _sample_analysis().model_copy(
         update={"required_skills": ["Kubernetes"], "cv_keywords_to_include": []}
     )
@@ -308,7 +336,10 @@ def test_motivation_letter_validator_flags_short_and_unsupported_terms() -> None
         analysis=analysis,
     )
     assert "letter_too_short:4" in result.warnings
-    assert "unsupported_term_in_letter:Kubernetes" in result.warnings
+    assert "letter_may_not_reference_selected_evidence" not in result.warnings
+    assert not any(
+        w.startswith(("unsupported_term_", "unsupported_tech_")) for w in result.warnings
+    )
 
 
 def test_cv_title_alignment_compares_role_families_not_offer_keywords() -> None:
@@ -410,7 +441,7 @@ def _repair_valid_body() -> str:
         "For this role, I would bring the same structured approach, attention "
         "to quality, and focus on useful outcomes.",
     )
-    return "\n\n".join(f"{opening} {' '.join([refrain] * 6)}" for opening in openings)
+    return "\n\n".join(f"{opening} {' '.join([refrain] * 4)}" for opening in openings)
 
 
 def _repair_too_long_body() -> str:
@@ -432,7 +463,7 @@ def _repair_once(
     )
 
 
-def test_single_letter_defect_is_repaired_once_with_cheap_model() -> None:
+def test_single_letter_defect_is_repaired_once_with_smart_model() -> None:
     provider = _RepairRecordingProvider(
         {
             "motivation_letter_repair": MotivationLetterRepair(body=_repair_valid_body()),
@@ -451,7 +482,7 @@ def test_single_letter_defect_is_repaired_once_with_cheap_model() -> None:
     assert len(provider.calls) == 1
     call = provider.calls[0]
     assert call["purpose"] == "motivation_letter_repair"
-    assert call["model"] == provider.cheap_model
+    assert call["model"] == provider.smart_model
     assert call["temperature"] == 0.1
     assert call["schema"] is MotivationLetterRepair
     assert "letter_too_long" in call["user"]
@@ -538,20 +569,22 @@ def test_html_renderer_matches_reference_cv_architecture() -> None:
     assert "max-width: 70mm" in html
     assert "overflow-wrap: anywhere" in html
     assert "white-space: normal" in html
-    assert "--header-gap: 20px" in html
-    assert "--summary-experience-gap: 6px" in html
-    assert "calc(var(--header-gap) + var(--summary-experience-gap))" in html
+    assert "margin-bottom: calc(var(--section-gap) + 6px)" in html
     assert "justify-content: var(--section-justify)" in html
     assert "--section-content-indent: 3.5mm" in html
-    assert "grid-template-columns: 34mm 1fr" in html
+    assert "grid-template-columns: 29mm 1fr" in html
     assert "skill-row" in html
-    assert "skill-pill" in html
+    assert "skill-list" in html
+    assert "skill-pill" not in html
     assert "language-row" in html
     assert "border-left" not in html
     assert "header::before" not in html
     assert "\\2197" not in html
-    assert 'class="project-link"' in html
-    assert 'aria-label="Project repository"' in html
+    assert 'class="project-link"' not in html
+    assert (
+        '<a class="name-link" href="https://example.com/projects/proj_evidence_rag">'
+        "Evidence RAG Verifier</a>"
+    ) in html
     assert "Completed" not in html
 
 
@@ -583,11 +616,16 @@ def test_letter_renderer_uses_adapted_headline_and_fallback() -> None:
     assert f'<p class="headline">{profile_headline}</p>' in fallback_html
 
 
-def test_application_renderer_passes_cv_title_to_letter_renderer(tmp_path: Path) -> None:
+@pytest.mark.parametrize("filename_candidate_name", [None, "Nour Lachtar"])
+def test_application_renderer_passes_cv_title_to_letter_renderer(
+    tmp_path: Path, filename_candidate_name: str | None
+) -> None:
     from smartapply.pipeline.application_renderer import ApplicationDocumentRenderer
     from smartapply.pipeline.reports import ApplyReport
 
-    profile = get_profile()
+    profile = get_profile().model_copy(deep=True)
+    profile.template_style.filename_candidate_name = filename_candidate_name
+    original_full_name = profile.identity.full_name
     adapted = _valid_adapted_cv()
     original_cv_title = adapted.cv_title
     letter = MotivationLetter(
@@ -647,6 +685,19 @@ def test_application_renderer_passes_cv_title_to_letter_renderer(tmp_path: Path)
     ]
     assert cv_titles_seen == [original_cv_title, original_cv_title]
     assert adapted.cv_title == original_cv_title
+    assert profile.identity.full_name == original_full_name
+    candidate_name = filename_candidate_name or original_full_name
+    for field, prefix, extension in (
+        ("docx_path", "CV", "docx"),
+        ("cv_html_path", "CV", "html"),
+        ("cv_pdf_path", "CV", "pdf"),
+        ("letter_html_path", "Motivation", "html"),
+        ("letter_pdf_path", "Motivation", "pdf"),
+    ):
+        path = Path(getattr(report, field))
+        assert path.name == f"{prefix} - {candidate_name} - Data Scientist.{extension}"
+        assert path.parent == tmp_path / "123"
+        assert path.is_file()
 
 
 def test_cv_renderers_translate_french_university_label(tmp_path: Path) -> None:
@@ -733,10 +784,11 @@ def test_application_draft_prompt_separates_matching_keywords_from_display_skill
     )
     combined = "\n".join(
         [
-            application_draft.SYSTEM,
+            application_draft.build_system_prompt(),
             app_prompt,
-            cv_adaptation.SYSTEM,
+            cv_adaptation.build_system_prompt(),
             cv_prompt,
+            application_texts.build_system_prompt(),
         ]
     )
 
@@ -745,30 +797,28 @@ def test_application_draft_prompt_separates_matching_keywords_from_display_skill
     assert "matching_keywords_for_profile_selection_not_display" in app_prompt
     assert "genai" in app_prompt
     assert "do not copy those keywords into selected_skills" in app_prompt
-    assert "unsupported_offer_terms_not_to_claim" in app_prompt
-    assert "- MLOps" in app_prompt
-    assert "- Kubernetes" in app_prompt
-    assert "- GCP" in app_prompt
-    assert "- Machine learning" not in app_prompt
-    assert "- Computer vision" not in app_prompt
+    assert "unsupported_offer_terms_not_to_claim" not in combined
+    for term in ("MLOps", "Kubernetes", "GCP", "Machine learning", "Computer vision"):
+        assert term in app_prompt.split("=== JOB ===", 1)[1]
+    assert "absence from the display catalogue is not a prohibition" in combined
     assert "Offer/company anchors for letter:" in app_prompt
     assert "Acme Health builds patient-facing clinical AI products for care teams." in app_prompt
     assert "Work on RAG pipelines for medical knowledge access" in app_prompt
     assert "sound like a real candidate" in app_prompt
     assert "why this company and this role specifically make sense" in app_prompt
     assert "=== MOTIVATION LETTER ===" in app_prompt
-    assert "French or English: 220-300 words" in app_prompt
+    assert "French or English: 180-240 words" in app_prompt
     assert "clear recruiter-facing language" in app_prompt
-    assert "why it matters for the role" in application_draft.SYSTEM
+    assert "why it matters for the role" in application_draft.build_system_prompt()
     assert "Do not reproduce or closely paraphrase CV bullets" in app_prompt
     assert (
         "For professional experiences, use past or clearly neutral wording only"
-        in application_draft.SYSTEM
+        in application_draft.build_system_prompt()
     )
-    assert "never describe them as current" in application_draft.SYSTEM
+    assert "never describe them as current" in application_draft.build_system_prompt()
     assert (
         "Projects marked current or ongoing may still be described as current work"
-        in application_draft.SYSTEM
+        in application_draft.build_system_prompt()
     )
     assert "During my experience at [company]" in app_prompt
     assert "At [company], I developed" in app_prompt
@@ -780,27 +830,33 @@ def test_application_draft_prompt_separates_matching_keywords_from_display_skill
     assert "actuellement chez [entreprise]" in app_prompt
     assert "Projects marked current or ongoing may still be described as current work" in app_prompt
     assert "In my role at" not in app_prompt
-    assert "one concrete priority of the role or company" in application_draft.SYSTEM
-    assert "Avoid generic closing language" in application_draft.SYSTEM
+    assert "one concrete priority of the role or company" in application_draft.build_system_prompt()
+    assert "Avoid generic closing language" in application_draft.build_system_prompt()
     assert "Only claim skills, tools, domains, or experience" in app_prompt
     assert "Clear link between company needs, candidate evidence" in app_prompt
-    assert "selected_project_ids should contain 2 to 4 projects" in app_prompt
-    assert "Do not add weak filler projects just to reach 4" in app_prompt
-    assert "cv_title MUST read like a polished, real CV headline" in application_draft.SYSTEM
-    assert "not a skills list" in application_draft.SYSTEM
+    for prompt in (app_prompt, cv_prompt):
+        assert "exactly 3 unique projects, with a minimum and maximum of 3" in prompt
+        assert "project_selection_reasons" in prompt
+    for system in (application_draft.build_system_prompt(), cv_adaptation.build_system_prompt()):
+        assert "Select exactly 3 unique projects" in system
+        assert "specialized: select at most one" in system
+        assert "disabled: never select" in system
+        assert "Choose projects BEFORE writing" in system
+    assert "cv_title MUST read like a polished, real CV headline" in application_draft.build_system_prompt()
+    assert "not a skills list" in application_draft.build_system_prompt()
     assert "not tools or stack keywords" in app_prompt
     assert "opening role consistent with cv_title" in app_prompt
     assert 'under an "AI Engineer" title' in app_prompt
     assert (
-        "CV language: English only. Keep cv_title, professional_summary and CV bullets in English."
+        "CV language: English only. Keep cv_title and professional_summary in English."
         in app_prompt
     )
     assert "CV title: write a stable, polished professional headline" in app_prompt
     assert (
-        "Experience output: include every provided experience and every bullet id exactly once"
+        "Experiences are read-only context. Do not output, rewrite, shorten, select or reorder them."
         in app_prompt
     )
-    assert "write a motivation letter" in application_draft.SYSTEM
+    assert "write a motivation letter" in application_draft.build_system_prompt()
     assert "Required skills (for selected_skills, professional_summary and bullets" not in combined
     assert (
         "Required skills (from offer; for selected_skills, professional_summary and bullets"
@@ -824,15 +880,15 @@ def test_application_draft_prompt_separates_matching_keywords_from_display_skill
         in combined
     )
     assert (
-        "Use allowed_skills to verify that any named method, model family, "
-        "project or implementation technology is supported; do not enumerate "
-        "skills as standalone content"
+        "Use profile evidence, allowed_claims and evidence_level to support any named method, "
+        "model family, project or implementation technology, including terms absent from the "
+        "display catalogue; do not enumerate skills as standalone content"
     ) in combined
     assert (
         "professional_summary MUST be recruiter-facing, concrete, adapted to the role" in combined
     )
     assert (
-        "reflect at least one supported role-specific work area, workflow or contribution"
+        "Synthesize the candidate's professional profile"
         in combined
     )
     assert "selected_skills is the exact Skills section to display" in combined
@@ -844,7 +900,7 @@ def test_application_draft_prompt_separates_matching_keywords_from_display_skill
         "CV title: write a stable, polished professional headline under the candidate's name"
     ) in combined
     assert (
-        "Keywords to interpret the role focus and surface in selected_skills, "
-        "source-grounded bullets and the motivation letter when supported"
+        "Keywords to interpret the role focus and surface in selected_skills "
+        "and the motivation letter when supported"
     ) in app_prompt
     assert "exact skills" not in combined

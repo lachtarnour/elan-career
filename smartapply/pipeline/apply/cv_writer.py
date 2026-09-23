@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Any
 
+from smartapply.cv.letter_writer import OBJECTIVE_TEXT_WARNING_PREFIXES, ApplicationTextWriter
 from smartapply.cv.motivation_validator import normalize_french_elisions
 from smartapply.cv.role_family import (
     classify,
     classify_title,
     cv_title_family_is_compatible,
 )
+from smartapply.cv.text_hygiene import EVIDENCE_METADATA_PREFIX, evidence_metadata_warnings
 from smartapply.database import session_scope
 from smartapply.database.models import Job
 from smartapply.language import detect_offer_language
@@ -138,18 +141,99 @@ class CvWriterMixin:
         analysis: JobAnalysis,
         offer_language: str,
         document_company: str,
+        report: ApplyReport,
         refresh_cache: bool = False,
     ) -> tuple[Any, MotivationLetter]:
-        """Generate the adapted CV and motivation letter together."""
-        adapted, letter_draft, _selection = self.adapter.adapt_application(
+        """Assemble CV content, write summary and letter together, then review."""
+        assembled, _selection = self.adapter.adapt(
             analysis,
             job_title=job.title,
             job_company=document_company,
+            job_description=job.description or job.cleaned_description or "",
+            job_id=job.id,
+            refresh_cache=refresh_cache,
+        )
+        assembled = self._validate_with_auto_fix(assembled, report)
+        if not self.validator.validate(assembled).ok:
+            raise LLMError("CV structure could not be finalized before text generation")
+        context = dict(
+            job_title=job.title,
+            job_company=document_company,
+            job_description=job.description or job.cleaned_description or "",
             language=offer_language,
             job_id=job.id,
             refresh_cache=refresh_cache,
         )
-        return adapted, letter_draft
+        writer = ApplicationTextWriter(self.profile, self.llm)
+        adapted, letter = writer.generate_texts(assembled, analysis, **context)
+        return self._review_generated_text(
+            adapted,
+            letter,
+            analysis,
+            report=report,
+            reference_date=writer.reference_date,
+            **context,
+        )
+
+    def _review_generated_text(
+        self,
+        adapted: AdaptedCV,
+        letter: MotivationLetter,
+        analysis: JobAnalysis,
+        *,
+        job_title: str,
+        job_company: str,
+        job_description: str,
+        language: str,
+        job_id: int | None,
+        report: ApplyReport,
+        refresh_cache: bool = False,
+        reference_date: date | None = None,
+    ) -> tuple[AdaptedCV, MotivationLetter]:
+        result = ApplicationTextWriter(
+            self.profile, self.llm, reference_date=reference_date
+        ).review(
+            adapted,
+            letter,
+            analysis,
+            job_title=job_title,
+            job_company=job_company,
+            job_description=job_description,
+            language=language,
+            job_id=job_id,
+            refresh_cache=refresh_cache,
+        )
+        report.document_review.extend(result.attempts)
+        report.validation_errors.extend(result.errors)
+        report.validation_warnings.extend(
+            warning
+            for warning in dict.fromkeys(result.warnings)
+            if warning not in report.validation_warnings
+        )
+        # Refresh objective and metadata hints for the actual returned text,
+        # including on review failure; a repaired limit must not leave stale hints.
+        report.validation_warnings[:] = [
+            warning
+            for warning in report.validation_warnings
+            if not warning.startswith((EVIDENCE_METADATA_PREFIX, *OBJECTIVE_TEXT_WARNING_PREFIXES))
+        ]
+        report.validation_warnings.extend(
+            warning
+            for warning in result.warnings
+            if warning.startswith(OBJECTIVE_TEXT_WARNING_PREFIXES)
+            and warning not in report.validation_warnings
+        )
+        report.validation_warnings.extend(
+            evidence_metadata_warnings(
+                {
+                    "cv_title": result.cv.cv_title,
+                    "professional_summary": result.cv.professional_summary,
+                    "motivation_letter_subject": result.letter.subject,
+                    "motivation_letter_body": result.letter.body,
+                }
+            )
+        )
+        return result.cv, result.letter
 
     def _validate_with_auto_fix(self, adapted, report: ApplyReport):
         result = self.validator.validate(adapted)
@@ -173,7 +257,9 @@ class CvWriterMixin:
             cv=adapted,
             analysis=analysis,
         )
-        report.validation_warnings.extend(result.warnings)
+        report.validation_warnings.extend(
+            warning for warning in result.warnings if warning not in report.validation_warnings
+        )
         report.validation_errors.extend(result.errors)
 
     def _repair_letter_once(
@@ -214,10 +300,10 @@ class CvWriterMixin:
         )
         try:
             repair = self.llm.complete_json(
-                system=motivation_letter_repair.SYSTEM,
+                system=motivation_letter_repair.build_system_prompt(),
                 user=prompt,
                 schema=MotivationLetterRepair,
-                model=self.llm.cheap_model,
+                model=self.llm.smart_model,
                 temperature=0.1,
                 purpose="motivation_letter_repair",
                 job_id=job_id,
@@ -277,6 +363,9 @@ class CvWriterMixin:
                 f"{job.title}\n{job.cleaned_description or job.description}"
             )
             analysis = JobAnalysis(
+                fit_score=(
+                    job.analysis.fit_score if job.analysis.fit_score is not None else 0.5
+                ),
                 role_type=job.analysis.role_type or "",
                 seniority=job.analysis.seniority or "",
                 domain=job.analysis.domain or "",
@@ -291,6 +380,9 @@ class CvWriterMixin:
                 extracted_location=raw.get("extracted_location") or "",
                 company_context=raw.get("company_context") or "",
                 offer_interest_points=list(raw.get("offer_interest_points") or []),
+                constraints=list(raw.get("constraints") or []),
+                supporting_excerpts=list(raw.get("supporting_excerpts") or []),
+                offer_risks=list(raw.get("offer_risks") or []),
             )
             if job.score is not None:
                 _ = job.score.components

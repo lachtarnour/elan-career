@@ -68,6 +68,18 @@ open dist/Elan.app
 
 The first build provisions the runtime under `~/Library/Application Support/Elan`, copying the project configuration, profile, and database when available. Later builds preserve existing runtime data. When launching the packaged app, use its runtime configuration; the development environment overrides above are intended for source runs.
 
+Source credentials and collection options are reread from the active configuration
+for each connection check and new search. Open **Réglages → Configuration** to
+find that file (normally `~/Library/Application Support/Elan/.env`). Editing the
+project `.env` and rebuilding does not overwrite this existing runtime file.
+Connection checks run every minute, on entering Recherche or Réglages, and via
+**Actualiser**. A successful check re-enables a recovered source automatically;
+refreshing preserves source selections and the last checked availability while
+the check runs. These checks do not launch paid searches. Source changes need no
+rebuild or restart; database, profile paths, and model settings remain pinned to
+the running application. Explicit process environment variables still take
+precedence over the configuration file.
+
 ### Synchronize the project and app profiles
 
 The two profile directories are not automatically synchronized by a rebuild.
@@ -99,6 +111,46 @@ overrides of `PROFILE_DIR` do not redirect this command. For custom directories,
 use `.venv/bin/elan sync-profile --project-profile /path/to/project/profile
 --app-profile /path/to/app/profile --dry-run`, then omit `--dry-run` to apply.
 No rebuild is needed after copying profile data. Existing CVs are not regenerated.
+
+### Cache freshness after edits
+
+The next desktop operation reloads changed profile JSON files (the in-memory
+cache tracks each file's modification time and size). A running batch keeps the
+profile it started with. Embedding cache keys include the model and the exact
+text being embedded: changed profile or project text is computed on its next
+use, while unchanged text remains reusable. `make refresh-embeddings` can
+precompute the current profile and project vectors without clearing other entries.
+
+Prompt builders read their system and user templates for each request, including
+the shared summary rules. There is no process-wide snapshot of the prompt text.
+The response-cache key includes the rendered system/user messages, model,
+temperature and complete JSON schema, so changed instructions or supplied profile
+content cannot reuse a response for the previous request.
+
+New job analyses use two separate calls to `OPENAI_MODEL_CHEAP` (currently
+`gpt-5.4-mini`). `job_offer_analysis` extracts offer facts and supporting excerpts
+without any candidate profile. `job_fit_assessment` receives those facts and the
+candidate's declared skills, all experiences and projects, education, languages
+and actual preferences. Its strict output schema permits only the fit score,
+matching reasons and candidate risks; it cannot overwrite extracted requirements.
+The common rubric and score bands are in `job_fit/system.j2`; the model still
+assigns a global score, without a new arithmetic weighting formula.
+
+Extraction uncertainties remain visible alongside candidate risks. Unverifiable
+supporting excerpts are excluded and reported as an offer-quality concern.
+The existing exact-response cache stores the two calls separately, so an explicit
+retry or rerun can reuse an unchanged offer extraction while reassessing a changed
+profile. Reuse depends on matching inputs, instructions, model and the existing
+cache lifetime. Both stages must succeed before the job is marked analyzed.
+Already analyzed offers and existing application documents are not recalculated
+automatically; historical analysis records remain compatible.
+
+The standalone app reads the templates packaged in its own bundle. Editing the
+repository's Python or prompt files therefore requires a rebuild and relaunch of
+the app. Profile data remains in Application Support and is not overwritten by a
+rebuild. Previously saved analyses, scores, CVs and letters are historical outputs,
+not automatically refreshed caches: rerun the corresponding operation to update
+them. None of these changes requires deleting the database or all caches.
 
 ## Adapt the profile and matching rules
 
@@ -149,6 +201,136 @@ make test-fast
 ### CV template and writing style
 
 The CV content comes from your profile. Presentation is configured separately for each export format:
+
+Experience descriptions are static: every experience and bullet from `experiences.json`
+is inserted verbatim, in profile order, for both CV-only and CV-plus-letter generation.
+The LLM receives these facts as read-only context; its response schema has no experience
+field. It personalizes the headline, summary, skills selection and project selection,
+and writes the letter when requested. Generated-text length limits do not shorten
+approved experience descriptions. To change an experience, edit the source profile
+explicitly and generate a new CV; existing documents and history are retained.
+
+Application generation reuses the stored offer analysis and uses three sequential
+LLM stages. The existing Skills and project reconstruction rules remain in place:
+
+1. Generate the CV personalization with the configured smart model, apply the
+   reconstruction rules, and validate the assembled CV.
+2. Write a motivation-first letter with the smart model: explain why the
+   candidate wants to join this organization and work on this role's priorities.
+   The stored analysis's `company_context` and `offer_interest_points` appear in
+   an explicit `motivation_context` block, checked against the full offer. They
+   are derived context, not independent proof of company facts or the candidate's
+   personal history. Missing company details lead to a focus on the stated
+   mission, not invented culture, reputation or values. No new analysis call is
+   needed, including when these fields are empty in an older analysis.
+   The finalized CV, declared Skills catalogue and experience/selected-project
+   facts are references. Relevant projects or experiences personalize motivation
+   when useful, with no separate quota on example count or detail beyond the
+   letter's overall length; the letter is not a CV or technical-skills recap.
+   Shared `letter_style.audience` and `letter_style.accessibility` instructions
+   ask both writer and reviewer for language accessible to a non-specialist
+   recruiter. Keep useful technical precision and explain its relevance when
+   needed, without a glossary requirement or restrictions on example count or
+   detail. Demonstrated readability problems are advisory style findings.
+   Declared competence does not require a project citation. A claim that a tool
+   was used at a specific employer or in a specific project does require that
+   attribution in the corresponding source. Letter voice is first-person and
+   separate from the CV style guide.
+3. Independently review the CV title, summary and letter with the configured cheap model
+   against these sources and an explicit reference date. The reviewer distinguishes
+   declared competence, past realizations and prospective contributions; it does
+   not infer past use of a tool from a competence or intention. Findings must
+   identify an exact passage, a reason, valid source references and a category.
+   Factual and language defects are blocking; style and structure suggestions
+   remain advisory. Existing style hints are not evidence about the candidate.
+
+The reviewer accepts conservative paraphrases and ordinary present motivation
+without requiring biographical proof. It still checks claims of specific past
+work, personal history and company facts, including unsupported amplification
+of responsibility, scale, duration or impact. Generic praise or a skills recap
+can receive an advisory style finding when it materially displaces motivation;
+the reviewer cannot impose a preferred example or require exhaustive skills
+coverage. The old lexical requirements to mention CV evidence and the regex
+classifier conflating learning interest with self-deprecation are removed.
+Language and source interpretation remain with the LLM, without offer-specific
+word lists or exceptions.
+
+Review findings retain non-empty source references. A contradiction or amplified
+fact cites its specific record. For a candidate claim with no relevant specific
+record, `candidate:provided_evidence` identifies all candidate sources actually
+exposed to the reviewer through `member_source_ids`. This aggregate excludes
+generated document text, offer/analysis content and unselected projects. It
+supports an observation of missing support in the supplied evidence, not a claim
+that the statement is false in real life or absent from the full private profile.
+Unsupported company facts use the offer source instead of this candidate scope.
+
+The CV title is checked as an English professional headline grounded in the
+candidate's identity, declarations and relevant facts. A reasonable professional
+positioning does not require an identical historical job title; however, the
+offer alone cannot supply seniority, specialization or credentials. The reviewer
+checks coherence with the summary and the letter's candidate claims without
+requiring identical wording or confusing an application subject with an existing
+role. The generated title is not independent evidence of those claims.
+
+CV drafting and review share the summary editorial rules from
+`llm/prompts/templates/cv_adaptation/summary_rules.j2`. They require concrete
+positioning relevant to the offer, avoid a stack inventory and retain the
+distinction between declared competence and specific realizations. The reviewer
+receives these rules in `summary_style.editorial_rules` for both review attempts,
+including corrections. Summary-specific presentation rules take precedence over
+general guidance to display the technical stack; they do not apply to the letter.
+
+Generated CV text, letter writing and review also share
+`llm/prompts/templates/shared/recruiter_text_rules.j2`, supplied to the latter
+two through `recruiter_text_style` (`style:recruiter_text`). Evidence metadata
+guides claim strength internally; it must not become a qualifier such as
+"verified work" or "source-grounded experience" in recruiter-facing prose.
+Actual technical uses such as "verified model outputs", "source-grounded
+answers" or "self-reported clinical data" remain legitimate.
+
+A narrow Python check flags known metadata identifiers and experience qualifiers
+in the generated title, summary, letter subject and body. These
+`internal_evidence_metadata` warnings reach the reviewer and are recomputed on
+the returned text, so a repaired phrase does not leave a stale warning. They are
+editorial hints, not factual errors or automatic rewrites; unknown paraphrases
+and ambiguous contexts remain the reviewer's responsibility. Static source
+descriptions and Skills are not scanned or edited by this check.
+
+The reviewer may propose exact passage replacements in the CV title, summary, subject or
+letter body; the controller applies these local patches without semantic regex
+rewrites or full-document regeneration. Experiences, Skills and
+selected projects are read-only. One additional review checks a proposed revision
+without permission to revise again. An unresolved blocking defect, invalid patch
+or failed confirmation prevents the unconfirmed revision from replacing the
+original. Advisory-only confirmation retains a valid correction. Objective
+validators still enforce hard constraints, even when the reviewer reports no
+blocking issue; optional style preferences cannot override these controls.
+If an optional advisory patch fails hard objective checks or its confirmation
+cannot complete, an original already reviewed without blocking defects remains
+usable, with the discarded patch and failure retained in the trace. A demonstrated
+factual or language defect found on confirmation still requires attention.
+Word, paragraph and summary-length counts remain advisory before and after a
+correction; a length deviation cannot silently undo a confirmed factual fix.
+
+Unavailable reviews, unresolved factual or language defects, and objective
+validation errors leave the documents available with `quality_rejected` status.
+Style and structure suggestions are exposed as warnings without blocking an
+otherwise valid application. The review trace, including model, reference date,
+findings and decision, is retained in `generated_documents` as `document_review`.
+This checks source consistency, not the real-world truth of the candidate's
+declarations. Review instructions are general source and language rules; they do
+not contain offer-specific examples, vocabulary blacklists or exceptions derived
+from an evaluation sample.
+
+The normal path has three LLM calls; a confirmed correction has four (excluding
+provider-level transport retries), with at most two calls to the cheap reviewer.
+There is no extra planner call or automatic escalation to another review model.
+Actual cost depends on the configured models, token usage and cache hits; routing
+the review to a cheaper model does not guarantee equal quality or a fixed saving.
+The previous joint `application_draft` call and one-defect letter repair are no
+longer used by the application pipeline.
+CV-only generation remains available. No historical document or stored analysis
+is migrated automatically when this generation code changes.
 
 | What to customize | Where to edit |
 | --- | --- |

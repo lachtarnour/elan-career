@@ -8,7 +8,10 @@ from typing import Any
 from smartapply.llm.prompts.loader import load_prompt, render_prompt
 from smartapply.profile import Profile
 
-SYSTEM = load_prompt("form_questions/system.j2")
+
+def build_system_prompt() -> str:
+    """Load the current instructions when preparing a request."""
+    return load_prompt("form_questions/system.j2")
 
 
 def build_form_questions_prompt(
@@ -34,4 +37,4 @@ def build_form_questions_prompt(
         profile_json=profile_json,
         questions=questions.strip(),
     )
-    return SYSTEM, user
+    return build_system_prompt(), user

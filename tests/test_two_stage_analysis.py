@@ -1,0 +1,236 @@
+"""Offer extraction must remain independent of the profile and matching output."""
+
+from __future__ import annotations
+
+import json
+from datetime import date
+from types import SimpleNamespace
+
+import pytest
+from pydantic import ValidationError
+
+from smartapply.config import get_settings
+from smartapply.database import session_scope
+from smartapply.database.models import Job, JobStatus
+from smartapply.llm import JobAnalysis, JobFitAssessment, LLMError, OfferAnalysis, OpenAIProvider
+from smartapply.llm.prompts import job_analysis, job_fit
+from smartapply.pipeline.process.analysis import (
+    AnalysisMixin,
+    _assemble_analysis,
+    _ground_offer_excerpts,
+)
+from smartapply.profile import get_profile
+
+BODY = "Build forecasting models. Python is required. SQL is preferred."
+
+
+def offer_result():
+    return OfferAnalysis(
+        role_type="Data Scientist",
+        seniority="",
+        domain="",
+        main_tasks=["Build forecasting models"],
+        required_skills=["Python"],
+        nice_to_have=["SQL"],
+        cv_keywords_to_include=["forecasting models"],
+        supporting_excerpts=["Build forecasting models.", "Python is required."],
+        offer_risks=["Working location is not stated in the body."],
+    )
+
+
+def fit_result():
+    return JobFitAssessment(
+        fit_score=0.72,
+        match_reasons=["Declared Python and documented modelling work support the core task."],
+        risks=["Forecasting depth is not fully documented."],
+    )
+
+
+def runner(provider, profile=None):
+    instance = AnalysisMixin()
+    instance.profile = profile or get_profile().model_copy(deep=True)
+    instance.llm = provider
+    instance.settings = get_settings()
+    return instance
+
+
+def insert_job():
+    with session_scope() as session:
+        job = Job(
+            external_id="two-stage-offer",
+            title="Data Scientist",
+            company="Example",
+            location="Metadata City",
+            description=BODY,
+            source="manual",
+        )
+        session.add(job)
+        session.flush()
+        return job.id
+
+
+def test_extraction_is_identical_for_different_profiles():
+    original = get_profile().model_copy(deep=True)
+    changed = original.model_copy(deep=True)
+    changed.identity.summary = "PRIVATE_CANDIDATE_FACT"
+    changed.skills.categories[0].skills.append("PRIVATE_NEW_SKILL")
+    changed.experiences[0].bullets[0].text = "PRIVATE_EXPERIENCE"
+    first = job_analysis.build_user_prompt(profile=original, job_title="Role", job_description=BODY)
+    second = job_analysis.build_user_prompt(profile=changed, job_title="Role", job_description=BODY)
+    assert first == second
+    for private in (
+        "PRIVATE_CANDIDATE_FACT", "PRIVATE_NEW_SKILL", "PRIVATE_EXPERIENCE",
+        original.identity.email, original.identity.full_name,
+    ):
+        assert private not in second
+
+
+def test_fit_receives_complete_facts_without_cv_policy_or_invented_preferences():
+    profile = get_profile().model_copy(deep=True)
+    profile.identity.location = "Candidate Residence"
+    profile.preferences.target_roles = ["Chosen role"]
+    profile.preferences.deal_breakers = ["Explicit personal constraint"]
+    profile.projects[-1].selection_policy.tier = "disabled"
+    prompt = job_fit.build_user_prompt(
+        profile=profile, offer_analysis=offer_result(), reference_date=date(2026, 9, 22)
+    )
+    candidate = json.loads(prompt.split("=== CANDIDATE PROFILE JSON ===\n", 1)[1].split(
+        "=== REFERENCE DATE ===", 1
+    )[0])
+    assert candidate["identity"]["residence"] == "Candidate Residence"
+    assert candidate["preferences"] == profile.preferences.model_dump(mode="json")
+    assert [e["id"] for e in candidate["experiences"]] == [e.id for e in profile.experiences]
+    assert [p["id"] for p in candidate["projects"]] == [p.id for p in profile.projects]
+    for source, supplied in zip(profile.experiences + profile.projects,
+                                candidate["experiences"] + candidate["projects"], strict=True):
+        assert [b["text"] for b in supplied["bullets"]] == [b.text for b in source.bullets]
+    assert "selection_policy" not in prompt
+    assert "Preferred locations:" not in prompt
+    assert "junior to mid (1-3 years)" not in prompt
+    assert profile.identity.email not in prompt
+    assert "2026-09-22" in prompt
+
+
+@pytest.mark.parametrize("field", ["required_skills", "seniority", "constraints", "main_tasks"])
+def test_fit_schema_rejects_offer_field_rewrites(field):
+    with pytest.raises(ValidationError):
+        JobFitAssessment.model_validate({**fit_result().model_dump(), field: []})
+
+
+def test_new_fit_score_is_required_but_old_analyses_still_load():
+    with pytest.raises(ValidationError):
+        JobFitAssessment(match_reasons=[], risks=[])
+    old = {**offer_result().model_dump(), "match_reasons": [], "risks": []}
+    for key in ("constraints", "supporting_excerpts", "offer_risks"):
+        old.pop(key)
+    historical = JobAnalysis.model_validate(old)
+    assert historical.fit_score == 0.5
+    assert historical.supporting_excerpts == []
+    assert historical.required_skills == ["Python"]
+
+
+def test_assembly_preserves_extraction_and_both_kinds_of_risk():
+    offer, fit = offer_result(), fit_result()
+    original_offer, original_fit = offer.model_dump(), fit.model_dump()
+    analysis = _assemble_analysis(offer, fit)
+    assert {k:analysis.model_dump()[k] for k in OfferAnalysis.model_fields} == original_offer
+    assert analysis.fit_score == fit.fit_score
+    assert analysis.risks == [*offer.offer_risks, *fit.risks]
+    assert offer.model_dump() == original_offer
+    assert fit.model_dump() == original_fit
+
+
+def test_unverified_excerpt_is_removed_and_reported_without_inventing_a_candidate_gap():
+    offer = offer_result()
+    offer.supporting_excerpts.extend(["Kubernetes is required.", ""])
+    grounded = _ground_offer_excerpts(offer, BODY)
+    assert grounded.supporting_excerpts == ["Build forecasting models.", "Python is required."]
+    assert grounded.required_skills == offer.required_skills
+    assert "excluded" in grounded.offer_risks[-1]
+    assert "Kubernetes is required." in offer.supporting_excerpts
+
+
+def test_retained_excerpt_uses_exact_source_whitespace():
+    offer = offer_result()
+    offer.supporting_excerpts = ["Python is required."]
+    body = "Python\n  is required. SQL is preferred."
+    grounded = _ground_offer_excerpts(offer, body)
+    assert grounded.supporting_excerpts == ["Python\n  is required."]
+    assert grounded.supporting_excerpts[0] in body
+    assert grounded.offer_risks == offer.offer_risks
+
+
+@pytest.mark.parametrize("failed_purpose", ["job_offer_analysis", "job_fit_assessment"])
+def test_failure_does_not_save_partial_analysis_or_mark_job_analyzed(isolated_db, failed_purpose):
+    calls = []
+
+    def complete(**kwargs):
+        calls.append(kwargs["purpose"])
+        if kwargs["purpose"] == failed_purpose:
+            raise LLMError("Simulated controller failure")
+        return offer_result()
+
+    instance = runner(SimpleNamespace(complete_json=complete, cheap_model="gpt-5.4-mini"))
+    job_id = insert_job()
+    with pytest.raises(LLMError):
+        instance._analyze_one(job_id=job_id)
+    assert len(calls) == (1 if failed_purpose == "job_offer_analysis" else 2)
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        assert job.analysis is None
+        assert job.analyzed_at is None
+        assert job.status == JobStatus.SCRAPED
+        assert job.location == "Metadata City"
+
+
+@pytest.mark.parametrize("retry_after_failure", [False, True])
+def test_offer_cache_survives_profile_edit_or_failed_fit(isolated_db, monkeypatch, retry_after_failure):
+    """Exercise the real cache/provider boundary; network calls are replaced locally."""
+    provider = OpenAIProvider()
+    calls = []
+    fail_fit_once = retry_after_failure
+
+    def fake_api(**kwargs):
+        nonlocal fail_fit_once
+        schema_name = kwargs["response_format"]["json_schema"]["name"]
+        calls.append((schema_name, kwargs))
+        if schema_name == "JobFitAssessment" and fail_fit_once:
+            fail_fit_once = False
+            raise RuntimeError("Temporary matching failure")
+        result = offer_result() if schema_name == "OfferAnalysis" else fit_result()
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=result.model_dump_json()))],
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=10),
+        )
+
+    monkeypatch.setattr(provider, "_call_openai", fake_api)
+    instance = runner(provider)
+    job_id = insert_job()
+    if retry_after_failure:
+        with pytest.raises(LLMError):
+            instance._analyze_one(job_id=job_id)
+    else:
+        instance._analyze_one(job_id=job_id)
+        assert instance.analyze_jobs([job_id]).already_analyzed == 1
+        instance.profile.skills.categories[0].skills.append("NEW_DECLARED_SKILL")
+    # An explicit internal rerun can reuse extraction; normal analyze_jobs still
+    # skips history and never silently rewrites a previously displayed score.
+    instance._analyze_one(job_id=job_id)
+    assert [name for name, _ in calls] == ["OfferAnalysis", "JobFitAssessment", "JobFitAssessment"]
+    assert all(kwargs["model"] == "gpt-5.4-mini" for _, kwargs in calls)
+    assert "NEW_DECLARED_SKILL" not in calls[0][1]["messages"][1]["content"]
+    if not retry_after_failure:
+        assert "NEW_DECLARED_SKILL" in calls[-1][1]["messages"][1]["content"]
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        assert job.analyzed_at is not None
+        assert job.analysis.fit_score == 0.72
+        assert job.analysis.required_skills == ["Python"]
+        assert job.analysis.raw_response["supporting_excerpts"] == offer_result().supporting_excerpts
+        assert job.analysis.raw_response["offer_risks"] == offer_result().offer_risks
+    from smartapply.pipeline.apply.cv_writer import CvWriterMixin
+
+    _, restored = CvWriterMixin()._load_job_analysis(job_id)
+    assert restored.fit_score == 0.72
+    assert restored.supporting_excerpts == offer_result().supporting_excerpts
+    assert restored.offer_risks == offer_result().offer_risks

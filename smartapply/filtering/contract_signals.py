@@ -24,6 +24,21 @@ APPRENTICESHIP_CONTRACT_MARKERS = {
 FREELANCE_CONTRACT_MARKERS = {"freelance", "contractor"}
 INDEPENDENT_CONTRACT_MARKERS = {"independant", "independent"}
 
+# A CDD is acceptable for doctoral/research offers when the offer title makes
+# that context explicit.  Keep this title-only and word-boundary based: a
+# mention in the description must not turn an ordinary CDD into an exception.
+RESEARCH_DEGREE_TITLE_MARKERS = (
+    "these",
+    "thesis",
+    "doctorat",
+    "doctorant",
+    "doctorante",
+    "doctorate",
+    "doctoral",
+    "phd",
+    "ph d",
+)
+
 _APPRENTICESHIP_SAFE_PHRASES = (
     "apprentissage statistique",
     "apprentissage automatique",
@@ -208,6 +223,14 @@ def has_independent_contract_context(title: str, description: str) -> bool:
     if contains_any(description, _INDEPENDENT_EMPLOYER_PHRASES):
         return False
     return matches_any_pattern(description, _INDEPENDENT_CONTRACT_PATTERNS)
+
+
+def has_research_degree_title(title: str) -> bool:
+    """Return whether a title explicitly describes doctoral research."""
+    # ``title`` is usually already normalized by the filter, but normalizing
+    # punctuation here also catches variants such as ``Ph.D.`` reliably.
+    title_words = re.sub(r"[^a-z0-9]+", " ", norm(title)).strip()
+    return any(has_word(title_words, marker) for marker in RESEARCH_DEGREE_TITLE_MARKERS)
 
 
 def has_cdd_contract_context(title: str, description: str) -> bool:

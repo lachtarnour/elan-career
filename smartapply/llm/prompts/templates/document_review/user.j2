@@ -1,0 +1,25 @@
+Review these current text fields against the identified sources below.
+
+CURRENT TEXT FIELDS
+{{ text_fields_json }}
+
+CURRENT CV SNAPSHOT, EDIT BOUNDARIES AND IDENTIFIED SOURCES
+{{ context_json }}
+Only cv_title and professional_summary are editable within the CV; all other CV fields and source facts stay fixed. Review the title and summary together with the letter's candidate claims. A target-role subject is not a claim of already holding that role.
+The subject follows letter_style.subject and retains the target role and candidate name. Use motivation_context as offer-derived leads for why this company and role are appealing, checked against job_offer. Review the body's motivation-first purpose separately from factual grounding. Opening, motivation, word-count and paragraph rules apply only to the body, never to the subject. Candidate examples support that purpose when useful; their absence is not a defect.
+
+OBJECTIVE METRICS COMPUTED BY THE APPLICATION
+{{ metrics_json }}
+These are the validator's exact counts for the current text. Use them without recounting.
+
+VALIDATION OBSERVATIONS
+{{ validation_issues_json }}
+Some observations are heuristic warnings. They do not independently prove a factual or linguistic defect. Check the current text and source scope; use the objective metrics above for counts.
+
+{% if allow_corrections %}
+CORRECTIONS ALLOWED: propose only targeted replacements of each issue's exact unique passage for factual, language or structure defects. Keep every patch local and independent. Style findings are advisory and must have replacement=null. Use null when no correction is proposed.
+{% else %}
+CORRECTIONS DISABLED: every issue's replacement must be null. Assess only the current text.
+{% endif %}
+
+Return only an issues array inside the DocumentTextReview object. If there is no demonstrated defect, return {"issues": []}.

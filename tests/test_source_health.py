@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
 import requests
 
 from smartapply.desktop import source_health
@@ -110,3 +111,64 @@ def test_pending_health_never_claims_a_configured_source_is_available() -> None:
     assert result["serpapi"].ready is False
     assert result["linkedin"].state == "checking"
     assert result["welcometothejungle"].state == "unconfigured"
+
+
+@pytest.mark.parametrize(
+    "used,maximum,ready",
+    [(10.0159656, 10, False), (10, 10, False), (0, 0, False), (3.25, 10, True)],
+)
+def test_apify_health_checks_spending_limit_without_running_actor(
+    monkeypatch, used, maximum, ready
+):
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        return _response(
+            200,
+            {
+                "data": {
+                    "current": {"monthlyUsageUsd": used},
+                    "limits": {"maxMonthlyUsageUsd": maximum},
+                }
+            },
+        )
+
+    monkeypatch.setattr(source_health.requests, "get", get)
+    result = source_health._check_apify(_settings(apify_token="secret"), timeout=3)
+
+    assert result.ready is ready
+    assert result.configured is True
+    assert len(calls) == 1
+    assert calls[0] == (
+        source_health.APIFY_USER_LIMITS_URL,
+        {
+            "headers": {"Authorization": "Bearer secret"},
+            "timeout": 3,
+        },
+    )
+    assert "secret" not in result.message
+    if not ready:
+        assert "Limite mensuelle Apify atteinte" in result.message
+
+
+@pytest.mark.parametrize(
+    "used,maximum", [(None, 10), (1, None), (True, 10), (1, float("nan")), (-1, 10)]
+)
+def test_apify_missing_or_invalid_quota_is_not_a_success(monkeypatch, used, maximum):
+    monkeypatch.setattr(
+        source_health.requests,
+        "get",
+        lambda *args, **kwargs: _response(
+            200,
+            {
+                "data": {
+                    "current": {"monthlyUsageUsd": used},
+                    "limits": {"maxMonthlyUsageUsd": maximum},
+                },
+            },
+        ),
+    )
+    health = source_health.check_source_health(_settings(apify_token="secret"), timeout=1)
+    assert health["linkedin"].ready is False
+    assert health["linkedin"].message == "Quota Apify impossible à vérifier."

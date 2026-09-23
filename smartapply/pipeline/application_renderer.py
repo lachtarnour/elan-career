@@ -17,7 +17,7 @@ from smartapply.cv.skill_display import compact_sparse_secondary_categories
 from smartapply.database.repository import upsert_document
 from smartapply.llm import MotivationLetter
 from smartapply.logging_setup import get_logger
-from smartapply.pipeline.output_paths import application_output_dir
+from smartapply.pipeline.output_paths import application_document_stems, application_output_dir
 from smartapply.profile import Profile
 
 if TYPE_CHECKING:
@@ -53,7 +53,10 @@ class ApplicationDocumentRenderer:
             self.settings.output_dir,
             report.application_id,
         )
-        safe_name = self.profile.identity.full_name.replace(" ", "_")
+        cv_stem, letter_stem = application_document_stems(
+            self.profile.template_style.filename_candidate_name or self.profile.identity.full_name,
+            job_title,
+        )
         display_adapted, skill_merges = compact_sparse_secondary_categories(
             adapted,
             primary_family=role_family or "",
@@ -75,13 +78,13 @@ class ApplicationDocumentRenderer:
             )
 
         # ---- DOCX (always — candidate fallback) ----
-        docx_path = out_dir / f"CV_{safe_name}.docx"
+        docx_path = out_dir / f"{cv_stem}.docx"
         self.docx.save(display_adapted, docx_path)
         report.docx_path = str(docx_path)
 
         # ---- HTML sources ----
-        cv_html_path = out_dir / f"CV_{safe_name}.html"
-        letter_html_path = out_dir / f"Lettre_motivation_{safe_name}.html"
+        cv_html_path = out_dir / f"{cv_stem}.html"
+        letter_html_path = out_dir / f"{letter_stem}.html"
         self.html.save_cv_html(display_adapted, cv_html_path)
         self.html.save_letter_html(
             letter=letter,
@@ -95,8 +98,8 @@ class ApplicationDocumentRenderer:
         report.letter_html_path = str(letter_html_path)
 
         # ---- PDF (best effort — DOCX is the fallback) ----
-        cv_pdf_path = out_dir / f"CV_{safe_name}.pdf"
-        letter_pdf_path = out_dir / f"Lettre_motivation_{safe_name}.pdf"
+        cv_pdf_path = out_dir / f"{cv_stem}.pdf"
+        letter_pdf_path = out_dir / f"{letter_stem}.pdf"
         try:
             self.html.save_cv_pdf(display_adapted, cv_pdf_path)
             self.html.save_letter_pdf(

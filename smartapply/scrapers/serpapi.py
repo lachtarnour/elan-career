@@ -12,7 +12,7 @@ from typing import Any
 import requests
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from smartapply.config import get_settings
+from smartapply.config import get_source_settings
 from smartapply.logging_setup import get_logger
 from smartapply.offers import RawJob, make_external_id
 from smartapply.scrapers.base import Scraper, ScraperConfigError, ScraperError
@@ -65,7 +65,7 @@ class SerpApiGoogleJobsScraper(Scraper):
         gl: str | None = None,
         low_result_fallback_target: int | None = None,
     ):
-        settings = get_settings()
+        settings = get_source_settings()
         self.api_key = api_key or settings.serpapi_api_key
         self.max_pages = max_pages or settings.serpapi_max_pages
         self.low_result_fallback_target = (

@@ -355,15 +355,23 @@ def test_linkedin_apify_maps_jobs_and_payload(mocker) -> None:
     sent = post_mock.call_args.kwargs
     assert sent["headers"] == {"Authorization": "Bearer fake-apify-token"}
     assert sent["json"] == {
-        "title": "Data Scientist",
+        "keywords": "Data Scientist",
         "location": "France",
         "datePosted": "r86400",
-        "contractType": ["F"],
-        "experienceLevel": ["2", "3"],
-        "remote": ["1", "2", "3"],
+        "urlParam": [
+            {"key": "f_JT", "value": "F"},
+            {"key": "f_E", "value": "2,3"},
+            {"key": "f_WT", "value": "1,2,3"},
+        ],
         "limit": 1,
         "urlPath": "/jobs/search",
     }
+    metadata = job.source_data["_smartapply_search"]
+    assert metadata["api_payload"] == sent["json"]
+    assert metadata["title"] == "Data Scientist"
+    assert metadata["contractType"] == ["F"]
+    assert metadata["experienceLevel"] == ["2", "3"]
+    assert metadata["remote"] == ["1", "2", "3"]
 
 
 def test_linkedin_apify_prefers_html_description_and_stable_id(mocker) -> None:
@@ -508,10 +516,10 @@ def test_linkedin_apify_uses_mid_senior_fallback_only_when_needed(mocker) -> Non
     assert [job.company for job in jobs] == ["Acme", "Delta", "Beta"]
     first_call = post_mock.call_args_list[0].kwargs["json"]
     second_call = post_mock.call_args_list[1].kwargs["json"]
-    assert first_call["experienceLevel"] == ["2", "3"]
+    assert {"key": "f_E", "value": "2,3"} in first_call["urlParam"]
     assert first_call["limit"] == 3
     assert "skipJobId" not in first_call
-    assert second_call["experienceLevel"] == ["4"]
+    assert {"key": "f_E", "value": "4"} in second_call["urlParam"]
     assert second_call["limit"] == 1
     assert second_call["skipJobId"] == ["entry-1", "entry-2"]
     assert jobs[2].source_data
@@ -537,9 +545,11 @@ def test_linkedin_apify_translates_selector_labels(mocker) -> None:
     )
 
     sent = post_mock.call_args.kwargs["json"]
-    assert sent["contractType"] == ["F"]
-    assert sent["experienceLevel"] == ["2", "3"]
-    assert sent["remote"] == ["1", "2", "3"]
+    assert sent["urlParam"] == [
+        {"key": "f_JT", "value": "F"},
+        {"key": "f_E", "value": "2,3"},
+        {"key": "f_WT", "value": "1,2,3"},
+    ]
 
 
 def test_linkedin_apify_auth_error_is_actionable_and_not_retried(mocker) -> None:
@@ -565,11 +575,103 @@ def test_linkedin_apify_auth_error_is_actionable_and_not_retried(mocker) -> None
     message = str(exc.value)
     assert "HTTP 403" in message
     assert "APIFY_TOKEN" in message
-    assert "actor access/subscription" in message
+    assert "accès à l’acteur" in message
     assert "User is not allowed" in message
     assert secret_token not in message
     assert post_mock.call_count == 1
     assert post_mock.call_args.kwargs["headers"] == {"Authorization": f"Bearer {secret_token}"}
+
+
+def test_linkedin_empty_selectors_keep_jobs_without_adding_filters(mocker) -> None:
+    post_mock = mocker.patch(
+        "smartapply.scrapers.linkedin.requests.post",
+        return_value=_mock_response(
+            [
+                {
+                    "id": "known-experience",
+                    "title": "Data Scientist",
+                    "companyName": "Acme",
+                    "experienceLevel": "Mid-Senior level",
+                    "description": "Build forecasting models.",
+                }
+            ]
+        ),
+    )
+    scraper = LinkedInJobsScraper(token="fake-apify-token")
+
+    jobs = list(
+        scraper.search(
+            "Data Scientist",
+            max_results=1,
+            contract_type=[],
+            experience_level=[],
+            remote=[],
+        )
+    )
+
+    assert len(jobs) == 1
+    assert "urlParam" not in post_mock.call_args.kwargs["json"]
+    assert jobs[0].source_data["_smartapply_search"]["experienceLevel"] == []
+    assert post_mock.call_count == 1
+
+
+@pytest.mark.parametrize("error_type", [requests.ReadTimeout, requests.ConnectionError])
+def test_linkedin_uncertain_post_is_not_retried_or_leaked(mocker, error_type) -> None:
+    secret_token = "arbitrary-secret-token"
+    post_mock = mocker.patch(
+        "smartapply.scrapers.linkedin.requests.post",
+        side_effect=error_type(f"Failed request token={secret_token}"),
+    )
+    scraper = LinkedInJobsScraper(token=secret_token)
+
+    with pytest.raises(ScraperError) as exc:
+        list(scraper.search("Data Scientist", max_results=1))
+
+    assert post_mock.call_count == 1
+    assert "Aucune relance automatique" in str(exc.value)
+    assert "vérifiez" in str(exc.value)
+    assert secret_token not in str(exc.value)
+    assert exc.value.__suppress_context__ is True
+
+
+@pytest.mark.parametrize("status_code", [402, 408, 429, 500, 504])
+def test_linkedin_http_failures_are_actionable_and_never_retry_post(mocker, status_code) -> None:
+    secret_token = "arbitrary-secret-token"
+    post_mock = mocker.patch(
+        "smartapply.scrapers.linkedin.requests.post",
+        return_value=_mock_response(
+            {"error": {"message": f"Provider refused token {secret_token}"}},
+            status_code=status_code,
+        ),
+    )
+    scraper = LinkedInJobsScraper(token=secret_token)
+
+    with pytest.raises(ScraperError) as exc:
+        list(scraper.search("Data Scientist", max_results=1))
+
+    assert post_mock.call_count == 1
+    assert f"HTTP {status_code}" in str(exc.value)
+    assert "Aucune relance automatique" in str(exc.value)
+    assert secret_token not in str(exc.value)
+    if status_code == 402:
+        assert "crédits" in str(exc.value)
+    elif status_code == 429:
+        assert "Quota" in str(exc.value)
+    else:
+        assert "état de l’exécution" in str(exc.value)
+
+
+def test_linkedin_unreadable_response_is_not_reported_as_no_results(mocker) -> None:
+    response = _mock_response({})
+    response.json.side_effect = ValueError("private provider response")
+    post_mock = mocker.patch(
+        "smartapply.scrapers.linkedin.requests.post", return_value=response
+    )
+
+    with pytest.raises(ScraperError, match="JSON illisible"):
+        list(LinkedInJobsScraper(token="fake-token").search("Data Scientist", max_results=1))
+
+    assert post_mock.call_count == 1
 
 
 def test_linkedin_network_error_is_not_reported_as_zero_results(mocker) -> None:
@@ -716,13 +818,13 @@ def _isolate_french_geo_cache(request, mocker, tmp_path):
     if "francetravail" not in request.node.name.lower():
         yield
         return
+    from smartapply.config import get_settings
     from smartapply.utils.geo import resolver as _geo
 
     _geo.reset_cache_for_tests()
     cache_dir = tmp_path / "geo_cache"
     cache_dir.mkdir()
-    fake_settings = mocker.Mock()
-    fake_settings.cache_dir = cache_dir
+    fake_settings = get_settings().model_copy(update={"cache_dir": cache_dir})
     mocker.patch(
         "smartapply.utils.geo.resolver.get_settings",
         return_value=fake_settings,

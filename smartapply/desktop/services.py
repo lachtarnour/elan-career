@@ -14,7 +14,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import joinedload, load_only
 
-from smartapply.config import ENV_FILE, get_settings
+from smartapply.config import ENV_FILE, get_settings, get_source_settings
 from smartapply.database import init_db, session_scope
 from smartapply.database.models import (
     Application,
@@ -48,7 +48,15 @@ from smartapply.desktop.source_health import (
     pending_source_health,
 )
 from smartapply.jobsearch.archive_reasons import archive_reason_labels
-from smartapply.jobsearch.status import OFFER_FILTER_STATUSES, STATUS_FLOW, status_label
+from smartapply.jobsearch.status import (
+    OFFER_FILTER_STATUSES,
+    READY_APPLICATION_STATUSES,
+    STATUS_FLOW,
+    status_label,
+)
+from smartapply.jobsearch.status import (
+    display_status as visible_status,
+)
 from smartapply.jobsearch.workflow import APPLICATION_STATUSES, next_action_for
 from smartapply.logging_setup import get_logger
 from smartapply.pipeline.process.ranking import RankingMixin
@@ -73,9 +81,34 @@ def _text_list(value: Any) -> tuple[str, ...]:
 
 
 def _desktop_next_action(status: str, updated_at: datetime | None) -> str:
+    status = visible_status(status)
     if status == JobStatus.READY_FOR_FORM_SUBMISSION:
         return "Vérifier les documents de candidature"
     return next_action_for(status, updated_at)
+
+
+def _is_reusable_reservation(application: Application) -> bool:
+    from smartapply.pipeline.apply.persistence import reservation_is_stale
+
+    return bool(
+        application.status == JobStatus.ANALYZED
+        and application.form_submitted_at is None
+        and reservation_is_stale(application)
+    )
+
+
+def _reusable_reservation_job_ids(session) -> set[int]:
+    applications = (
+        session.execute(
+            select(Application)
+            .options(joinedload(Application.documents))
+            .where(Application.status == JobStatus.ANALYZED)
+        )
+        .unique()
+        .scalars()
+        .all()
+    )
+    return {app.job_id for app in applications if _is_reusable_reservation(app)}
 
 
 @dataclass(frozen=True)
@@ -258,8 +291,7 @@ class SearchResult:
 class DesktopService:
     """Small synchronous facade; the GUI runs slow calls through TaskWorker."""
 
-    READY_STATUSES = {JobStatus.READY_FOR_FORM_SUBMISSION}
-    REVIEW_STATUSES = {JobStatus.QUALITY_REJECTED}
+    READY_STATUSES = READY_APPLICATION_STATUSES
 
     def initialize(self) -> None:
         init_db()
@@ -277,6 +309,7 @@ class DesktopService:
         from smartapply.database.models import LLMUsage
 
         with session_scope() as session:
+            reusable_job_ids = _reusable_reservation_job_ids(session)
             jobs = session.scalar(select(func.count()).select_from(Job)) or 0
             pending = (
                 session.scalar(
@@ -292,7 +325,7 @@ class DesktopService:
                             Job.duplicate_review_status.is_(None),
                             Job.duplicate_review_status != JobDuplicateStatus.PENDING,
                         ),
-                        Application.id.is_(None),
+                        or_(Application.id.is_(None), Job.id.in_(reusable_job_ids)),
                     )
                 )
                 or 0
@@ -310,7 +343,7 @@ class DesktopService:
                             Job.duplicate_review_status.is_(None),
                             Job.duplicate_review_status != JobDuplicateStatus.PENDING,
                         ),
-                        Application.id.is_(None),
+                        or_(Application.id.is_(None), Job.id.in_(reusable_job_ids)),
                     )
                 )
                 or 0
@@ -319,15 +352,16 @@ class DesktopService:
                 session.scalar(
                     select(func.count())
                     .select_from(Application)
-                    .where(Application.status.in_(self.READY_STATUSES))
-                )
-                or 0
-            )
-            review = (
-                session.scalar(
-                    select(func.count())
-                    .select_from(Application)
-                    .where(Application.status.in_(self.REVIEW_STATUSES))
+                    .join(Job, Job.id == Application.job_id)
+                    .where(
+                        Application.status.in_(self.READY_STATUSES),
+                        Job.archived_at.is_(None),
+                        Job.status != JobStatus.ARCHIVED,
+                        or_(
+                            Job.duplicate_review_status.is_(None),
+                            Job.duplicate_review_status != JobDuplicateStatus.PENDING,
+                        ),
+                    )
                 )
                 or 0
             )
@@ -387,7 +421,7 @@ class DesktopService:
                     id=app.id,
                     company=app.job.company if app.job else "Entreprise inconnue",
                     title=app.job.title if app.job else "Offre supprimée",
-                    status=app.status,
+                    status=visible_status(app.status),
                     status_label=self._desktop_status_label(app.status),
                     next_action=_desktop_next_action(app.status, app.updated_at),
                     updated_at=_date_text(app.updated_at, with_time=True),
@@ -398,7 +432,7 @@ class DesktopService:
             jobs=int(jobs),
             pending=int(pending),
             ready=int(ready),
-            review=int(review),
+            review=0,
             sent=int(sent),
             analyzed=int(analyzed),
             llm_cost_usd=float(cost),
@@ -415,6 +449,13 @@ class DesktopService:
         sort_ascending: bool = False,
         limit: int = 500,
     ) -> list[JobRow]:
+        # Old routes/bookmarks using the review-only state open Prête too.
+        if status == JobStatus.QUALITY_REJECTED:
+            status = JobStatus.READY_FOR_FORM_SUBMISSION
+        reusable_job_ids = set()
+        if status in {JobStatus.SCRAPED, JobStatus.ANALYZED, JobStatus.SHORTLISTED}:
+            with session_scope() as session:
+                reusable_job_ids = _reusable_reservation_job_ids(session)
         stmt = (
             select(Job)
             .outerjoin(JobScore, JobScore.job_id == Job.id)
@@ -469,7 +510,7 @@ class DesktopService:
                 Job.shortlisted_at.is_not(None),
                 Job.analyzed_at.is_not(None),
                 Job.archived_at.is_(None),
-                Application.id.is_(None),
+                or_(Application.id.is_(None), Job.id.in_(reusable_job_ids)),
             )
         elif status == JobStatus.SCRAPED:
             # ``filtered`` is an internal pipeline state. In the UI, Nouvelle
@@ -479,7 +520,7 @@ class DesktopService:
                 Job.analyzed_at.is_(None),
                 Job.shortlisted_at.is_(None),
                 Job.archived_at.is_(None),
-                Application.id.is_(None),
+                or_(Application.id.is_(None), Job.id.in_(reusable_job_ids)),
             )
         elif status == JobStatus.ANALYZED:
             # Keep analyzed separate from both Top sélection and applications.
@@ -487,7 +528,7 @@ class DesktopService:
                 Job.analyzed_at.is_not(None),
                 Job.shortlisted_at.is_(None),
                 Job.archived_at.is_(None),
-                Application.id.is_(None),
+                or_(Application.id.is_(None), Job.id.in_(reusable_job_ids)),
             )
         elif status in APPLICATION_STATUSES:
             # Once a dossier exists, its tracking state is stored on
@@ -504,8 +545,11 @@ class DesktopService:
                 )
             else:
                 stmt = stmt.where(
-                    Application.status == status,
+                    Application.status.in_(self.READY_STATUSES)
+                    if status == JobStatus.READY_FOR_FORM_SUBMISSION
+                    else Application.status == status,
                     Job.archived_at.is_(None),
+                    Job.status != JobStatus.ARCHIVED,
                 )
         elif status and status != JobStatus.DUPLICATE_REVIEW:
             stmt = stmt.where(Job.status == status)
@@ -636,7 +680,7 @@ class DesktopService:
                 ),
                 application=(
                     self._application_detail_from(job.application, analysis=analysis)
-                    if job.application
+                    if job.application and not _is_reusable_reservation(job.application)
                     else None
                 ),
             )
@@ -660,7 +704,7 @@ class DesktopService:
             job_id=app.job_id,
             company=app.job.company,
             title=app.job.title,
-            status=app.status,
+            status=visible_status(app.status),
             status_label=DesktopService._desktop_status_label(app.status),
             next_action=_desktop_next_action(app.status, app.updated_at),
             updated_at=_date_text(app.updated_at, with_time=True),
@@ -696,6 +740,10 @@ class DesktopService:
         application = job.application
         if application is not None:
             related_application_id = None
+            if _is_reusable_reservation(application):
+                # An abandoned empty reservation is not a generated dossier.
+                # The existing reservation can be safely reused by generation.
+                application = None
         analyzed = job.analyzed_at is not None
         duplicate_review_status = job.duplicate_review_status or JobDuplicateStatus.NONE
         duplicate_review_pending = duplicate_review_status == JobDuplicateStatus.PENDING
@@ -707,7 +755,7 @@ class DesktopService:
             # Application tracking remains the canonical display state once
             # a dossier exists. The analyzed filter itself excludes these
             # rows, so it cannot accidentally broaden that queue.
-            display_status = application.status
+            display_status = visible_status(application.status)
         elif job.shortlisted_at is not None and analyzed:
             display_status = JobStatus.SHORTLISTED
         elif analyzed:
@@ -775,7 +823,9 @@ class DesktopService:
             source=candidate.source,
             url=candidate.application_url or "",
             application_id=int(application.id) if application is not None else None,
-            application_status=application.status if application is not None else "",
+            application_status=visible_status(application.status)
+            if application is not None
+            else "",
             application_status_label=(
                 DesktopService._desktop_status_label(application.status)
                 if application is not None
@@ -1008,8 +1058,6 @@ class DesktopService:
         pipeline = Pipeline()
 
         def collect(source: str):
-            if progress:
-                progress(f"Recherche sur {self.source_label(source)}…")
             source_kwargs = freshness_kwargs(
                 source,
                 date_posted=date_posted,
@@ -1029,6 +1077,13 @@ class DesktopService:
             )
 
         collections = {}
+        pending_sources = list(requested_sources)
+        if progress:
+            progress(
+                "Recherche en cours : "
+                + ", ".join(self.source_label(source) for source in pending_sources)
+                + "…"
+            )
         with ThreadPoolExecutor(
             max_workers=min(4, len(requested_sources)),
             thread_name_prefix="elan-search",
@@ -1036,6 +1091,13 @@ class DesktopService:
             futures = {executor.submit(collect, source): source for source in requested_sources}
             for future in as_completed(futures):
                 source = futures[future]
+                pending_sources.remove(source)
+                if progress and pending_sources:
+                    progress(
+                        "Recherche en cours : "
+                        + ", ".join(self.source_label(item) for item in pending_sources)
+                        + "…"
+                    )
                 try:
                     collection = future.result()
                 except Exception as exc:
@@ -1176,6 +1238,50 @@ class DesktopService:
                 return {"job_id": app.job_id, "application_id": app.id, "existing": True}
         return asdict(report)
 
+    def regenerate_application(
+        self,
+        job_id: int,
+        *,
+        progress=None,
+    ) -> dict[str, Any]:
+        """Regenerate a ready dossier in its existing artifact directory."""
+        from smartapply.pipeline import Pipeline
+
+        with session_scope() as session:
+            job = session.get(Job, job_id)
+            if job is None:
+                raise ValueError(f"Offre introuvable: {job_id}")
+            if (
+                job.duplicate_review_status == JobDuplicateStatus.PENDING
+                or pending_duplicate_for_group(session, job_id) is not None
+            ):
+                raise ValueError("Vérifiez d’abord le doublon de cette offre.")
+
+            application = application_for_duplicate_group(session, job_id)
+            if application is None or application.status not in self.READY_STATUSES:
+                raise ValueError(
+                    "La régénération est disponible uniquement pour une candidature prête."
+                )
+            if job.archived_at is not None or job.status == JobStatus.ARCHIVED:
+                raise ValueError("Cette offre est archivée.")
+            application_id = int(application.id)
+            form_url = application.form_submission_url or None
+
+        artifact_dir = self.application_output_directory(application_id)
+        if artifact_dir is None:
+            raise ValueError("Le dossier de candidature est introuvable.")
+        if progress:
+            progress("Régénération du CV et de la lettre…")
+        report = Pipeline().apply_to(
+            job_id,
+            form_url=form_url,
+            force_regenerate=True,
+            artifact_dir=artifact_dir,
+        )
+        result = asdict(report)
+        result["regenerated"] = True
+        return result
+
     def generate_applications(
         self,
         job_ids: list[int],
@@ -1281,9 +1387,11 @@ class DesktopService:
                 report["warnings"].append(
                     {
                         "job_id": job_id,
+                        "application_id": application.application_id,
                         "title": item["title"],
                         "company": item["company"],
                         "message": " · ".join(str(issue) for issue in issues),
+                        "issues": [str(issue) for issue in issues],
                     }
                 )
         return report
@@ -1549,7 +1657,14 @@ class DesktopService:
                     *(getattr(application_report, "validation_errors", None) or []),
                 ]
                 if issues:
-                    report["warnings"].append({"job_id": target_id, "message": " · ".join(issues)})
+                    report["warnings"].append(
+                        {
+                            "job_id": target_id,
+                            "application_id": application_report.application_id,
+                            "message": " · ".join(issues),
+                            "issues": [str(issue) for issue in issues],
+                        }
+                    )
             except Exception as exc:
                 logger.exception("Offer restoration failed: job_id=%s", job_id)
                 report["failed"] += 1
@@ -1586,7 +1701,7 @@ class DesktopService:
         return path
 
     def diagnostics(self, *, check_sources: bool = False) -> RuntimeDiagnostics:
-        settings = get_settings()
+        settings = get_source_settings()
         url = make_url(settings.database_url)
         database_path = ""
         if url.get_backend_name() == "sqlite" and url.database:

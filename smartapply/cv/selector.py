@@ -1,8 +1,7 @@
-"""Block selector — choose the experiences/projects most relevant to a job.
+"""Embedding diagnostics for offer relevance, not the final project decision.
 
-We compute embeddings for each block and rank them against an embedding of
-the job analysis (main_tasks + required_skills + keywords). Top-K selection
-keeps the LLM prompt small and focused.
+Personalization sees the complete profile and its project policies. The adapter
+replaces ``SelectionResult.projects`` with the validated final selection.
 """
 
 from __future__ import annotations
@@ -58,7 +57,10 @@ class CvBlockSelector:
         # separate request for every static profile block.
         texts = [self._analysis_text(analysis)]
         texts.extend(self._experience_text(exp) for exp in profile.experiences)
-        texts.extend(self.project_text(project) for project in profile.projects)
+        eligible_projects = [
+            project for project in profile.projects if project.selection_policy.tier != "disabled"
+        ]
+        texts.extend(self.project_text(project) for project in eligible_projects)
         vectors = self.embeddings.embed(texts)
         analysis_vec = vectors[0]
         experience_offset = 1
@@ -70,7 +72,7 @@ class CvBlockSelector:
             exp_scores[exp.id] = cosine_similarity(analysis_vec, v)
 
         proj_scores: dict[str, float] = {}
-        for index, proj in enumerate(profile.projects):
+        for index, proj in enumerate(eligible_projects):
             v = vectors[project_offset + index]
             proj_scores[proj.id] = cosine_similarity(analysis_vec, v)
 
@@ -90,7 +92,7 @@ class CvBlockSelector:
         selected_experiences = ordered_experiences[:top_k_experiences]
 
         ordered_projects = sorted(
-            profile.projects,
+            eligible_projects,
             key=lambda p: proj_scores.get(p.id, 0.0),
             reverse=True,
         )

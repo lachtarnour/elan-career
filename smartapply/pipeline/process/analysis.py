@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from sqlalchemy import or_
@@ -13,8 +14,9 @@ from smartapply.database.repository import (
     set_analysis,
     update_status,
 )
-from smartapply.llm import JobAnalysis
+from smartapply.llm import JobAnalysis, JobFitAssessment, OfferAnalysis
 from smartapply.llm.prompts import job_analysis as analysis_prompts
+from smartapply.llm.prompts import job_fit as fit_prompts
 from smartapply.logging_setup import get_logger
 from smartapply.offers import build_analyzer_input
 from smartapply.pipeline.process.audit import (
@@ -24,6 +26,43 @@ from smartapply.pipeline.process.audit import (
 from smartapply.pipeline.reports import AnalyzeReport
 
 logger = get_logger(__name__)
+
+
+def _ground_offer_excerpts(offer: OfferAnalysis, body: str) -> OfferAnalysis:
+    """Discard unverifiable quotes and surface an offer-quality concern."""
+    verified = []
+    for quote in offer.supporting_excerpts:
+        if not quote.strip():
+            continue
+        match = re.search(r"\s+".join(re.escape(word) for word in quote.split()), body)
+        if match:
+            # Whitespace may be normalized by the model; store the exact body
+            # span so every retained excerpt remains directly verifiable.
+            verified.append(match.group(0))
+    if verified == offer.supporting_excerpts:
+        return offer
+    risks = list(offer.offer_risks)
+    if len(verified) != len(offer.supporting_excerpts):
+        risks.append(
+            "Some supporting excerpts could not be verified against the offer body "
+            "and were excluded; the extracted requirements need verification."
+        )
+    return offer.model_copy(
+        update={
+            "supporting_excerpts": verified,
+            "offer_risks": list(dict.fromkeys(risks)),
+        }
+    )
+
+
+def _assemble_analysis(offer: OfferAnalysis, fit: JobFitAssessment) -> JobAnalysis:
+    """Only extraction owns offer fields; matching contributes three fields."""
+    return JobAnalysis(
+        **offer.model_dump(),
+        fit_score=fit.fit_score,
+        match_reasons=fit.match_reasons,
+        risks=list(dict.fromkeys([*offer.offer_risks, *fit.risks])),
+    )
 
 
 class AnalysisMixin:
@@ -108,17 +147,29 @@ class AnalysisMixin:
                 return
             analyzer_input = build_analyzer_input(job)
             user_prompt = analysis_prompts.build_user_prompt_from_input(
-                profile=self.profile,
                 analyzer_input=analyzer_input,
             )
-            analysis = self.llm.complete_json(
-                system=analysis_prompts.SYSTEM,
+            offer = self.llm.complete_json(
+                system=analysis_prompts.build_system_prompt(),
                 user=user_prompt,
-                schema=JobAnalysis,
+                schema=OfferAnalysis,
                 model=self.llm.cheap_model,
-                purpose="job_analysis",
+                purpose="job_offer_analysis",
                 job_id=job.id,
             )
+            offer = _ground_offer_excerpts(offer, analyzer_input.offer_body)
+            fit = self.llm.complete_json(
+                system=fit_prompts.build_system_prompt(),
+                user=fit_prompts.build_user_prompt(
+                    profile=self.profile,
+                    offer_analysis=offer,
+                ),
+                schema=JobFitAssessment,
+                model=self.llm.cheap_model,
+                purpose="job_fit_assessment",
+                job_id=job.id,
+            )
+            analysis = _assemble_analysis(offer, fit)
             set_analysis(
                 s,
                 job.id,

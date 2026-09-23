@@ -14,6 +14,7 @@ from PySide6.QtGui import QDesktopServices, QGuiApplication
 from smartapply.database.models import JobStatus
 from smartapply.desktop.services import DesktopService, SearchResult
 from smartapply.desktop.workers import TaskWorker
+from smartapply.jobsearch.status import display_status
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +35,78 @@ def _count_text(count: int, singular: str, plural: str) -> str:
     return f"{count} {singular if count == 1 else plural}"
 
 
+def _diagnostic_messages(item: Any) -> list[str]:
+    """Read structured batch diagnostics, with compatibility for older reports."""
+    if isinstance(item, dict):
+        issues = item.get("issues")
+        if isinstance(issues, (list, tuple)):
+            return [str(issue).strip() for issue in issues if str(issue).strip()]
+        item = item.get("message") or ""
+    return [part.strip() for part in str(item).split(" · ") if part.strip()]
+
+
+def _is_review_information(message: str) -> bool:
+    return message.startswith("text_review_corrected:")
+
+
+def _batch_review_counts(warnings: list[Any]) -> tuple[int, bool]:
+    """Count affected dossiers; a verified correction is useful information."""
+    affected = set()
+    corrected = False
+    for index, item in enumerate(warnings):
+        messages = _diagnostic_messages(item)
+        corrected = corrected or any(_is_review_information(message) for message in messages)
+        if any(not _is_review_information(message) for message in messages):
+            key = (
+                (item.get("application_id") or item.get("job_id"))
+                if isinstance(item, dict)
+                else None
+            )
+            affected.add(("dossier", key) if key else ("entry", index))
+    return len(affected), corrected
+
+
+def _review_notification_suffix(affected: int, corrected: bool, *, batch: bool) -> str:
+    if affected:
+        quantity = (
+            _count_text(
+                affected,
+                "dossier avec des points à vérifier",
+                "dossiers avec des points à vérifier",
+            )
+            if batch
+            else _count_text(affected, "point à vérifier", "points à vérifier")
+        )
+        return f" {quantity}. Détails dans le volet du dossier."
+    if corrected:
+        return " Corrections vérifiées."
+    return ""
+
+
+def _technical_failure_preview(errors: list[Any]) -> str:
+    """Keep one actionable cause visible even when no dossier could be created."""
+    if not errors:
+        return ""
+    first = errors[0]
+    if isinstance(first, dict):
+        job_id = first.get("job_id")
+        label = f"Offre #{job_id} : " if job_id else ""
+        message = str(first.get("message") or "Erreur technique.")
+    else:
+        label, message = "", str(first)
+    preview = " ".join((label + message).split())
+    if len(preview) > 140:
+        preview = preview[:139].rsplit(" ", 1)[0] + "…"
+    elif not preview.endswith((".", "!", "?", "…")):
+        preview += "."
+    return " " + preview
+
+
 def _tone(status: str) -> str:
+    status = display_status(status)
     if status in {JobStatus.SENT, JobStatus.INTERVIEW}:
         return "success"
-    if status in {JobStatus.QUALITY_REJECTED, JobStatus.REJECTED}:
+    if status == JobStatus.REJECTED:
         return "danger"
     if status == JobStatus.ARCHIVED:
         return "warning"
@@ -147,6 +216,10 @@ class DesktopBridge(QObject):
         self.refreshShortlist()
         self.refreshProfile()
         self.refreshDiagnostics()
+        self._source_refresh_timer = QTimer(self)
+        self._source_refresh_timer.setInterval(60_000)
+        self._source_refresh_timer.timeout.connect(self.refreshDiagnostics)
+        self._source_refresh_timer.start()
 
     @Property("QVariantMap", notify=dashboardChanged)
     def dashboard(self) -> dict[str, Any]:
@@ -276,6 +349,10 @@ class DesktopBridge(QObject):
     @Property("QVariantMap", notify=diagnosticsChanged)
     def diagnostics(self) -> dict[str, Any]:
         return self._diagnostics
+
+    @Property(bool, notify=diagnosticsChanged)
+    def diagnosticsChecking(self) -> bool:  # noqa: N802
+        return getattr(self, "_diagnostics_worker", None) is not None
 
     @Property(bool, notify=busyChanged)
     def busy(self) -> bool:
@@ -453,13 +530,24 @@ class DesktopBridge(QObject):
         if self._diagnostics_worker is not None:
             return
         try:
-            self._apply_diagnostics(self.service.diagnostics())
+            pending = _plain(self.service.diagnostics())
+            previous = self._diagnostics.get("source_health", {})
+            for key, health in pending.get("source_health", {}).items():
+                last = previous.get(key, {})
+                # Keep the last checked status while refreshing; missing credentials
+                # still take effect immediately, without waiting for the network.
+                if health.get("configured") and last.get("state") in {
+                    "available", "unavailable"
+                }:
+                    pending["source_health"][key] = dict(last)
+            self._apply_diagnostics(pending)
         except Exception as exc:
             self._error("Configuration indisponible", exc)
             return
 
         worker = TaskWorker(self.service.diagnostics, check_sources=True)
         self._diagnostics_worker = worker
+        self.diagnosticsChanged.emit()
         self._workers.add(worker)
         worker.signals.result.connect(self._apply_diagnostics)
         worker.signals.error.connect(self._diagnostics_error)
@@ -479,33 +567,33 @@ class DesktopBridge(QObject):
                 }
             )
             diagnostics["sources"].append(item)
+        diagnostics["source_ready"] = {
+            key: bool(health.get("ready")) for key, health in health_by_source.items()
+        }
         self._diagnostics = diagnostics
         self.diagnosticsChanged.emit()
 
     def _diagnostics_error(self, message: str, trace: str) -> None:
         logger.error("Source diagnostics failed: %s\n%s", message, trace)
         diagnostics = dict(self._diagnostics)
-        sources = []
-        for source in diagnostics.get("sources", []):
+        health_by_source = {}
+        for key, source in diagnostics.get("source_health", {}).items():
             item = dict(source)
-            if item.get("state") == "checking":
+            if item.get("configured"):
                 item.update(
                     ready=False,
                     state="unavailable",
                     message="Vérification impossible.",
                 )
-            sources.append(item)
-        diagnostics["sources"] = sources
-        diagnostics["source_ready"] = {
-            str(item.get("key")): bool(item.get("ready")) for item in sources
-        }
-        self._diagnostics = diagnostics
-        self.diagnosticsChanged.emit()
+            health_by_source[key] = item
+        diagnostics["source_health"] = health_by_source
+        self._apply_diagnostics(diagnostics)
 
     def _diagnostics_finished(self, worker: TaskWorker) -> None:
         self._workers.discard(worker)
         if self._diagnostics_worker is worker:
             self._diagnostics_worker = None
+            self.diagnosticsChanged.emit()
 
     @Slot(str, str, "QVariantList", int, str)
     def searchJobs(  # noqa: N802
@@ -663,6 +751,15 @@ class DesktopBridge(QObject):
             on_success=self._generation_done,
         )
 
+    @Slot(int)
+    def regenerateApplication(self, job_id: int) -> None:  # noqa: N802
+        self._run(
+            "Régénération du CV et de la lettre",
+            self.service.regenerate_application,
+            job_id,
+            on_success=self._regeneration_done,
+        )
+
     @Slot("QVariantList")
     def generateApplications(self, job_ids: list[Any]) -> None:  # noqa: N802
         ids = self._job_ids(job_ids)
@@ -706,22 +803,22 @@ class DesktopBridge(QObject):
         if skipped:
             details += ", " + _count_text(skipped, "offre ignorée", "offres ignorées")
         if failed:
-            details += ", " + _count_text(failed, "échec", "échecs")
-        errors = list(report.get("errors") or [])
-        if errors:
-            details += ". Détails : " + self._failure_details(errors)
+            details += ", " + _count_text(failed, "échec technique", "échecs techniques")
         warnings = list(report.get("warnings") or [])
-        if warnings:
-            details += ". Points à vérifier : " + self._failure_details(warnings)
+        affected, corrected = _batch_review_counts(warnings)
+        details += "."
+        if failed:
+            details += _technical_failure_preview(list(report.get("errors") or []))
+        details += _review_notification_suffix(affected, corrected, batch=True)
         kind = (
             "success"
-            if generated and not failed and not warnings
+            if generated and not failed and not affected
             else ("warning" if generated else "danger")
         )
-        self._set_activity("Création terminée", details + ".", kind)
+        self._set_activity("Création terminée", details, kind)
         self.toastRequested.emit(
             "Création terminée",
-            details + ".",
+            details,
             kind,
         )
 
@@ -736,17 +833,44 @@ class DesktopBridge(QObject):
         job_id = int(report.get("job_id") or 0)
         warnings = list(report.get("validation_warnings") or [])
         errors = list(report.get("validation_errors") or [])
-        issues = [*warnings, *errors]
-        message = ""
-        kind = "success"
-        if issues:
-            message = "Points à vérifier : " + " · ".join(str(item) for item in issues[:3])
-            kind = "warning"
+        issues = [
+            message for item in [*warnings, *errors] for message in _diagnostic_messages(item)
+        ]
+        points = {message for message in issues if not _is_review_information(message)}
+        corrected = any(_is_review_information(message) for message in issues)
+        message = "Le CV et la lettre sont disponibles."
+        message += _review_notification_suffix(len(points), corrected, batch=False)
+        kind = "warning" if points else "success"
         self._set_activity("Candidature créée", message, kind)
         self.toastRequested.emit("Candidature créée", message, kind)
         if job_id:
             self.selectJob(job_id)
         self.navigationRequested.emit("jobs", job_id)
+
+    def _regeneration_done(self, report: dict[str, Any]) -> None:
+        self._refresh_workflow()
+        job_id = int(report.get("job_id") or 0)
+        issues = [
+            message
+            for item in [
+                *list(report.get("validation_warnings") or []),
+                *list(report.get("validation_errors") or []),
+            ]
+            for message in _diagnostic_messages(item)
+        ]
+        review_points = {
+            str(issue) for issue in issues if not _is_review_information(str(issue))
+        }
+        corrected = any(_is_review_information(str(issue)) for issue in issues)
+        message = "Le CV et la lettre ont été régénérés dans le dossier existant."
+        suffix = _review_notification_suffix(len(review_points), corrected, batch=False)
+        if suffix:
+            message += suffix
+        kind = "warning" if review_points else "success"
+        self._set_activity("Candidature régénérée", message, kind)
+        self.toastRequested.emit("Candidature régénérée", message, kind)
+        if job_id:
+            self.selectJob(job_id)
 
     @staticmethod
     def _failure_details(errors: list[Any]) -> str:
@@ -916,19 +1040,19 @@ class DesktopBridge(QObject):
         if skipped:
             message += ", " + _count_text(skipped, "offre ignorée", "offres ignorées")
         if failed:
-            message += ", " + _count_text(failed, "échec", "échecs")
-        errors = list(report.get("errors") or [])
-        if errors:
-            message += ". Détails : " + self._failure_details(errors)
+            message += ", " + _count_text(failed, "échec technique", "échecs techniques")
         warnings = list(report.get("warnings") or [])
-        if warnings:
-            message += ". Points à vérifier : " + self._failure_details(warnings)
+        affected, corrected = _batch_review_counts(warnings)
+        message += "."
+        if failed:
+            message += _technical_failure_preview(list(report.get("errors") or []))
+        message += _review_notification_suffix(affected, corrected, batch=True)
         kind = "success" if generated or existing else "warning"
-        if failed or warnings:
+        if failed or affected:
             kind = "warning" if generated or existing else "danger"
         title = "Désarchivage terminé" if not failed else "Préparation incomplète"
-        self._set_activity(title, message + ".", kind)
-        self.toastRequested.emit(title, message + ".", kind)
+        self._set_activity(title, message, kind)
+        self.toastRequested.emit(title, message, kind)
         # Leave the archive filter and select the prepared dossier even when
         # the clicked row was an alias of a different source.
         application_ids = list(report.get("application_ids") or [])
@@ -948,7 +1072,9 @@ class DesktopBridge(QObject):
         if detail is None:
             self._error("Candidature indisponible", ValueError("Candidature introuvable"))
             return
-        self.navigationRequested.emit(f"jobs?status={detail.status}", int(detail.job_id))
+        self.navigationRequested.emit(
+            f"jobs?status={display_status(detail.status)}", int(detail.job_id)
+        )
         self.selectJob(int(detail.job_id))
 
     @Slot(int, str, str, bool)

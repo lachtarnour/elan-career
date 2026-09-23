@@ -13,6 +13,11 @@ Item {
     // A generated application is displayed as part of its offer. This keeps
     // the offer list and the application tracking state in one workspace.
     property var applicationData: AppBridge.currentJob.application || ({})
+    property bool documentReviewDetailsExpanded: false
+    readonly property var documentDiagnostics: applicationData.warnings || []
+    readonly property int documentReviewPointCount: documentDiagnostics.filter(function(item) {
+        return !root.isReviewInformation(String(item))
+    }).length
     property string sortKey: "score"
     property bool sortAscending: false
     property string filterStatus: "scraped"
@@ -55,6 +60,47 @@ Item {
     readonly property bool hasArchiveInsight: AppBridge.currentJob.status === "archived"
         && (AppBridge.currentJob.archive_reasons || []).length > 0
     readonly property bool hasInsightCards: hasMatchInsights || hasRiskInsights || hasDuplicateInsight || hasArchiveInsight
+        || documentDiagnostics.length > 0
+
+    function isReviewInformation(message) {
+        return message.indexOf("text_review_corrected:") === 0
+    }
+
+    function documentDiagnosticLabel(message) {
+        var value = String(message).replace(/^validation_error:/, "")
+        if (isReviewInformation(value)) return "Correction vérifiée."
+        if (value.indexOf("text_review_invalid_correction:") === 0)
+            return "Modification proposée écartée ; texte initial conservé."
+        if (value.indexOf("text_review_incomplete:") === 0)
+            return "Relecture automatique incomplète."
+        if (value.indexOf("text_review_unavailable:") === 0)
+            return "Relecture automatique indisponible."
+        if (value.indexOf("text_review_invalid_") === 0)
+            return "Résultat de relecture à vérifier."
+        if (value.indexOf("cv_title_not_offer_anchored") === 0)
+            return "Titre du CV à rapprocher de l’offre."
+        if (value.indexOf("summary_not_offer_anchored") === 0)
+            return "Résumé à rapprocher de l’offre."
+        if (value.indexOf("summary_too_long:") === 0)
+            return "Longueur du résumé à vérifier."
+        if (value.indexOf("summary_too_many_lines:") === 0)
+            return "Mise en page du résumé à vérifier."
+        if (value.indexOf("letter_too_long:") === 0 || value.indexOf("letter_too_short:") === 0)
+            return "Longueur de la lettre à vérifier."
+        if (value.indexOf("letter_not_3_paragraphs:") === 0)
+            return "Organisation des paragraphes de la lettre à vérifier."
+        if (value.indexOf("text_review:factual:") === 0)
+            return "Affirmation signalée lors de la relecture à vérifier."
+        if (value.indexOf("text_review:language:") === 0)
+            return "Formulation à vérifier."
+        if (value.indexOf("text_review:structure:") === 0)
+            return "Présentation ou longueur à vérifier."
+        if (value.indexOf("text_review:style:") === 0)
+            return "Suggestion de présentation."
+        if (value.indexOf("cv_pdf_not_generated") === 0) return "PDF du CV indisponible."
+        if (value.indexOf("letter_pdf_not_generated") === 0) return "PDF de la lettre indisponible."
+        return "Point signalé lors de la création."
+    }
 
     function companyX() { return selectWidth + columnGap }
     function titleX() { return companyX() + companyWidth + columnGap }
@@ -203,6 +249,7 @@ Item {
         function onJobSelectionClearRequested() { root.clearSelection() }
         function onCurrentJobChanged() {
             detailViewport.contentY = 0
+            root.documentReviewDetailsExpanded = false
             if (applicationNotes)
                 applicationNotes.text = root.applicationData.notes || ""
             var index = root.selectedIndex()
@@ -794,6 +841,71 @@ Item {
                                     color: Theme.line
                                 }
                                 Rectangle {
+                                    objectName: "documentReviewCard"
+                                    visible: root.documentDiagnostics.length > 0
+                                    Layout.fillWidth: true
+                                    implicitHeight: documentReviewContent.implicitHeight + 24
+                                    radius: 16
+                                    color: Theme.surfaceMuted
+                                    border.color: root.documentReviewPointCount > 0 ? Theme.warningLine : Theme.successLine
+                                    ColumnLayout {
+                                        id: documentReviewContent
+                                        anchors.fill: parent
+                                        anchors.margins: 12
+                                        spacing: 8
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: "Contrôle du CV et de la lettre"
+                                            color: Theme.ink
+                                            font.pixelSize: root.detailMetaFontSize
+                                            font.weight: Font.Bold
+                                            wrapMode: Text.WordWrap
+                                        }
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: root.documentReviewPointCount > 0
+                                                ? root.documentReviewPointCount + (root.documentReviewPointCount === 1 ? " point à vérifier. Les documents restent disponibles." : " points à vérifier. Les documents restent disponibles.")
+                                                : "Corrections vérifiées."
+                                            color: root.documentReviewPointCount > 0 ? Theme.warning : Theme.success
+                                            font.pixelSize: root.detailMetaFontSize
+                                            wrapMode: Text.WordWrap
+                                        }
+                                        Repeater {
+                                            model: root.documentDiagnostics
+                                            delegate: ColumnLayout {
+                                                required property var modelData
+                                                Layout.fillWidth: true
+                                                spacing: 4
+                                                Text {
+                                                    Layout.fillWidth: true
+                                                    text: root.documentDiagnosticLabel(modelData)
+                                                    textFormat: Text.PlainText
+                                                    color: root.isReviewInformation(String(modelData)) ? Theme.success : Theme.inkSoft
+                                                    font.pixelSize: root.detailMetaFontSize
+                                                    wrapMode: Text.WordWrap
+                                                }
+                                                Text {
+                                                    visible: root.documentReviewDetailsExpanded
+                                                    Layout.fillWidth: true
+                                                    text: String(modelData)
+                                                    textFormat: Text.PlainText
+                                                    color: Theme.inkMuted
+                                                    font.pixelSize: root.detailSmallFontSize
+                                                    wrapMode: Text.Wrap
+                                                }
+                                            }
+                                        }
+                                        AppButton {
+                                            objectName: "documentReviewDetailsToggle"
+                                            text: root.documentReviewDetailsExpanded ? "Masquer les détails" : "Afficher les détails"
+                                            quiet: true
+                                            refined: true
+                                            fontPixelSize: root.detailSmallFontSize
+                                            onClicked: root.documentReviewDetailsExpanded = !root.documentReviewDetailsExpanded
+                                        }
+                                    }
+                                }
+                                Rectangle {
                                     visible: root.hasMatchInsights
                                     Layout.fillWidth: true
                                     implicitHeight: matchReasonsContent.implicitHeight + 24
@@ -1054,6 +1166,24 @@ Item {
                                 visible: Boolean(root.applicationData.id) && AppBridge.currentJob.status !== "archived"
                                 Layout.fillWidth: true
                                 spacing: 6
+                                AppButton {
+                                    objectName: "offerRegenerateAction"
+                                    visible: AppBridge.currentJob.status === "ready_for_form_submission"
+                                    Layout.minimumWidth: root.detailActionButtonWidth
+                                    Layout.preferredWidth: root.detailActionButtonWidth
+                                    Layout.maximumWidth: root.detailActionButtonWidth
+                                    text: "Régénérer"
+                                    iconSource: Theme.icon("refresh")
+                                    kind: "primary"
+                                    fontPixelSize: root.detailButtonFontSize
+                                    refined: true
+                                    iconSize: 13
+                                    enabled: !AppBridge.busy
+                                    implicitHeight: root.detailActionButtonHeight
+                                    onClicked: AppBridge.regenerateApplication(AppBridge.currentJob.id)
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: "Régénère le CV et la lettre dans le même dossier et remplace les fichiers actuels."
+                                }
                                 AppButton {
                                     visible: Boolean(AppBridge.currentJob.can_send)
                                     Layout.minimumWidth: root.detailActionButtonWidth

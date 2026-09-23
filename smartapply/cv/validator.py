@@ -1,6 +1,7 @@
 """Anti-hallucination validator for adapted CVs.
 
 Hard rules (errors → reject / auto-fix):
+- Experiences and bullets must exactly match the profile, including their order.
 - Every experience source_id must exist in the profile.
 - Every bullet source_id must exist in the profile (experiences OR projects).
 - Every bullet must belong to the experience it's nested under.
@@ -16,22 +17,27 @@ Soft rules (warnings → keep but flag):
   >= 40 against at least one allowed claim).
 - For non-verified evidence (``self_reported``, ``inferred``), require a
   stricter overlap to avoid over-claiming.
-- Bullet length capped at style_guide.max_bullet_length.
-- Summary length capped at style_guide.max_summary_length.
-- Summary line count capped at style_guide.max_summary_lines.
+- Approved source bullets are never shortened to meet generated-text limits.
+- Summary length above style_guide.max_summary_length is reported, never truncated.
+- Summary line count above style_guide.max_summary_lines is reported.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import TypeVar
 
 from rapidfuzz import fuzz
 
-from smartapply.llm import AdaptedCV, SkillSelectionBlock
+from smartapply.cv.assembly import profile_experiences
+from smartapply.cv.project_selection import project_policy_errors
+from smartapply.cv.text_hygiene import evidence_metadata_warnings
+from smartapply.llm import AdaptedCV, AssembledCV, SkillSelectionBlock
 from smartapply.profile import Profile
 
 _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
+_CV = TypeVar("_CV", AssembledCV, AdaptedCV)
 
 
 @dataclass
@@ -74,7 +80,6 @@ class CvValidator:
         self.profile = profile
         self.bullet_index = profile.bullet_index()
         self.exp_index = {e.id: e for e in profile.experiences}
-        self.project_ids = {p.id for p in profile.projects}
         self.skill_category_ids = {c.id for c in profile.skills.categories}
         self.skill_profile_ids = profile.skills.profile_ids
         self.allowed_skills_lower = {s.lower() for s in profile.skills.allowed_skills}
@@ -86,25 +91,37 @@ class CvValidator:
         self.max_summary_len = profile.style_guide.max_summary_length
         self.max_summary_lines = profile.style_guide.max_summary_lines
 
-    def validate(self, cv: AdaptedCV) -> ValidationResult:
+    def validate(self, cv: AssembledCV | AdaptedCV) -> ValidationResult:
         errors: list[str] = []
         warnings: list[str] = []
 
         # ---- Experiences and bullets ----
+        if [exp.source_id for exp in cv.selected_experiences] != list(self.exp_index):
+            errors.append("experience_order_mismatch:expected complete profile order")
         for exp in cv.selected_experiences:
             if exp.source_id not in self.exp_index:
                 errors.append(f"unknown_experience_id:{exp.source_id}")
                 continue
+            source_experience = self.exp_index[exp.source_id]
+            if [b.source_id for b in exp.bullets] != [b.id for b in source_experience.bullets]:
+                errors.append(f"experience_bullets_mismatch:{exp.source_id}")
             for blt in exp.bullets:
                 src_bullet = self.bullet_index.get(blt.source_id)
                 if src_bullet is None:
                     errors.append(f"unknown_bullet_id:{blt.source_id}")
                     continue
                 src_exp = self.profile.experience_for_bullet(blt.source_id)
-                if src_exp is not None and src_exp.id != exp.source_id:
+                if src_exp is None or src_exp.id != exp.source_id:
                     errors.append(
-                        f"bullet_wrong_parent:{blt.source_id} expected {src_exp.id} got {exp.source_id}"
+                        f"bullet_wrong_parent:{blt.source_id} "
+                        f"expected {src_exp.id if src_exp else 'profile experience'} "
+                        f"got {exp.source_id}"
                     )
+                if blt.text == src_bullet.text:
+                    # Static, approved source content is not subject to LLM
+                    # paraphrase checks or generated-bullet length limits.
+                    continue
+                errors.append(f"experience_text_mismatch:{blt.source_id}")
 
                 # Numbers preservation
                 out_numbers = _extract_numbers(blt.text)
@@ -138,9 +155,7 @@ class CvValidator:
                     warnings.append(f"bullet_too_long:{blt.source_id} len={len(blt.text)}")
 
         # ---- Projects ----
-        for pid in cv.selected_project_ids:
-            if pid not in self.project_ids:
-                errors.append(f"unknown_project_id:{pid}")
+        errors.extend(project_policy_errors(cv.selected_project_ids, self.profile))
 
         # ---- Skill categories ----
         if (
@@ -162,42 +177,27 @@ class CvValidator:
                 if skill.lower() not in self.allowed_skills_lower:
                     warnings.append(f"unknown_selected_skill:{skill}")
 
-        # ---- Summary length ----
-        if len(cv.professional_summary) > self.max_summary_len:
-            warnings.append(f"summary_too_long:len={len(cv.professional_summary)}")
-        summary_lines = [line for line in cv.professional_summary.splitlines() if line.strip()]
-        if len(summary_lines) > self.max_summary_lines:
-            warnings.append(f"summary_too_many_lines:lines={len(summary_lines)}")
+        fields = {"cv_title": cv.cv_title}
+        if isinstance(cv, AdaptedCV):
+            fields["professional_summary"] = cv.professional_summary
+        warnings.extend(evidence_metadata_warnings(fields))
+
+        # Summary checks apply only after the second call; never seed or slice it.
+        if isinstance(cv, AdaptedCV):
+            if len(cv.professional_summary) > self.max_summary_len:
+                warnings.append(f"summary_too_long:len={len(cv.professional_summary)}")
+            summary_lines = [line for line in cv.professional_summary.splitlines() if line.strip()]
+            if len(summary_lines) > self.max_summary_lines:
+                warnings.append(f"summary_too_many_lines:lines={len(summary_lines)}")
 
         return ValidationResult(ok=len(errors) == 0, errors=errors, warnings=warnings)
 
-    def auto_fix(self, cv: AdaptedCV) -> tuple[AdaptedCV, list[str]]:
-        """Best-effort fix that strips invalid items so the CV remains usable."""
+    def auto_fix(self, cv: _CV) -> tuple[_CV, list[str]]:
+        """Restore static experiences and skills; project failures require a new draft."""
         removed: list[str] = []
-        cleaned_experiences = []
-        for exp in cv.selected_experiences:
-            if exp.source_id not in self.exp_index:
-                removed.append(f"experience:{exp.source_id}")
-                continue
-            valid_bullets = []
-            for blt in exp.bullets:
-                if blt.source_id not in self.bullet_index:
-                    removed.append(f"bullet:{blt.source_id}")
-                    continue
-                src_exp = self.profile.experience_for_bullet(blt.source_id)
-                if src_exp is not None and src_exp.id != exp.source_id:
-                    removed.append(f"misplaced_bullet:{blt.source_id}")
-                    continue
-                valid_bullets.append(blt)
-            if valid_bullets:
-                cleaned_experiences.append(exp.model_copy(update={"bullets": valid_bullets}))
-            else:
-                removed.append(f"empty_experience:{exp.source_id}")
-
-        valid_projects = [pid for pid in cv.selected_project_ids if pid in self.project_ids]
-        for pid in cv.selected_project_ids:
-            if pid not in self.project_ids:
-                removed.append(f"project:{pid}")
+        cleaned_experiences = profile_experiences(self.profile)
+        if cv.selected_experiences != cleaned_experiences:
+            removed.append("experience_content:restored_from_profile")
 
         valid_skills = [cid for cid in cv.skills_order if cid in self.skill_category_ids]
         valid_selected_skills = []
@@ -230,7 +230,6 @@ class CvValidator:
         cleaned = cv.model_copy(
             update={
                 "selected_experiences": cleaned_experiences,
-                "selected_project_ids": valid_projects,
                 "skills_profile_id": skill_profile_id,
                 "selected_skills": valid_selected_skills,
                 "skills_order": valid_skills,

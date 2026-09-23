@@ -53,7 +53,7 @@ def test_job_analysis_schema_round_trip() -> None:
     assert b == a
 
 
-def test_job_analysis_prompt_includes_structured_location() -> None:
+def test_job_analysis_prompt_includes_structured_location_without_candidate_context() -> None:
     from smartapply.profile import get_profile
 
     prompt = job_analysis.build_user_prompt(
@@ -69,7 +69,10 @@ def test_job_analysis_prompt_includes_structured_location() -> None:
         "Structured location (metadata only; do not copy into extracted_location): France" in prompt
     )
     assert "Poste base a Paris" in prompt
-    assert "extracted_location" in job_analysis.SYSTEM
+    assert "=== CANDIDATE ===" not in prompt
+    assert "Candidate title:" not in prompt
+    assert "Preferred locations:" not in prompt
+    assert "extracted_location" in job_analysis.build_system_prompt()
 
 
 def _metadata_line(metadata: str, source_field: str) -> str:
@@ -386,25 +389,33 @@ def test_cache_key_is_deterministic_and_collision_resistant() -> None:
         model="gpt-4o-mini",
         system="s",
         user="u",
-        schema_name="JobAnalysis",
+        schema_name="OfferAnalysis",
         extra={"temperature": 0.2},
     )
     k2 = make_cache_key(
         model="gpt-4o-mini",
         system="s",
         user="u",
-        schema_name="JobAnalysis",
+        schema_name="OfferAnalysis",
         extra={"temperature": 0.2},
     )
     k3 = make_cache_key(
         model="gpt-4o-mini",
         system="s",
         user="u DIFFERENT",
-        schema_name="JobAnalysis",
+        schema_name="OfferAnalysis",
+        extra={"temperature": 0.2},
+    )
+    k4 = make_cache_key(
+        model="gpt-4o-mini",
+        system="s",
+        user="u",
+        schema_name="JobFitAssessment",
         extra={"temperature": 0.2},
     )
     assert k1 == k2
     assert k1 != k3
+    assert k1 != k4
     assert len(k1) == 64  # sha256 hex
 
 

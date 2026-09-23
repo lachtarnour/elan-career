@@ -10,10 +10,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from smartapply.database.models import JobStatus
+from smartapply.jobsearch.status import display_status
 
 APPLICATION_STATUSES = [
     JobStatus.READY_FOR_FORM_SUBMISSION,
-    JobStatus.QUALITY_REJECTED,
     JobStatus.SENT,
     JobStatus.INTERVIEW,
     JobStatus.REJECTED,
@@ -33,12 +33,11 @@ def next_action_for(
     updated_at: datetime | None = None,
 ) -> str:
     """Return a short next-action hint for the application tracker."""
+    status = display_status(status)
     if status == JobStatus.DUPLICATE_REVIEW:
         return "Vérifier l’offre ressemblante"
     if status == JobStatus.READY_FOR_FORM_SUBMISSION:
         return "Relire les documents de candidature"
-    if status == JobStatus.QUALITY_REJECTED:
-        return "Corriger les documents"
     if status == JobStatus.SENT:
         return f"Relancer sans réponse le {_date_label(updated_at, days=7)}"
     if status == JobStatus.INTERVIEW:

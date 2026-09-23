@@ -65,3 +65,4 @@ class ApplyReport:
     status: str | None = None
     validation_warnings: list[str] = field(default_factory=list)
     validation_errors: list[str] = field(default_factory=list)
+    document_review: list[dict[str, Any]] = field(default_factory=list)

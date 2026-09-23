@@ -7,7 +7,7 @@ from typing import Any
 
 import requests as _requests
 
-from smartapply.config import get_settings
+from smartapply.config import get_source_settings
 from smartapply.logging_setup import get_logger
 from smartapply.offers import RawJob
 from smartapply.scrapers.base import Scraper, ScraperConfigError
@@ -124,7 +124,7 @@ class WelcomeToTheJungleScraper(Scraper):
         timeout: int | None = None,
         delay_seconds: float | None = None,
     ) -> None:
-        settings = get_settings()
+        settings = get_source_settings()
         self.cookie_header = cookie_header if cookie_header is not None else settings.wttj_cookie
         self.max_pages = max_pages if max_pages is not None else settings.wttj_max_pages
         self.pages = pages if pages is not None else settings.wttj_pages

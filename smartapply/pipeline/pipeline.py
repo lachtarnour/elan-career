@@ -9,9 +9,10 @@ Phases:
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
-from smartapply.config import get_settings
+from smartapply.config import get_source_settings
 from smartapply.cv import CvAdapter, CvValidator
 from smartapply.database import session_scope
 from smartapply.database.models import Job
@@ -91,7 +92,7 @@ class Pipeline:
         self.profile = profile or get_profile()
         self.llm = llm or get_llm_provider()
         self.embeddings = embeddings or get_embeddings_provider()
-        self.settings = get_settings()
+        self.settings = get_source_settings()
 
         # Shared building blocks
         self.deduplicator = Deduplicator()
@@ -129,6 +130,7 @@ class Pipeline:
         location: str | None = None,
         *,
         max_results: int | None = 20,
+        include_research_cdd: bool = True,
         stop_requested: Callable[[], bool] | None = None,
         **search_kwargs: Any,
     ) -> IngestReport:
@@ -137,6 +139,7 @@ class Pipeline:
             query,
             location,
             max_results=max_results,
+            include_research_cdd=include_research_cdd,
             stop_requested=stop_requested,
             **search_kwargs,
         )
@@ -149,6 +152,7 @@ class Pipeline:
         location: str | None = None,
         *,
         max_results: int | None = 20,
+        include_research_cdd: bool = True,
         stop_requested: Callable[[], bool] | None = None,
         **search_kwargs: Any,
     ) -> IngestCollection:
@@ -164,10 +168,15 @@ class Pipeline:
         if (
             source_key == "francetravail"
             and "type_contrat" not in search_kwargs
+            and not include_research_cdd
             and should_filter_france_travail_to_cdi(accepted)
         ):
             search_kwargs["type_contrat"] = "CDI"
-        if source_key == "serpapi" and should_filter_serpapi_to_fulltime(accepted):
+        if (
+            source_key == "serpapi"
+            and not include_research_cdd
+            and should_filter_serpapi_to_fulltime(accepted)
+        ):
             existing_chips = search_kwargs.get("chips", "")
             fulltime_chip = "employment_type:FULLTIME"
             chips = [chip.strip() for chip in str(existing_chips).split(",") if chip.strip()]
@@ -178,6 +187,7 @@ class Pipeline:
             source,
             query,
             location,
+            include_research_cdd=include_research_cdd,
             max_results=max_results,
             stop_requested=stop_requested,
             **search_kwargs,
@@ -296,12 +306,14 @@ class Pipeline:
         *,
         form_url: str | None = None,
         force_regenerate: bool = False,
+        artifact_dir: Path | None = None,
     ) -> ApplyReport:
         """Generate a CV-and-letter dossier for one analyzed offer."""
         return self._applier.apply(
             job_id,
             form_url=form_url,
             force_regenerate=force_regenerate,
+            artifact_dir=artifact_dir,
         )
 
     # =================================================================

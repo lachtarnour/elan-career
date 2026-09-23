@@ -230,7 +230,8 @@ def ingest_command(
         )
     if source == "linkedin" and max_results is None:
         raise click.BadParameter(
-            "LinkedIn has no unlimited mode. Set --max-results below LINKEDIN_MAX_RESULTS.",
+            "LinkedIn requires a per-query limit at or below LINKEDIN_MAX_RESULTS; "
+            "the combined results have no global cap.",
             param_hint="--max-results",
         )
 

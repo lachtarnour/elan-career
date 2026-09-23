@@ -166,6 +166,36 @@ def test_source_query_shape_respects_provider_capabilities() -> None:
     assert wttj == [query]
 
 
+def test_source_query_plan_adds_doctoral_lanes_without_cdi_suffix() -> None:
+    plan = build_source_query_plan(
+        "francetravail",
+        "Data Scientist CDI",
+        include_research_cdd=True,
+    )
+
+    assert plan.primary[:4] == (
+        "Data Scientist",
+        "Data Scientist thèse",
+        "Data Scientist doctorat",
+        "Data Scientist PhD",
+    )
+    assert all(not query.endswith(" CDI") for query in plan.all_queries)
+
+
+def test_serpapi_query_plan_includes_doctoral_terms_without_contract_suffix() -> None:
+    queries = build_source_queries(
+        "serpapi",
+        "Data Scientist CDI",
+        include_research_cdd=True,
+    )
+
+    assert len(queries) == 1
+    assert "Data Scientist thèse" in queries[0]
+    assert "Data Scientist doctorat" in queries[0]
+    assert "Data Scientist PhD" in queries[0]
+    assert " CDI" not in queries[0]
+
+
 def test_unknown_custom_title_is_preserved_without_false_family_match() -> None:
     assert _family_keys("Engineering Manager") == set()
     assert expand_role_terms(["Engineering Manager"]) == ["Engineering Manager"]

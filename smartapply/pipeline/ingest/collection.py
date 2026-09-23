@@ -4,16 +4,20 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from requests import RequestException
+
 from smartapply.logging_setup import get_logger
 from smartapply.offers import RawJob
 from smartapply.pipeline.ingest.dedupe import _KnownJobIndex
 from smartapply.pipeline.ingest.reports import _CollectResult
+from smartapply.scrapers.base import ScraperConfigError, ScraperError
 
 logger = get_logger(__name__)
 
 _RAW_SEEN_MULTIPLIER = 10
 _RAW_SEEN_MIN = 50
-_STRICT_API_BUDGET_SOURCES = {"linkedin", "serpapi"}
+_STRICT_API_BUDGET_SOURCES = {"serpapi"}
+_PER_QUERY_SOURCES = {"linkedin": "LinkedIn", "francetravail": "France Travail"}
 
 
 def collect_round_robin(
@@ -31,7 +35,9 @@ def collect_round_robin(
 ) -> _CollectResult:
     """Collect primary searches, then aliases fairly within each tier.
 
-    ``max_results`` is the global target of **new** offers (not yet in
+    LinkedIn and France Travail consume every planned query with ``max_results`` as the
+    per-query API limit, without a global collection or raw-scan cap.
+    For other sources, ``max_results`` is the global target of **new** offers (not yet in
     the DB), not a per-query quota and not a raw-fetch quota. Explicit user
     searches form the primary tier. Alias iterators are only
     opened if that tier cannot supply ``max_results`` new offers. Inside each
@@ -48,6 +54,19 @@ def collect_round_robin(
     if _should_stop(stop_requested):
         logger.warning("Collection cancelled before iterator setup: source=%s", source)
         return _CollectResult([], 0, 0, False, cancelled=True)
+    source_key = (source or getattr(scraper, "name", "")).strip().lower()
+    if source_key in _PER_QUERY_SOURCES:
+        return _collect_query_batches(
+            scraper=scraper,
+            source_label=_PER_QUERY_SOURCES[source_key],
+            queries=queries,
+            location=location,
+            max_results=max_results,
+            search_kwargs=search_kwargs,
+            known_external_ids=known_external_ids,
+            known_index=known_index,
+            stop_requested=stop_requested,
+        )
     known = known_external_ids or set()
     known_jobs = known_index or _KnownJobIndex(frozenset(), frozenset())
     raw_jobs: list[RawJob] = []
@@ -190,6 +209,74 @@ def collect_round_robin(
 
 def _should_stop(stop_requested: Callable[[], bool] | None) -> bool:
     return bool(stop_requested and stop_requested())
+
+
+def _collect_query_batches(
+    *,
+    scraper,
+    source_label: str,
+    queries: list[str],
+    location: str | None,
+    max_results: int | None,
+    search_kwargs: dict,
+    known_external_ids: set[str] | None,
+    known_index: _KnownJobIndex | None,
+    stop_requested: Callable[[], bool] | None,
+) -> _CollectResult:
+    """Drain each query's responses before opening the next query.
+
+    The request limit never truncates the union of results. Recoverable
+    failures are reported while retaining earlier offers and continuing the
+    remaining queries; configuration errors stop further requests.
+    """
+    known = known_external_ids or set()
+    known_jobs = known_index or _KnownJobIndex(frozenset(), frozenset())
+    raw_jobs: list[RawJob] = []
+    seen_external_ids: set[str] = set()
+    skipped_known = 0
+    skipped_existing = 0
+    warnings: list[str] = []
+    kwargs = dict(search_kwargs)
+    if stop_requested is not None:
+        kwargs["stop_requested"] = stop_requested
+    for query in queries:
+        if _should_stop(stop_requested):
+            break
+        try:
+            for raw in scraper.search(query, location=location, max_results=max_results, **kwargs):
+                if raw.external_id not in seen_external_ids:
+                    seen_external_ids.add(raw.external_id)
+                    if raw.external_id in known:
+                        skipped_known += 1
+                    elif known_jobs.matches_external_id(raw):
+                        skipped_existing += 1
+                    else:
+                        raw_jobs.append(raw)
+                if _should_stop(stop_requested):
+                    break
+        except (ScraperError, RequestException) as exc:
+            warnings.append(
+                f"Requête {source_label} {query!r} incomplète : {exc} "
+                "Les offres déjà reçues sont conservées."
+            )
+            logger.warning("%s query failed: q=%r error=%s", source_label, query, exc)
+            response = getattr(exc, "response", None)
+            configuration_error = isinstance(exc, ScraperConfigError) or (
+                response is not None and response.status_code in {400, 401, 402, 403}
+            )
+            if configuration_error:
+                if not raw_jobs:
+                    raise
+                warnings.append(f"Les requêtes {source_label} restantes n’ont pas été lancées.")
+                break
+    return _CollectResult(
+        raw_jobs,
+        skipped_known,
+        skipped_existing,
+        False,
+        cancelled=_should_stop(stop_requested),
+        warnings=warnings,
+    )
 
 
 def _query_tiers(

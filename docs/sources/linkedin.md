@@ -13,7 +13,7 @@ LinkedIn, tout en gardant les champs bruts dans `source_data` pour audit.
 | Collecte | Actor Apify synchrone avec titre, localisation, fraîcheur, contrat, niveau et modalité. |
 | Filtre local | Utilise contrat, lieu, remote/hybrid et niveau d'expérience LinkedIn. |
 | Analyse LLM | Envoie un bloc compact : URL LinkedIn/apply, recruteur si présent, entreprise et faits structurés. |
-| Limite API | LinkedIn/Apify utilise un seul plafond global `LINKEDIN_MAX_RESULTS`, maximum `300`; pas de mode sans limite. |
+| Limite API | La valeur demandée s'applique à chaque requête LinkedIn, avec `LINKEDIN_MAX_RESULTS` comme maximum configurable (jusqu'à `300`). Aucun plafond global sur le cumul des résultats. |
 | Limite produit | Les offres `EASY_APPLY` peuvent ne pas exposer d'URL externe de candidature. |
 
 ## Configuration
@@ -26,7 +26,7 @@ LinkedIn, tout en gardant les champs bruts dans `source_data` pour audit.
 | `LINKEDIN_REMOTE` | Codes actor, par défaut `1,2,3`. |
 | `LINKEDIN_DATE_POSTED` | Fraîcheur par défaut : `any`, `today`, `3days`, `week`, `month` ou token Apify `r86400`. `3days` est élargi à `r604800`, car l'actor ne déclare pas de filtre 3 jours. |
 | `LINKEDIN_TIMEOUT` | Délai maximum d'une requête actor synchrone, par défaut `180` secondes, maximum `300`. |
-| `LINKEDIN_MAX_RESULTS` | Limite globale LinkedIn/Apify ; défaut `50`, maximum autorisé `300`. |
+| `LINKEDIN_MAX_RESULTS` | Limite par requête LinkedIn/Apify ; défaut `50`, maximum autorisé `300`. |
 
 ## Appels
 
@@ -44,7 +44,20 @@ Paramètres importants :
 | `contractType` | `LINKEDIN_CONTRACT_TYPE` ou override. |
 | `experienceLevel` | `LINKEDIN_EXPERIENCE_LEVEL` ou override. |
 | `remote` | `LINKEDIN_REMOTE` ou override. |
-| `limit` | `max_results`, sans multiplicateur de scan pour limiter l'usage Apify. |
+| `limit` | `max_results` pour chaque titre recherché, ou le complément lors du fallback d'expérience ; aucun plafond sur le cumul des titres. |
+
+Le champ « Résultats par source » de l'application est une limite **par requête**
+pour LinkedIn/Apify. Toutes les requêtes du plan sont parcourues, y compris les
+variantes de titres et les recherches doctorales. Par exemple, 21 requêtes de
+100 résultats peuvent fournir 2 100 offres avant déduplication et filtrage local.
+Chaque réponse reçue est traitée intégralement, même si l'actor dépasse la limite
+demandée. Les offres déjà connues ne consomment aucun quota global.
+
+Une erreur de requête est signalée sans perdre les offres déjà collectées ; les
+autres requêtes continuent. Une erreur de configuration arrête les requêtes
+restantes. Les POST Apify ne sont jamais relancés automatiquement : après un
+timeout, le run distant peut continuer, mais sa réponse n'a pas été reçue et
+n'est pas récupérée automatiquement.
 
 Codes OpenAPI utiles :
 

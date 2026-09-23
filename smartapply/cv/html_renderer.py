@@ -20,11 +20,9 @@ from smartapply.cv.education import education_entries_for_english
 from smartapply.cv.links import render_bullet_html
 from smartapply.cv.skill_profile import infer_skill_profile_id
 from smartapply.llm import AdaptedCV, MotivationLetter
-from smartapply.profile import Profile
+from smartapply.profile import Profile, Project
 
 TEMPLATES_DIR = Path(__file__).with_name("templates")
-MIN_PROJECTS = 2
-
 _PDF_COUNT_RE = re.compile(rb"/Count\s+(\d+)")
 
 
@@ -280,9 +278,9 @@ class HtmlApplicationRenderer:
     def _contact_items(self) -> list[dict[str, str | None]]:
         identity = self.profile.identity
         bits = [
-            {"label": identity.location, "href": None},
-            {"label": identity.phone, "href": None} if identity.phone else None,
             {"label": str(identity.email), "href": f"mailto:{identity.email}"},
+            {"label": identity.phone, "href": None} if identity.phone else None,
+            {"label": identity.location, "href": None},
             {"label": "GitHub", "href": str(identity.github)} if identity.github else None,
             {"label": "LinkedIn", "href": str(identity.linkedin)} if identity.linkedin else None,
             (
@@ -329,17 +327,14 @@ class HtmlApplicationRenderer:
         self,
         *,
         adapted: AdaptedCV,
-        project_by_id: dict[str, object],
-    ) -> list[object]:
-        """Render projects selected by the LLM, with fallback only if empty.
+        project_by_id: dict[str, Project],
+    ) -> list[Project]:
+        """Resolve the final selection in order without adding profile projects.
 
-        ``selected_project_ids`` is part of the CV/letter contract: the letter
-        is not allowed to cite projects outside that set. Adding extra projects
-        when the LLM selected one valid project makes the CV and letter drift.
-        We therefore only fall back to profile projects when the LLM selected
-        no valid project at all.
+        A historical empty selection stays empty: HTML and PDF respect the same
+        project set used to write the CV summary and motivation letter.
         """
-        selected: list[object] = []
+        selected: list[Project] = []
         seen: set[str] = set()
         for project_id in adapted.selected_project_ids:
             project = project_by_id.get(project_id)
@@ -347,34 +342,7 @@ class HtmlApplicationRenderer:
                 selected.append(project)
                 seen.add(project_id)
 
-        if selected:
-            return selected
-
-        min_projects = min(MIN_PROJECTS, len(project_by_id))
-        context = self._adapted_context(adapted)
-        remaining = [
-            project for project_id, project in project_by_id.items() if project_id not in seen
-        ]
-        remaining.sort(
-            key=lambda project: self._project_relevance(project, context),
-            reverse=True,
-        )
-        for project in remaining:
-            selected.append(project)
-            if len(selected) >= min_projects:
-                break
         return selected
-
-    @staticmethod
-    def _project_relevance(project, context: str) -> tuple[int, int]:
-        keywords = [kw.lower() for kw in getattr(project, "keywords", [])]
-        name_tokens = re.findall(r"[a-z0-9]+", getattr(project, "name", "").lower())
-        description_tokens = re.findall(r"[a-z0-9]+", getattr(project, "description", "").lower())
-        score = sum(1 for keyword in keywords if keyword and keyword in context)
-        score += sum(1 for token in name_tokens if len(token) > 2 and token in context)
-        score += sum(1 for token in description_tokens if len(token) > 4 and token in context)
-        # Stable tie-breaker that keeps source-profile order via Python's stable sort.
-        return (score, len(keywords))
 
     def _infer_skill_profile_id(self, adapted: AdaptedCV) -> str:
         return (

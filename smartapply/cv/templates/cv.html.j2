@@ -4,6 +4,21 @@
   <meta charset="utf-8">
   <title>CV - {{ profile.identity.full_name }}</title>
   <style>
+    /* Explicit local faces give the macOS PDF a genuine Medium weight. */
+    @font-face {
+      font-family: "CV Helvetica Neue";
+      src: local("HelveticaNeue");
+      font-style: normal;
+      font-weight: 400;
+    }
+
+    @font-face {
+      font-family: "CV Helvetica Neue";
+      src: local("HelveticaNeue-Medium");
+      font-style: normal;
+      font-weight: 500;
+    }
+
     @page {
       size: A4;
       margin: 10.5mm 13.5mm 9.5mm 13.5mm;
@@ -11,16 +26,17 @@
 
     * {
       box-sizing: border-box;
+      font-weight: 400;
     }
 
     :root {
       --ink: #121722;
-      --body: #242a36;
-      --muted: #5c6678;
-      --soft: #788397;
-      --rule: #dde3eb;
-      --rule-soft: #eef2f6;
-      --rule-strong: #aeb8c8;
+      --body: #202020;
+      --muted: #414141;
+      --soft: #4a4a4a;
+      --rule: #a8a8a8;
+      --rule-soft: #d0d0d0;
+      --rule-strong: #7a7a7a;
       --accent: #0f5f6b;
       --accent-dark: #083f49;
       --accent-2: #9a6420;
@@ -34,7 +50,8 @@
       min-height: calc(297mm - 20mm);
       color: var(--body);
       background: var(--paper);
-      font-family: "Aptos", "Inter", "Segoe UI", Arial, Helvetica, sans-serif;
+      font-family: "CV Helvetica Neue", "Helvetica Neue", "Aptos", "Inter", "Segoe UI", Arial, Helvetica, sans-serif;
+      font-synthesis: none;
       font-size: var(--body-size);
       line-height: var(--line-height);
       display: flex;
@@ -44,87 +61,67 @@
 
     body.cv-very-airy {
       --body-size: 10.1pt;
-      --line-height: 1.4;
-      --summary-line-height: 1.36;
-      --header-gap: 28px;
-      --summary-experience-gap: 8px;
-      --header-pad-bottom: 16px;
+      --line-height: 1.48;
+      --summary-line-height: 1.44;
       --section-gap: 18px;
       --section-title-gap: 8px;
-      --entry-gap: 13px;
-      --project-gap: 7px;
+      --entry-gap: 16px;
+      --entry-title-gap: 7px;
+      --certificate-gap: 7px;
       --bullet-gap: 6px;
-      --skill-row-gap: 7px;
-      --skill-category-gap: 1px;
       --section-justify: space-between;
     }
 
     body.cv-airy {
       --body-size: 9.75pt;
-      --line-height: 1.34;
-      --summary-line-height: 1.32;
-      --header-gap: 24px;
-      --summary-experience-gap: 7px;
-      --header-pad-bottom: 14px;
+      --line-height: 1.42;
+      --summary-line-height: 1.40;
       --section-gap: 15px;
       --section-title-gap: 7px;
-      --entry-gap: 11px;
-      --project-gap: 6px;
+      --entry-gap: 14px;
+      --entry-title-gap: 6px;
+      --certificate-gap: 6px;
       --bullet-gap: 5px;
-      --skill-row-gap: 6px;
-      --skill-category-gap: 1px;
       --section-justify: space-between;
     }
 
     body.cv-balanced {
-      --body-size: 9.35pt;
-      --line-height: 1.28;
-      --summary-line-height: 1.28;
-      --header-gap: 20px;
-      --summary-experience-gap: 6px;
-      --header-pad-bottom: 12px;
+      --body-size: 9.5pt;
+      --line-height: 1.36;
+      --summary-line-height: 1.36;
       --section-gap: 12px;
       --section-title-gap: 6px;
-      --entry-gap: 9px;
-      --project-gap: 5px;
+      --entry-gap: 12px;
+      --entry-title-gap: 5px;
+      --certificate-gap: 5px;
       --bullet-gap: 4px;
-      --skill-row-gap: 5px;
-      --skill-category-gap: 1px;
       --section-justify: space-between;
     }
 
     body.cv-compact,
     body.cv-ultra {
-      --body-size: 8.9pt;
-      --line-height: 1.22;
-      --summary-line-height: 1.22;
-      --header-gap: 16px;
-      --summary-experience-gap: 5px;
-      --header-pad-bottom: 9px;
+      --body-size: 9.5pt;
+      --line-height: 1.30;
+      --summary-line-height: 1.30;
       --section-gap: 9px;
       --section-title-gap: 5px;
-      --entry-gap: 7px;
-      --project-gap: 4px;
+      --entry-gap: 10px;
+      --entry-title-gap: 4px;
+      --certificate-gap: 4px;
       --bullet-gap: 3px;
-      --skill-row-gap: 4px;
-      --skill-category-gap: 0.9px;
       --section-justify: space-between;
     }
 
     body.cv-ultra {
-      --body-size: 8.5pt;
-      --line-height: 1.16;
-      --summary-line-height: 1.16;
-      --header-gap: 12px;
-      --summary-experience-gap: 4px;
-      --header-pad-bottom: 6px;
+      --body-size: 9.5pt;
+      --line-height: 1.24;
+      --summary-line-height: 1.24;
       --section-gap: 7px;
       --section-title-gap: 4px;
-      --entry-gap: 5px;
-      --project-gap: 3px;
+      --entry-gap: 8px;
+      --entry-title-gap: 3px;
+      --certificate-gap: 3px;
       --bullet-gap: 2px;
-      --skill-row-gap: 3px;
-      --skill-category-gap: 0.8px;
       --section-justify: space-between;
     }
 
@@ -135,9 +132,8 @@
 
     header {
       padding-top: 2px;
-      padding-bottom: var(--header-pad-bottom);
-      /* Fixed breathing room between the header and first CV section. */
-      margin-bottom: calc(var(--header-gap) + var(--summary-experience-gap));
+      /* Give the summary slightly more space before the first section. */
+      margin-bottom: calc(var(--section-gap) + 6px);
       flex-shrink: 0;
     }
 
@@ -159,21 +155,32 @@
 
     h1 {
       margin: 0;
-      font-family: "Aptos Display", "Segoe UI", Arial, Helvetica, sans-serif;
       color: var(--ink);
-      font-size: 21.4pt;
+      font-size: 18pt;
       line-height: 0.95;
-      font-weight: 780;
       letter-spacing: 0;
       white-space: nowrap;
+    }
+
+    h1,
+    .section-title {
+      font-weight: 500;
+    }
+
+    /* Keep all content labels visually identical, not just their weight. */
+    .entry-title > strong,
+    .project-row > strong,
+    .skill-label {
+      font-size: 9.5pt;
+      font-weight: 400;
+      color: #000000;
     }
 
     .headline {
       margin: 0;
       color: var(--accent-dark);
       font-size: 9.15pt;
-      line-height: 1.15;
-      font-weight: 760;
+      line-height: 1.23;
       max-width: 70mm;
       min-width: 0;
       overflow-wrap: anywhere;
@@ -188,19 +195,19 @@
     }
 
     .summary {
-      margin: 7px 0 0 0;
+      margin: 12px 0 0 0;
       max-width: 126mm;
-      color: #2d3442;
-      font-size: 9.45pt;
+      color: var(--body);
+      font-size: 9.5pt;
       line-height: var(--summary-line-height);
     }
 
     .contact {
       margin: 0;
       padding: 4px 0 4px 7mm;
-      color: var(--muted);
+      color: #000000;
       font-size: 8.75pt;
-      line-height: 1.28;
+      line-height: 1.36;
       text-align: right;
     }
 
@@ -211,8 +218,7 @@
     }
 
     .contact a {
-      color: var(--ink);
-      font-weight: 680;
+      color: inherit;
     }
 
     .sections {
@@ -238,15 +244,14 @@
       color: var(--accent-dark);
       font-size: 8.55pt;
       line-height: 1;
-      font-weight: 850;
       letter-spacing: 0;
       text-transform: uppercase;
     }
 
     .section-title::after {
       content: "";
-      height: 1.1px;
-      background: linear-gradient(90deg, var(--accent-dark) 0, var(--accent) 18mm, var(--rule-strong) 45mm, var(--rule) 78%, var(--rule-soft) 100%);
+      height: 0;
+      border-top: 0.6pt solid var(--rule-strong);
     }
 
     .section > :not(.section-title) {
@@ -255,8 +260,8 @@
 
     .entry {
       display: grid;
-      grid-template-columns: 34mm 1fr;
-      column-gap: 6.5mm;
+      grid-template-columns: 29mm 1fr;
+      column-gap: 4.5mm;
       margin-bottom: var(--entry-gap);
       break-inside: avoid;
     }
@@ -268,8 +273,7 @@
     .entry-left {
       color: var(--soft);
       font-size: 8.4pt;
-      line-height: 1.18;
-      font-weight: 520;
+      line-height: 1.26;
       white-space: pre-line;
     }
 
@@ -277,12 +281,16 @@
       margin: 0 0 2px 0;
       color: var(--muted);
       font-size: 9.25pt;
-      line-height: 1.22;
+      line-height: 1.30;
     }
 
-    .entry-title strong {
-      color: var(--ink);
-      font-weight: 790;
+    .experience-entry .entry-title {
+      margin-bottom: var(--entry-title-gap);
+    }
+
+    .education-institution {
+      font-size: var(--body-size);
+      white-space: nowrap;
     }
 
     .entry-right {
@@ -301,6 +309,10 @@
       padding-left: 10px;
     }
 
+    .bullets li:last-child {
+      margin-bottom: 0;
+    }
+
     .bullets li::before {
       content: "";
       position: absolute;
@@ -317,53 +329,27 @@
       break-inside: avoid;
     }
 
-    .skill-row {
-      display: grid;
-      grid-template-columns: 42mm 1fr;
-      column-gap: 5mm;
-      align-items: start;
-      margin: 0 0 var(--skill-row-gap) 0;
+    .skill-row,
+    .project-row {
+      margin: 0 0 var(--entry-gap) 0;
       break-inside: avoid;
     }
 
-    .skill-row + .skill-row {
-      padding-top: var(--skill-category-gap);
-    }
-
-    .skill-row:last-child {
+    .skill-row:last-child,
+    .project-row:last-child {
       margin-bottom: 0;
     }
 
-    .skill-label {
-      color: var(--accent-dark);
-      font-weight: 500;
-      font-size: 8.8pt;
-      line-height: 1.28;
-    }
-
     .skill-list {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 3px 4px;
-      color: #252b36;
-      line-height: 1;
+      color: var(--body);
     }
 
-    .skill-pill {
-      display: inline-block;
-      padding: 1.8px 5.2px;
-      border: 0.65px solid #d9e1ea;
-      border-radius: 2.5px;
-      background: linear-gradient(180deg, #ffffff 0%, var(--surface) 100%);
-      color: #202735;
-      font-size: 8.35pt;
-      line-height: 1.1;
-      white-space: nowrap;
-    }
-
-    .project-row,
     .certificates p {
-      margin: 0 0 var(--project-gap) 0;
+      margin: 0 0 var(--certificate-gap) 0;
+    }
+
+    .certificates p:last-child {
+      margin-bottom: 0;
     }
 
     .language-row {
@@ -383,7 +369,6 @@
 
     .language-name {
       color: var(--ink);
-      font-weight: 790;
     }
 
     .language-level {
@@ -412,14 +397,16 @@
       transform: rotate(45deg);
     }
 
-    .projects strong,
     .certificates strong {
       color: var(--ink);
-      font-weight: 790;
     }
 
-    .inline-link,
-    .project-link {
+    .name-link {
+      color: inherit;
+      font: inherit;
+    }
+
+    .inline-link {
       display: inline-block;
       width: 0.9em;
       height: 0.9em;
@@ -431,9 +418,7 @@
     }
 
     .inline-link::before,
-    .inline-link::after,
-    .project-link::before,
-    .project-link::after {
+    .inline-link::after {
       content: "";
       position: absolute;
       width: 0.5em;
@@ -443,14 +428,12 @@
       transform: rotate(-35deg);
     }
 
-    .inline-link::before,
-    .project-link::before {
+    .inline-link::before {
       left: 0.07em;
       top: 0.37em;
     }
 
-    .inline-link::after,
-    .project-link::after {
+    .inline-link::after {
       left: 0.35em;
       top: 0.2em;
     }
@@ -486,11 +469,11 @@
   <section class="section">
     <h2 class="section-title">Professional Experience</h2>
     {% for item in experiences %}
-    <div class="entry">
+    <div class="entry experience-entry">
       <div class="entry-left">{{ item.source.start_date }} &ndash; {{ item.source.end_date }}
 {{ item.source.location }}</div>
       <div class="entry-right">
-        <div class="entry-title"><strong>{{ item.source.title }}</strong>, {{ item.source.company }}{% if item.source.url %}<a class="inline-link" href="{{ item.source.url }}" aria-label="{{ item.source.company }} website"></a>{% endif %}</div>
+        <div class="entry-title"><strong>{{ item.source.title }}</strong>, {% if item.source.url %}<a class="name-link" href="{{ item.source.url }}">{{ item.source.company }}</a>{% else %}{{ item.source.company }}{% endif %}</div>
         <ul class="bullets">
           {% for bullet in item.bullets %}
           <li>{{ bullet.html }}</li>
@@ -510,9 +493,8 @@
       <div class="entry-left">{{ degree.start_date | default(degree.start_year, true) }} &ndash; {{ degree.end_date | default(degree.end_year, true) }}</div>
       <div class="entry-right">
         <div class="entry-title">
-          <strong>{{ degree.title }}{% if degree.field %} &ndash; {{ degree.field }}{% endif %}</strong>{% if degree.url %}<a class="inline-link" href="{{ degree.url }}" aria-label="Degree page"></a>{% endif %},
+          <strong>{% if degree.url %}<a class="name-link" href="{{ degree.url }}">{% endif %}{{ degree.title }}{% if degree.field %} &ndash; {{ degree.field }}{% endif %}{% if degree.url %}</a>{% endif %}</strong><span class="education-separator"> · </span><span class="education-institution">{{ degree.institution }}</span>
         </div>
-        <div>{{ degree.institution }}</div>
       </div>
     </div>
     {% endfor %}
@@ -524,12 +506,8 @@
     <h2 class="section-title">Skills</h2>
     {% for category in skill_categories %}
     <div class="skill-row">
-      <strong class="skill-label">{{ category.name }}</strong>
-      <span class="skill-list">
-        {% for skill in category.skills -%}
-        <span class="skill-pill">{{ skill }}</span>
-        {%- endfor %}
-      </span>
+      <strong class="skill-label">{{ category.name }}:</strong>
+      <span class="skill-list">{{ category.skills | join(' · ') }}</span>
     </div>
     {% endfor %}
   </section>
@@ -540,7 +518,7 @@
     <h2 class="section-title">Projects</h2>
     {% for project in projects %}
     <p class="project-row">
-      <strong>{{ project.name }}</strong>{% if project.url %}<a class="project-link" href="{{ project.url }}" aria-label="Project repository"></a>{% endif %}
+      <strong>{% if project.url %}<a class="name-link" href="{{ project.url }}">{{ project.name }}</a>{% else %}{{ project.name }}{% endif %}</strong>
       &nbsp;{{ project.description }}
     </p>
     {% endfor %}
@@ -552,7 +530,7 @@
     <h2 class="section-title">Languages</h2>
     <p class="language-row">
       {% for language in languages %}
-      <span class="language-item"><span class="language-name">{{ language.name }}</span><span class="language-level">{{ language.level }}</span></span>{% if not loop.last %}<span class="language-separator">/</span>{% endif %}
+      <span class="language-item"><span class="language-name">{{ language.name }}</span><span class="language-level">{{ language.level }}</span></span>{% if not loop.last %}<span class="language-separator">|</span>{% endif %}
       {% endfor %}
     </p>
   </section>
@@ -562,7 +540,7 @@
   <section class="section certificates">
     <h2 class="section-title">Certificates</h2>
     {% for certificate in certificates %}
-    <p><strong>{{ certificate.name }}</strong>{% if certificate.url %}<a class="inline-link" href="{{ certificate.url }}" aria-label="Certificate verification"></a>{% endif %} &mdash; {{ certificate.issuer }}{% if certificate.description %} &mdash; <span class="muted">{{ certificate.description }}</span>{% endif %}</p>
+    <p><strong>{% if certificate.url %}<a class="name-link" href="{{ certificate.url }}">{{ certificate.name }}</a>{% else %}{{ certificate.name }}{% endif %}</strong> &mdash; {{ certificate.issuer }}{% if certificate.description %} &mdash; <span class="muted">{{ certificate.description }}</span>{% endif %}</p>
     {% endfor %}
   </section>
   {% endif %}

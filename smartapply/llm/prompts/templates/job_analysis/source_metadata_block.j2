@@ -7,8 +7,9 @@ Rules:
 - Structured metadata complements the offer body; it must not replace concrete mission, stack, or use-case details from the body.
 - Keep concrete offer-body use cases in cv_keywords_to_include, such as demand prediction, fraud detection, sentiment analysis, business rules, reports, and data quality.
 - France Travail structured skills may supplement keywords, but must not suppress concrete mission, stack, or use-case keywords from the body.
-- Preserve important risks that still remain true after adding metadata. If the company is undisclosed, unknown, a recruiting agency with an anonymous client, or the final client is masked, keep an explicit risk.
+- Preserve offer_risks that still remain true after adding metadata. If the company is undisclosed, unknown, a recruiting agency with an anonymous client, or the final client is masked, keep an explicit offer_risk for employer/context clarity.
 - Do not infer or synthesize company facts from a URL.
 - The job description remains the primary evidence for responsibilities, skills, mission content, company_context, and offer_interest_points.
-- If metadata conflicts with the job body, prefer explicit source-provided structured facts for contract, experience, salary, and location, but do not hallucinate missing information.
+- Use explicit source-provided facts to supplement constraints for contract, experience, salary, location, education, language, work schedule, or travel. Distinguish metadata-only constraints from body facts; record conflicts in offer_risks rather than silently resolving them. extracted_location still requires explicit offer-body evidence.
+- supporting_excerpts must come verbatim from the offer body, never from this metadata block.
 {{ metadata }}

@@ -17,7 +17,7 @@ from typing import Any
 
 import requests
 
-from smartapply.config import get_settings
+from smartapply.config import get_source_settings
 from smartapply.logging_setup import get_logger
 from smartapply.offers import RawJob, make_external_id
 from smartapply.scrapers.base import Scraper, ScraperConfigError, ScraperError
@@ -132,7 +132,7 @@ class FranceTravailScraper(Scraper):
         scope: str | None = None,
         timeout: int | None = None,
     ):
-        settings = get_settings()
+        settings = get_source_settings()
         self.client_id = client_id or settings.francetravail_client_id
         self.client_secret = client_secret or settings.francetravail_client_secret
         self.scope = scope or settings.francetravail_scope
@@ -357,7 +357,10 @@ class FranceTravailScraper(Scraper):
                     results_yielded,
                 )
                 return
-            end = offset + page_size - 1
+            request_size = min(page_size, 1150 - offset)
+            if max_results is not None:
+                request_size = min(request_size, max_results - results_yielded)
+            end = offset + request_size - 1
             params: dict[str, Any] = {
                 "motsCles": query,
                 "range": f"{offset}-{end}",
@@ -430,12 +433,14 @@ class FranceTravailScraper(Scraper):
                     continue
                 yield job
                 results_yielded += 1
-                if max_results is not None and results_yielded >= max_results:
-                    return
 
-            offset += page_size
+            # Bound the request, not the response: retain every returned offer
+            # even if the API sends more rows than the requested range.
+            if max_results is not None and results_yielded >= max_results:
+                return
+            offset += request_size
             # 1149 is the maximum offset supported by FT API
-            if len(jobs) < page_size or offset > 1149:
+            if len(jobs) < request_size or offset > 1149:
                 break
 
     # -------------------- mapping --------------------

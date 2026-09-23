@@ -9,7 +9,10 @@ from smartapply.llm import AdaptedCV, JobAnalysis, MotivationLetter
 from smartapply.llm.prompts.loader import load_prompt, render_prompt
 from smartapply.profile import Profile
 
-SYSTEM = load_prompt("motivation_letter_repair/system.j2")
+
+def build_system_prompt() -> str:
+    """Load the current instructions when preparing a request."""
+    return load_prompt("motivation_letter_repair/system.j2")
 
 
 def _selected_evidence(profile: Profile, adapted_cv: AdaptedCV) -> dict[str, Any]:

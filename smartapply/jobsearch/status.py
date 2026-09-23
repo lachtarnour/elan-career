@@ -38,12 +38,6 @@ STATUS_FLOW: tuple[dict[str, Any], ...] = (
         "group": "applications",
     },
     {
-        "status": JobStatus.QUALITY_REJECTED,
-        "label": "À corriger",
-        "description": "Les documents nécessitent une correction.",
-        "group": "applications",
-    },
-    {
         "status": JobStatus.SENT,
         "label": "Envoyée",
         "description": "Candidature envoyée.",
@@ -70,6 +64,23 @@ STATUS_FLOW: tuple[dict[str, Any], ...] = (
 )
 
 STATUS_LABELS = {row["status"]: row["label"] for row in STATUS_FLOW}
+STATUS_LABELS[JobStatus.QUALITY_REJECTED] = STATUS_LABELS[JobStatus.READY_FOR_FORM_SUBMISSION]
+
+# Legacy document checks are diagnostics, not a separate application queue.
+# Keep reading their persisted value without rewriting historical records.
+READY_APPLICATION_STATUSES = frozenset(
+    {JobStatus.READY_FOR_FORM_SUBMISSION, JobStatus.QUALITY_REJECTED}
+)
+
+
+def display_status(status: str) -> str:
+    """Map internal and legacy states to their visible workflow state."""
+    if status == JobStatus.QUALITY_REJECTED:
+        return JobStatus.READY_FOR_FORM_SUBMISSION
+    if status == JobStatus.FILTERED:
+        return JobStatus.SCRAPED
+    return status
+
 
 # States exposed by the unified Offers page. ``FILTERED`` is deliberately
 # absent: it is the internal result of local filtering and is presented as
@@ -88,7 +99,5 @@ OFFER_FILTER_STATUSES = (
 
 def status_label(status: str) -> str:
     """Return the concise product label for a persisted status."""
-    if status == JobStatus.FILTERED:
-        # FILTERED is an internal marker, never a user-facing label.
-        status = JobStatus.SCRAPED
+    status = display_status(status)
     return STATUS_LABELS.get(status, status.replace("_", " ").title())

@@ -90,8 +90,8 @@ def test_application_draft_keeps_profile_and_instructions_in_cacheable_prefix() 
     assert first.index("=== STYLE") < first.index("=== JOB")
     assert (
         _common_prefix_tokens(
-            f"{application_draft.SYSTEM}\n{first}",
-            f"{application_draft.SYSTEM}\n{second}",
+            f"{application_draft.build_system_prompt()}\n{first}",
+            f"{application_draft.build_system_prompt()}\n{second}",
         )
         >= 2048
     )
@@ -122,8 +122,8 @@ def test_cv_adaptation_keeps_profile_and_instructions_in_cacheable_prefix() -> N
     assert first.index("=== STYLE") < first.index("=== JOB")
     assert (
         _common_prefix_tokens(
-            f"{cv_adaptation.SYSTEM}\n{first}",
-            f"{cv_adaptation.SYSTEM}\n{second}",
+            f"{cv_adaptation.build_system_prompt()}\n{first}",
+            f"{cv_adaptation.build_system_prompt()}\n{second}",
         )
         >= 2048
     )

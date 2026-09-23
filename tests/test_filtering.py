@@ -665,6 +665,60 @@ def test_filter_rejects_cdd_even_when_fulltime_is_visible() -> None:
     assert any("blocked_contract_type" in reason for reason in res.reasons)
 
 
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Doctorant Data Scientist",
+        "Data Scientist - Thèse CIFRE",
+        "Ph.D. Research Engineer",
+    ],
+)
+def test_filter_accepts_research_cdd_when_degree_marker_is_in_title(title: str) -> None:
+    result = JobFilter(_real_rules()).evaluate(
+        FakeJob(
+            title=title,
+            company="Acme",
+            description="Build machine-learning models with Python.",
+            location="Paris",
+            contract_type="CDD temps plein",
+        )
+    )
+
+    assert result.kept
+    assert "contract_exception:research_degree_title_cdd" in result.reasons
+    assert any("contract_ok:cdd temps plein:research_degree_title" in r for r in result.reasons)
+
+
+def test_filter_does_not_accept_cdd_when_degree_marker_is_only_in_description() -> None:
+    result = JobFilter(_real_rules()).evaluate(
+        FakeJob(
+            title="Data Scientist",
+            company="Acme",
+            description="Doctorat or PhD research environment. Build models with Python.",
+            location="Paris",
+            contract_type="CDD",
+        )
+    )
+
+    assert not result.kept
+    assert any("blocked_contract_type" in reason for reason in result.reasons)
+
+
+def test_filter_keeps_rejecting_non_cdd_contract_with_research_title() -> None:
+    result = JobFilter(_real_rules()).evaluate(
+        FakeJob(
+            title="PhD Research Engineer",
+            company="Acme",
+            description="Build machine-learning models with Python.",
+            location="Paris",
+            contract_type="Stage",
+        )
+    )
+
+    assert not result.kept
+    assert any("blocked_contract" in reason for reason in result.reasons)
+
+
 def test_filter_many_partitions_jobs() -> None:
     f = JobFilter(_real_rules())
     jobs = [

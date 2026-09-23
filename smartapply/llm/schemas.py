@@ -1,31 +1,28 @@
-"""Pydantic schemas for LLM structured outputs.
+"""Pydantic schemas for LLM outputs and assembled application documents.
 
-These define the EXACT shape we ask the model to produce — and that we
-validate after the call. Keep them small, flat, and JSON-Schema friendly
-(OpenAI strict mode rejects exotic types).
+LLM response models define exactly what the model may produce. AdaptedCV
+is the final assembled snapshot, including static profile experiences.
+Keep response models small, flat and JSON-Schema friendly for strict mode.
 """
 
 from __future__ import annotations
+
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 _strict = ConfigDict(extra="forbid")
 
 
-class JobAnalysis(BaseModel):
+class OfferAnalysis(BaseModel):
+    """Offer facts extracted without access to a candidate profile."""
+
     model_config = _strict
 
-    fit_score: float = Field(
-        default=0.5,
-        ge=0.0,
-        le=1.0,
-        description=(
-            "Overall fit of this job offer for the candidate, expressed as a number "
-            "between 0 and 1."
-        ),
-    )
     role_type: str = Field(description="Concise role label, e.g. 'Data Scientist NLP'")
-    seniority: str = Field(description="One of: junior, mid, senior, lead, manager")
+    seniority: str = Field(
+        description="Seniority supported by the offer: junior, mid, senior, lead, manager; empty if unclear"
+    )
     domain: str = Field(description="Industry / vertical the role sits in")
     main_tasks: list[str] = Field(description="3-7 concrete responsibilities, short bullets")
     required_skills: list[str] = Field(
@@ -36,15 +33,6 @@ class JobAnalysis(BaseModel):
         )
     )
     nice_to_have: list[str] = Field(description="Bonus skills appreciated but not required")
-    match_reasons: list[str] = Field(description="Why this role matches the candidate")
-    risks: list[str] = Field(
-        description=(
-            "Concrete gaps or risks for this candidate, including visible seniority, "
-            "vague/short offer text, missing skills, peripheral BI/reporting, "
-            "Data Engineering/platform, MLOps/DevOps, support/operations, Master Data, "
-            "location or company ambiguity."
-        )
-    )
     cv_keywords_to_include: list[str] = Field(
         description=(
             "Offer-grounded CV keywords visible in or strongly supported by the offer body. "
@@ -103,6 +91,62 @@ class JobAnalysis(BaseModel):
             "when only generic information is available."
         ),
     )
+    constraints: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Explicit offer constraints such as years of experience, education, contract, "
+            "working location, remote policy, languages or work authorization; "
+            "preserve mandatory versus preferred wording. Never infer candidate compatibility."
+        ),
+    )
+    supporting_excerpts: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Short exact quotes from the offer body supporting its main missions, "
+            "essential requirements, seniority and constraints. No invented or paraphrased quotes."
+        ),
+    )
+    offer_risks: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Uncertainties in the offer itself: missing detail, conflicting requirements, "
+            "unclear employer or location. No candidate-specific gaps or fit judgement."
+        ),
+    )
+
+
+class JobFitAssessment(BaseModel):
+    """The matching call cannot return or overwrite extracted offer fields."""
+
+    model_config = _strict
+
+    fit_score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Overall candidate fit from 0 to 1 using the fixed assessment rubric.",
+    )
+    match_reasons: list[str] = Field(
+        description="Concrete matches between immutable offer requirements and candidate facts."
+    )
+    risks: list[str] = Field(
+        description=(
+            "Candidate-specific gaps or uncertainties; distinguish a documented mismatch "
+            "from a skill or experience that is simply not documented."
+        )
+    )
+
+
+class JobAnalysis(OfferAnalysis, JobFitAssessment):
+    """Compatible assembled analysis, including historical single-call records."""
+
+    # Historical callers sometimes omit the score when reconstructing a document
+    # context. New fit responses use JobFitAssessment, where the score is required.
+    fit_score: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Overall fit of the offer for the candidate, between 0 and 1.",
+    )
 
 
 class AdaptedBullet(BaseModel):
@@ -114,7 +158,7 @@ class AdaptedBullet(BaseModel):
             "from the candidate profile). REQUIRED — used by validator."
         )
     )
-    text: str = Field(description="Rewritten bullet text, faithful to source")
+    text: str = Field(description="Profile bullet text copied verbatim during CV assembly")
 
 
 class AdaptedExperience(BaseModel):
@@ -131,26 +175,42 @@ class SkillSelectionBlock(BaseModel):
     skills: list[str] = Field(description="Exact display skills selected from allowed_skills")
 
 
-class AdaptedCV(BaseModel):
+class ProjectSelectionReason(BaseModel):
+    """Internal selection audit, never recruiter-facing evidence."""
+
     model_config = _strict
 
-    cv_title: str = Field(description="Headline shown under the candidate name")
-    professional_summary: str = Field(
-        description=(
-            "Offer-adapted professional summary, max 2 lines and grounded only "
-            "in the candidate profile."
-        )
+    project_id: str
+    reason: str = Field(
+        description="Concrete direct relevance or honest transferable strengths for the offer"
     )
-    selected_experiences: list[AdaptedExperience] = Field(
-        description="Experiences to keep, in order"
+    offer_evidence: str = Field(
+        description="Exact excerpt from offer main_tasks, required_skills or full description"
     )
+    complementary_value: str = Field(
+        description="Distinct contribution of a specialized project; may be empty for primary"
+    )
+
+
+class CVSelection(BaseModel):
+    """First-call output: select the CV content before writing its summary."""
+
+    model_config = _strict
+
+    # Freeze the selected content before the second call writes any summary.
     selected_project_ids: list[str] = Field(
         description=(
-            "IDs of profile projects to keep. Select 2 to 4 relevant projects "
-            "when at least 2 useful profile projects are available; include a "
-            "third or fourth project only when it adds clear value for the role."
+            "Exactly 3 unique profile project IDs in display order for new generation. "
+            "Choose the strongest direct matches, then primary projects with the best "
+            "transferable strengths. At most one specialized project with explicit offer "
+            "evidence and complementary value. Never select disabled projects or invent fit."
         )
     )
+    project_selection_reasons: list[ProjectSelectionReason] = Field(
+        default_factory=list,
+        description="Exactly one internal justification per selected project",
+    )
+    cv_title: str = Field(description="Headline shown under the candidate name")
     skills_profile_id: str = Field(
         default="",
         description=(
@@ -174,16 +234,75 @@ class AdaptedCV(BaseModel):
     )
 
 
+class CVPersonalization(CVSelection):
+    """Complete personalization retained for existing snapshots and legacy drafts."""
+
+    professional_summary: str = Field(
+        description=(
+            "Offer-adapted professional summary, max 2 lines and grounded only "
+            "in the candidate profile."
+        )
+    )
+
+
+class AssembledCV(CVSelection):
+    """Validated CV content, without a provisional professional summary."""
+
+    selected_experiences: list[AdaptedExperience] = Field(
+        description="Complete profile experiences copied verbatim in profile order"
+    )
+
+
+class AdaptedCV(CVPersonalization):
+    """Complete CV snapshot used by validation, persistence and rendering.
+
+    Never use this model as an LLM response schema. Experience descriptions
+    are supplied by the application from the approved profile.
+    """
+
+    selected_experiences: list[AdaptedExperience] = Field(
+        description="Complete profile experiences copied verbatim in profile order"
+    )
+
+
 class MotivationLetter(BaseModel):
     model_config = _strict
 
     subject: str = Field(description="Motivation letter subject line")
     body: str = Field(
         description=(
-            "220-300 words, natural and professional. Must be grounded in the "
-            "selected CV/project evidence."
+            "180-240 words in three paragraphs, centered on why the candidate wants "
+            "to join this organization and work on this role's priorities. Open with a "
+            "specific reason for applying, using short, direct, professional sentences. "
+            "Connect motivation and prospective contribution using reliable offer context "
+            "and relevant projects or experiences "
+            "when useful, with freely chosen examples and detail within the overall length, "
+            "never a CV or skills recap. Company facts follow the offer; "
+            "any past realization follows read-only experience or selected-project evidence."
         )
     )
+
+
+class ApplicationTexts(BaseModel):
+    """Second-call output; all selected CV content remains read-only."""
+
+    model_config = _strict
+
+    professional_summary: str = Field(
+        description=CVPersonalization.model_fields["professional_summary"].description
+    )
+    motivation_letter_subject: str = Field(
+        description=MotivationLetter.model_fields["subject"].description
+    )
+    motivation_letter_body: str = Field(
+        description=MotivationLetter.model_fields["body"].description
+    )
+
+    def to_motivation_letter(self) -> MotivationLetter:
+        return MotivationLetter(
+            subject=self.motivation_letter_subject,
+            body=self.motivation_letter_body,
+        )
 
 
 class MotivationLetterRepair(BaseModel):
@@ -195,6 +314,60 @@ class MotivationLetterRepair(BaseModel):
         description=(
             "Repaired motivation-letter body only. Preserve the original language "
             "and facts while correcting the single requested defect."
+        )
+    )
+
+
+class DocumentReviewIssue(BaseModel):
+    """A grounded finding, optionally paired with one exact text replacement."""
+
+    model_config = _strict
+
+    field: Literal[
+        "cv_title", "professional_summary", "motivation_letter_subject", "motivation_letter_body"
+    ] = Field(description="The existing text field containing the problem")
+    category: Literal["factual", "language", "structure", "style"] = Field(
+        description=(
+            "factual: unsupported attribution or source contradiction; language: concrete "
+            "grammar or requested-language defect. These block approval. structure and "
+            "style findings are reported separately; objective structure constraints are "
+            "also checked by the application. Style findings never authorize an automatic "
+            "replacement; never classify a stylistic preference as factual."
+        )
+    )
+    passage: str = Field(
+        description="Exact, non-empty quote; an edited passage must occur only once in its field"
+    )
+    reason: str = Field(
+        description="Concrete explanation of the problem and its relation to cited sources"
+    )
+    source_ids: list[str] = Field(
+        description=(
+            "Non-empty IDs from source_index identifying the factual records or scope "
+            "audited. Use specific relevant records when available; candidate:provided_evidence "
+            "covers an unsupported candidate claim with no relevant specific source. "
+            "A scope citation is not proof of the disputed claim or its real-world falsity."
+        )
+    )
+    replacement: str | None = Field(
+        description=(
+            "Minimal replacement for this passage only, empty string to delete it, or null "
+            "when no correction is proposed. Must be null for category=style and when "
+            "corrections are disabled. "
+            "Preserve all text outside the passage; edits must not overlap."
+        )
+    )
+
+
+class DocumentTextReview(BaseModel):
+    """Only findings and targeted edits; no full-document rewrite or CV selection edits."""
+
+    model_config = _strict
+
+    issues: list[DocumentReviewIssue] = Field(
+        description=(
+            "Demonstrated defects only, each with its scope and optional targeted correction. "
+            "Empty when none remain. Never include positive assessments or a clean verdict."
         )
     )
 
@@ -223,67 +396,17 @@ class FormQuestionAnswers(BaseModel):
     )
 
 
-class ApplicationDraft(BaseModel):
-    model_config = _strict
+class ApplicationDraft(CVPersonalization):
+    """LLM-generated personalization and letter, without experience output."""
 
-    cv_title: str = Field(description="Headline shown under the candidate name")
-    professional_summary: str = Field(
-        description=(
-            "Offer-adapted professional summary, max 2 lines and grounded only "
-            "in the candidate profile."
-        )
-    )
-    selected_experiences: list[AdaptedExperience] = Field(
-        description="Experiences to keep, in order"
-    )
-    selected_project_ids: list[str] = Field(
-        description=(
-            "IDs of profile projects to keep. Select 2 to 4 relevant projects "
-            "when at least 2 useful profile projects are available; include a "
-            "third or fourth project only when it adds clear value for the role."
-        )
-    )
-    skills_profile_id: str = Field(
-        default="",
-        description=(
-            "ID of the skill display profile to use in the CV skills section, "
-            "e.g. mixed, llm, machine_learning, reinforcement_learning, data_analyst."
-        ),
-    )
-    selected_skills: list[SkillSelectionBlock] = Field(
-        default_factory=list,
-        description=(
-            "Exact skills to display in the CV, grouped by profile skill category id. "
-            "Each skill must come from allowed_skills. Include every offer-required "
-            "skill that exists in the candidate whitelist."
-        ),
-    )
-    skills_order: list[str] = Field(
-        description="Ordered list of profile skill category ids — most relevant first"
-    )
-    warnings: list[str] = Field(
-        description="Any concern the model wants to surface to the validator"
-    )
     motivation_letter_subject: str = Field(description="Motivation letter subject line")
     motivation_letter_body: str = Field(
         description=(
             "Natural and professional motivation letter, usually 250-350 words. "
-            "Must reuse evidence from selected_experiences or selected_project_ids "
+            "Must reuse evidence from read-only profile experiences or selected_project_ids "
             "without going into project details."
         )
     )
-
-    def to_cv(self) -> AdaptedCV:
-        return AdaptedCV(
-            cv_title=self.cv_title,
-            professional_summary=self.professional_summary,
-            selected_experiences=self.selected_experiences,
-            selected_project_ids=self.selected_project_ids,
-            skills_profile_id=self.skills_profile_id,
-            selected_skills=self.selected_skills,
-            skills_order=self.skills_order,
-            warnings=self.warnings,
-        )
 
     def to_motivation_letter(self) -> MotivationLetter:
         return MotivationLetter(
