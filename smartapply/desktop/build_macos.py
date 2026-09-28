@@ -13,6 +13,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from PIL import Image
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtSvg import QSvgRenderer
@@ -31,50 +32,45 @@ APP_VERSION = "0.1.0"
 def _render_icon(output_dir: Path = BUILD_DIR) -> Path:
     source = PROJECT_ROOT / "smartapply" / "desktop" / "resources" / "app_icon.svg"
     output_dir.mkdir(parents=True, exist_ok=True)
-    iconset = output_dir / f"{BUNDLE_NAME}.iconset"
-    if iconset.exists():
-        shutil.rmtree(iconset)
-    iconset.mkdir(parents=True, exist_ok=True)
     renderer = QSvgRenderer(str(source))
     if not renderer.isValid():
         raise RuntimeError(f"Invalid SVG icon: {source}")
-    targets = {
-        "icon_16x16.png": 16,
-        "icon_16x16@2x.png": 32,
-        "icon_32x32.png": 32,
-        "icon_32x32@2x.png": 64,
-        "icon_128x128.png": 128,
-        "icon_128x128@2x.png": 256,
-        "icon_256x256.png": 256,
-        "icon_256x256@2x.png": 512,
-        "icon_512x512.png": 512,
-        "icon_512x512@2x.png": 1024,
-    }
-    for name, size in targets.items():
-        image = QImage(size, size, QImage.Format.Format_ARGB32)
-        image.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(image)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        renderer.render(painter, QRectF(0, 0, size, size))
-        painter.end()
-        if not image.save(str(iconset / name)):
-            raise RuntimeError(f"Could not write icon size {size}")
+    master = output_dir / f"{BUNDLE_NAME}-1024.png"
+    image = QImage(1024, 1024, QImage.Format.Format_ARGB32)
+    image.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    renderer.render(painter, QRectF(0, 0, 1024, 1024))
+    painter.end()
+    if not image.save(str(master)):
+        raise RuntimeError("Could not write 1024px application icon")
     output = output_dir / f"{BUNDLE_NAME}.icns"
-    try:
-        subprocess.run(
-            ["iconutil", "-c", "icns", str(iconset), "-o", str(output)],
-            check=True,
-        )
-    except subprocess.CalledProcessError:
-        # Some macOS SDK/iconutil versions reject Qt-generated iconsets even
-        # when all required sizes are present. Reuse the last valid bundle
-        # icon so an application rebuild is not blocked by presentation-only
-        # metadata.
-        previous = DIST_APP / "Contents" / "Resources" / f"{BUNDLE_NAME}.icns"
-        if not previous.exists():
-            raise
-        shutil.copy2(previous, output)
+    with Image.open(master) as rendered:
+        rendered.save(output, format="ICNS")
+    if output.read_bytes()[:4] != b"icns":
+        raise RuntimeError(f"Invalid ICNS icon generated at {output}")
     return output
+
+
+def _smoke_test_env(runtime_home: Path) -> dict[str, str]:
+    """Create an isolated runtime so a build check cannot mutate user data."""
+    env = os.environ.copy()
+    env.update(
+        {
+            "QT_QPA_PLATFORM": "offscreen",
+            "ELAN_HOME": str(runtime_home),
+            "ELAN_ENV_FILE": str(runtime_home / ".env"),
+            "DATABASE_URL": f"sqlite:///{runtime_home / 'smartapply.db'}",
+            "PROFILE_DIR": str(PROJECT_ROOT / "smartapply" / "profile" / "mock_profile"),
+            "OUTPUT_DIR": str(runtime_home / "documents"),
+            "CACHE_DIR": str(runtime_home / "cache"),
+            "LLM_PROVIDER": "mock",
+            "EMBEDDINGS_PROVIDER": "mock",
+            "OPENAI_API_KEY": "",
+            "ANTHROPIC_API_KEY": "",
+        }
+    )
+    return env
 
 
 def _portable_env(source: Path, destination: Path) -> None:
@@ -142,6 +138,7 @@ def build_bundle(*, smoke_test: bool = True) -> Path:
     # Keep the icon outside BUILD_DIR: concurrent or interrupted PyInstaller
     # cleanup must not remove it before the macOS BUNDLE phase consumes it.
     icon_workspace = tempfile.TemporaryDirectory(prefix="elan-macos-icon-")
+    pyinstaller_workspace = tempfile.TemporaryDirectory(prefix="elan-pyinstaller-")
     icon = _render_icon(Path(icon_workspace.name))
     entry = PROJECT_ROOT / "smartapply" / "desktop" / "__main__.py"
     command = [
@@ -204,17 +201,24 @@ def build_bundle(*, smoke_test: bool = True) -> Path:
         str(entry),
     ]
     try:
-        subprocess.run(command, check=True)
+        build_env = os.environ.copy()
+        build_env["PYINSTALLER_CONFIG_DIR"] = pyinstaller_workspace.name
+        subprocess.run(command, check=True, env=build_env)
     finally:
         icon_workspace.cleanup()
+        pyinstaller_workspace.cleanup()
     if not DIST_APP.exists():
         raise RuntimeError(f"PyInstaller completed without producing {BUNDLE_NAME}.app")
     _finalize_bundle_metadata()
     if smoke_test:
         executable = DIST_APP / "Contents" / "MacOS" / BUNDLE_NAME
-        env = os.environ.copy()
-        env["QT_QPA_PLATFORM"] = "offscreen"
-        subprocess.run([str(executable), "--smoke-test"], check=True, env=env, timeout=90)
+        with tempfile.TemporaryDirectory(prefix="elan-smoke-") as runtime:
+            subprocess.run(
+                [str(executable), "--smoke-test"],
+                check=True,
+                env=_smoke_test_env(Path(runtime)),
+                timeout=90,
+            )
     return DIST_APP
 
 
