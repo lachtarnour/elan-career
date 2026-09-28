@@ -44,6 +44,9 @@ token.json
 /samples/
 /output/
 /tmp/
+/test-results/
+/.backups/
+/test.ipynb
 /daily scrapper/
 /smartapply/profile/data/
 # Legacy locations for private company lists and ranking research.
