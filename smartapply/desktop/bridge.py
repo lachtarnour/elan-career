@@ -155,6 +155,7 @@ class DesktopBridge(QObject):
     analysisTopKChanged = Signal()
     shortlistTopKChanged = Signal()
     jobsChanged = Signal()
+    duplicateRelevantOnlyChanged = Signal()
     companiesChanged = Signal()
     companiesLoadingChanged = Signal()
     companiesSavingChanged = Signal()
@@ -186,6 +187,7 @@ class DesktopBridge(QObject):
         self._analysis_top_k = self.service.analysis_top_k()
         self._shortlist_top_k = self.service.shortlist_top_k()
         self._jobs: list[dict[str, Any]] = []
+        self._duplicate_relevant_only = False
         self._companies: list[dict[str, Any]] = []
         self._companies_loading = False
         self._companies_saving = False
@@ -258,6 +260,20 @@ class DesktopBridge(QObject):
     @Property("QVariantList", notify=jobsChanged)
     def jobs(self) -> list[dict[str, Any]]:
         return self._jobs
+
+    @Property(bool, notify=duplicateRelevantOnlyChanged)
+    def duplicateRelevantOnly(self) -> bool:  # noqa: N802
+        return self._duplicate_relevant_only
+
+    @Slot(bool)
+    def setDuplicateRelevantOnly(self, enabled: bool) -> None:  # noqa: N802
+        enabled = bool(enabled)
+        if enabled == self._duplicate_relevant_only:
+            return
+        self._duplicate_relevant_only = enabled
+        self.duplicateRelevantOnlyChanged.emit()
+        if self._job_status == JobStatus.DUPLICATE_REVIEW:
+            self.refreshJobs()
 
     @Property("QVariantList", notify=companiesChanged)
     def companies(self) -> list[dict[str, Any]]:
@@ -442,6 +458,9 @@ class DesktopBridge(QObject):
             status=status or None,
             sort_key=sort_key,
             sort_ascending=sort_ascending,
+            only_relevant_duplicates=(
+                self._duplicate_relevant_only if status == JobStatus.DUPLICATE_REVIEW else False
+            ),
             on_success=self._jobs_loaded,
             on_finished=self._jobs_read_finished,
         )
@@ -680,6 +699,42 @@ class DesktopBridge(QObject):
             on_success=self._process_done,
             top_k=normalized,
         )
+
+    @Slot("QVariantList")
+    def analyzeSelectedJobs(self, job_ids: list[Any]) -> None:  # noqa: N802
+        ids = self._job_ids(job_ids)
+        if not ids:
+            self.toastRequested.emit(
+                "Aucune offre sélectionnée",
+                "Sélectionnez au moins une offre à analyser.",
+                "warning",
+            )
+            return
+        self._run(
+            "Analyse de " + _count_text(len(ids), "offre", "offres"),
+            self.service.analyze_selected_jobs,
+            ids,
+            on_success=self._selected_analysis_done,
+        )
+
+    def _selected_analysis_done(self, report: dict[str, Any]) -> None:
+        analyzed = int(report.get("analyzed", 0))
+        already_analyzed = int(report.get("already_analyzed", 0))
+        errors = list(report.get("errors") or [])
+        message = _count_text(analyzed, "offre analysée", "offres analysées") + "."
+        if already_analyzed:
+            message += " " + _count_text(
+                already_analyzed,
+                "offre déjà analysée",
+                "offres déjà analysées",
+            ) + "."
+        if errors:
+            message += " Échecs : " + self._failure_details(errors)
+        kind = "warning" if errors and analyzed else ("danger" if errors else "success")
+        self._refresh_workflow()
+        self.jobSelectionClearRequested.emit()
+        self._set_activity("Analyse terminée", message, kind)
+        self.toastRequested.emit("Analyse terminée", message, kind)
 
     @Slot(int)
     def updateShortlist(self, top_k: int) -> None:  # noqa: N802
@@ -1041,7 +1096,15 @@ class DesktopBridge(QObject):
             message += ", " + _count_text(skipped, "offre ignorée", "offres ignorées")
         if failed:
             message += ", " + _count_text(failed, "échec technique", "échecs techniques")
-        warnings = list(report.get("warnings") or [])
+        duplicate_review_ids = list(report.get("duplicate_review_ids") or [])
+        if duplicate_review_ids:
+            message += ", " + _count_text(
+                len(duplicate_review_ids), "doublon à vérifier", "doublons à vérifier"
+            )
+        warnings = [
+            warning for warning in (report.get("warnings") or [])
+            if not isinstance(warning, dict) or warning.get("category") != "duplicate_review"
+        ]
         affected, corrected = _batch_review_counts(warnings)
         message += "."
         if failed:
@@ -1056,7 +1119,10 @@ class DesktopBridge(QObject):
         # Leave the archive filter and select the prepared dossier even when
         # the clicked row was an alias of a different source.
         application_ids = list(report.get("application_ids") or [])
-        if int(report.get("requested", 0)) == 1 and application_ids:
+        if duplicate_review_ids:
+            self.navigationRequested.emit("duplicates", int(duplicate_review_ids[0]))
+            self.selectJob(int(duplicate_review_ids[0]))
+        elif int(report.get("requested", 0)) == 1 and application_ids:
             self.openApplication(int(application_ids[0]))
 
     @Slot(int)

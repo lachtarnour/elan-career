@@ -29,6 +29,7 @@ from smartapply.pipeline.ingest import (
     expand_query_for_source,
     split_or_query,
 )
+from smartapply.pipeline.ingest.dedupe import _native_offer_key
 from smartapply.scrapers import ManualScraper, get_scraper
 
 logger = get_logger(__name__)
@@ -191,9 +192,19 @@ class Ingestor:
         with session_scope() as s:
             known_jobs = list(list_known_jobs(s))
             dedup_reference_jobs: list[Any] = list(known_jobs)
+            known_native_ids = set(_KnownJobIndex.from_jobs(known_jobs).native_offer_ids)
             for raw in raws:
+                probable: DuplicateCandidate | None = None
                 existing = get_job_by_external_id(s, raw.external_id)
                 existing_status = existing.status if existing is not None else None
+                native_key = _native_offer_key(raw.source, raw.source_data)
+                if existing is None and native_key is not None and native_key in known_native_ids:
+                    # Legacy France Travail rows may have a different external hash.
+                    # The source's offer ID already identifies the persisted job.
+                    skipped_existing += 1
+                    continue
+                if native_key is not None:
+                    known_native_ids.add(native_key)
                 if existing is not None and existing.canonical_job_id is not None:
                     # An already confirmed alias is source history, not a
                     # second candidate. Refresh its source payload in place
@@ -221,9 +232,17 @@ class Ingestor:
                     if matching_existing is not None and source == "manual":
                         existing = matching_existing
                         existing_status = existing.status
-                    elif source != "manual":
+                    else:
                         exact_url_job = _matching_exact_offer_url(raw, known_jobs)
-                        if exact_url_job is not None:
+                        if exact_url_job is not None and source == "manual":
+                            probable = DuplicateCandidate(
+                                job=exact_url_job,
+                                title_score=100.0,
+                                description_score=100.0,
+                                confidence=1.0,
+                                match_type="exact_url",
+                            )
+                        elif exact_url_job is not None:
                             root = _canonical_job(exact_url_job, known_jobs)
                             alias = upsert_job(
                                 s,
@@ -257,7 +276,9 @@ class Ingestor:
                 # upsert. A probable match is persisted for human review;
                 # it must not silently become a second candidate.
                 probable = (
-                    self._find_probable_duplicate(raw, dedup_reference_jobs)
+                    probable
+                    if existing is None and probable is not None
+                    else self._find_probable_duplicate(raw, dedup_reference_jobs)
                     if existing is None
                     else None
                 )
@@ -401,10 +422,25 @@ def _is_direct_offer_url(url: str | None) -> bool:
         return False
     from urllib.parse import urlsplit
 
-    path = urlsplit(value if "://" in value else f"https://{value}").path.rstrip("/")
+    parsed = urlsplit(value if "://" in value else f"https://{value}")
+    path = parsed.path.rstrip("/")
     if "/offres/recherche/detail/" in path:
         return True
-    return any(marker in path for marker in ("/jobs/", "/job/", "/vacancies/", "/vacancy/", "/offers/"))
+    segments = [segment for segment in path.split("/") if segment]
+    if parsed.netloc.endswith("linkedin.com"):
+        return len(segments) >= 3 and segments[-3:-1] == ["jobs", "view"] and segments[-1].isdigit()
+
+    generic_leafs = {
+        "alert", "alerts", "collection", "collections", "recommended",
+        "saved", "search", "results",
+    }
+    for marker in ("jobs", "job", "vacancies", "vacancy", "offers", "offer"):
+        if marker not in segments:
+            continue
+        leaf = segments[-1]
+        if leaf != marker and leaf not in generic_leafs:
+            return True
+    return False
 
 
 def _canonical_job(job: Any, known_jobs: list[Any]) -> Any:

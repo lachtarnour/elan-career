@@ -161,10 +161,11 @@ def backfill_duplicate_reviews() -> int:
         updated = 0
         for index, job in enumerate(jobs):
             review_status = job.duplicate_review_status or JobDuplicateStatus.NONE
-            if review_status != JobDuplicateStatus.NONE:
-                continue
             candidate = matcher.find_probable_duplicate(job, jobs[:index])
             if candidate is None or int(candidate.job.id) == int(job.id):
+                continue
+
+            if review_status != JobDuplicateStatus.NONE:
                 continue
             candidate_archived = bool(
                 candidate.job.archived_at or candidate.job.status == JobStatus.ARCHIVED

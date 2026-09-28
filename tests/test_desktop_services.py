@@ -24,6 +24,7 @@ from smartapply.desktop.bridge import DesktopBridge
 from smartapply.desktop.services import DesktopService
 from smartapply.desktop.source_health import SourceHealth
 from smartapply.jobsearch.workflow import APPLICATION_STATUSES
+from smartapply.pipeline.reports import AnalyzeReport
 
 
 def _job(*, external_id: str, description: str = "Description") -> int:
@@ -82,6 +83,42 @@ def test_bridge_passes_normalized_top_k_to_analysis() -> None:
 
     assert bridge.analysisTopK == 1
     assert captured["top_k"] == 1
+
+
+def test_selected_analysis_is_scoped_and_does_not_persist_a_shortlist(monkeypatch) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class FakePipeline:
+        def rank_pending(self, **kwargs):
+            calls.append(("rank", kwargs))
+
+        def analyze_jobs(self, job_ids):
+            calls.append(("analyze", list(job_ids)))
+            return AnalyzeReport(
+                requested=len(job_ids),
+                already_analyzed=0,
+                analyzed=len(job_ids),
+                skipped_missing=0,
+            )
+
+    monkeypatch.setattr("smartapply.pipeline.Pipeline", FakePipeline)
+
+    report = DesktopService().analyze_selected_jobs([8, 3, 8, 0])
+
+    assert calls == [
+        (
+            "rank",
+            {"top_k_ranked": 2, "job_ids": [8, 3], "persist_shortlist": False},
+        ),
+        ("analyze", [8, 3]),
+    ]
+    assert report == {
+        "requested": 2,
+        "already_analyzed": 0,
+        "analyzed": 2,
+        "skipped_missing": 0,
+        "errors": [],
+    }
 
 
 def test_profile_directory_is_created_at_the_active_location(

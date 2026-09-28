@@ -24,6 +24,26 @@ def _bridge():
     return bridge, notifications
 
 
+def test_restore_pending_pair_opens_duplicate_review_without_dossier_warning():
+    bridge, notifications = _bridge()
+    destinations = []
+    selected = []
+    bridge.navigationRequested.connect(lambda *args: destinations.append(args))
+    bridge.selectJob = selected.append
+    bridge._bulk_rescue_done({
+        "requested": 1,
+        "rescued": 1,
+        "generated": 0,
+        "duplicate_review_ids": [42],
+        "warnings": [{"category": "duplicate_review", "job_id": 42, "message": "À vérifier"}],
+    })
+    assert destinations == [("duplicates", 42)]
+    assert selected == [42]
+    assert "1 doublon à vérifier" in notifications[0][1]
+    assert "dossier avec des points" not in notifications[0][1]
+    assert notifications[0][2] == "warning"
+
+
 @pytest.mark.parametrize("method", ["_bulk_generation_done", "_bulk_rescue_done"])
 def test_verified_correction_alone_is_information_not_a_review_point(method):
     bridge, notifications = _bridge()
@@ -175,6 +195,15 @@ message = window.findChild(QObject, "toastMessage")
 assert title.property("maximumLineCount") == 2
 assert message.property("maximumLineCount") == 4
 assert 0 < toast.property("height") < 200, toast.property("height")
+bridge._busy = True
+bridge._busy_label = "Analyse en cours…"
+bridge.busyChanged.emit()
+QTest.qWait(250)
+busy = window.findChild(QObject, "busyTaskNotification")
+assert busy is not None
+assert busy.property("visible") is True
+assert abs(window.property("width") - busy.property("x") - busy.property("width") - 28) < 1
+assert abs(window.property("height") - busy.property("y") - busy.property("height") - 24) < 1
 raw = "text_review_invalid_correction:letter_too_long:255 " + "raw evidence " * 1000
 bridge._current_job = {
     "id": 42, "title": "Data Scientist", "status": "ready_for_form_submission",
@@ -187,6 +216,8 @@ assert page is not None, [error.toString() for error in component.errors()]
 page.setProperty("width", 1300)
 page.setProperty("height", 800)
 QTest.qWait(100)
+assert page.property("sortKey") == "filter_disposition"
+assert page.property("sortAscending") is True
 regenerate = page.findChild(QObject, "offerRegenerateAction")
 assert regenerate is not None
 assert regenerate.property("visible") is True

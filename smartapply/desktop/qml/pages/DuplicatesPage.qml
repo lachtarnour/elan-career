@@ -76,6 +76,42 @@ Item {
         PageHeader {
             Layout.fillWidth: true
             title: "Doublons"
+            Switch {
+                id: relevantOnlySwitch
+                objectName: "relevantDuplicatesOnlySwitch"
+                text: "Pertinents"
+                checked: AppBridge.duplicateRelevantOnly
+                font.pixelSize: 12
+                spacing: 8
+                Accessible.name: "Afficher seulement les doublons dont les deux offres sont pertinentes"
+                ToolTip.visible: hovered
+                ToolTip.text: "Garde les paires dont les deux offres sont classées pertinentes par le filtre local."
+                onToggled: AppBridge.setDuplicateRelevantOnly(checked)
+                indicator: Rectangle {
+                    implicitWidth: 40
+                    implicitHeight: 22
+                    x: relevantOnlySwitch.leftPadding
+                    y: parent.height / 2 - height / 2
+                    radius: height / 2
+                    color: relevantOnlySwitch.checked ? Theme.accent : Theme.surfaceMuted
+                    border.color: relevantOnlySwitch.checked ? Theme.accentBright : Theme.line
+                    Rectangle {
+                        width: 16
+                        height: 16
+                        radius: 8
+                        x: relevantOnlySwitch.checked ? parent.width - width - 3 : 3
+                        anchors.verticalCenter: parent.verticalCenter
+                        color: Theme.ink
+                    }
+                }
+                contentItem: Text {
+                    text: relevantOnlySwitch.text
+                    font: relevantOnlySwitch.font
+                    color: Theme.inkSoft
+                    verticalAlignment: Text.AlignVCenter
+                    leftPadding: relevantOnlySwitch.indicator.width + relevantOnlySwitch.spacing
+                }
+            }
             Pill {
                 text: root.rows.length + " à traiter"
                 tone: root.rows.length > 0 ? "warning" : "success"
@@ -94,7 +130,7 @@ Item {
             visible: root.rows.length === 0 && !AppBridge.jobsLoading
             EmptyState {
                 anchors.centerIn: parent
-                title: "Aucun doublon à vérifier"
+                title: AppBridge.duplicateRelevantOnly ? "Aucune paire pertinente" : "Aucun doublon à vérifier"
                 iconSource: Theme.icon("check")
             }
         }
@@ -221,7 +257,9 @@ Item {
                         EmptyState {
                             anchors.centerIn: parent
                             visible: root.visibleRows.length === 0 && !AppBridge.jobsLoading
-                            title: root.rows.length === 0 ? "Tout est traité" : "Aucun résultat"
+                            title: root.rows.length === 0
+                                ? (AppBridge.duplicateRelevantOnly ? "Aucune paire pertinente" : "Tout est traité")
+                                : "Aucun résultat"
                             iconSource: Theme.icon(root.rows.length === 0 ? "check" : "search")
                         }
                     }
@@ -438,7 +476,9 @@ Item {
                         parent: compareScroll
                         anchors.centerIn: parent
                         visible: !root.hasSelection && !AppBridge.jobsLoading && !AppBridge.jobDetailLoading
-                        title: root.rows.length === 0 ? "Aucun doublon en attente" : "Aucun rapprochement sélectionné"
+                        title: root.rows.length === 0
+                            ? (AppBridge.duplicateRelevantOnly ? "Aucune paire pertinente" : "Aucun doublon en attente")
+                            : "Aucun rapprochement sélectionné"
                         iconSource: Theme.icon(root.rows.length === 0 ? "check" : "files")
                     }
                 }
