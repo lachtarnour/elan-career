@@ -29,6 +29,36 @@ RUNTIME_HOME = Path.home() / "Library" / "Application Support" / "Elan"
 APP_VERSION = "0.1.0"
 
 
+def _running_bundle_pids(executable: Path) -> list[int]:
+    """Return processes launched from the packaged executable."""
+    pattern = rf"^{re.escape(str(executable))}( |$)"
+    result = subprocess.run(
+        ["pgrep", "-f", pattern],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 1:
+        return []
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"exit status {result.returncode}"
+        raise RuntimeError(f"Could not check whether {PRODUCT_NAME} is running: {detail}")
+    return [int(pid) for pid in result.stdout.split()]
+
+
+def _assert_bundle_not_running() -> None:
+    """Prevent PyInstaller from replacing an archive used by a live process."""
+    executable = DIST_APP / "Contents" / "MacOS" / BUNDLE_NAME
+    pids = _running_bundle_pids(executable)
+    if pids:
+        joined = ", ".join(str(pid) for pid in pids)
+        raise RuntimeError(
+            f"{PRODUCT_NAME} is still running from {DIST_APP} (PID {joined}). "
+            "Quit the application before rebuilding it. Replacing a live PyInstaller "
+            "bundle corrupts deferred module imports in that process."
+        )
+
+
 def _render_icon(output_dir: Path = BUILD_DIR) -> Path:
     source = PROJECT_ROOT / "smartapply" / "desktop" / "resources" / "app_icon.svg"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -133,6 +163,7 @@ def provision_runtime() -> str:
 def build_bundle(*, smoke_test: bool = True) -> Path:
     if sys.platform != "darwin":
         raise RuntimeError(f"{PRODUCT_NAME} can only be built on macOS.")
+    _assert_bundle_not_running()
     os.chdir(PROJECT_ROOT)
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
     # Keep the icon outside BUILD_DIR: concurrent or interrupted PyInstaller

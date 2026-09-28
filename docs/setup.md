@@ -66,6 +66,11 @@ make build
 open dist/Elan.app
 ```
 
+Quit Élan before running `make build`. The build stops with the active process ID
+if `dist/Elan.app` is still open. PyInstaller loads Python modules lazily from its
+embedded compressed archive; replacing that archive while the process is running
+can otherwise make a later action fail with a zlib `incorrect header check`.
+
 The first build provisions the runtime under `~/Library/Application Support/Elan`, copying the project configuration, profile, and database when available. Later builds preserve existing runtime data. When launching the packaged app, use its runtime configuration; the development environment overrides above are intended for source runs.
 
 The build generates the `.icns` icon from the bundled SVG and runs the packaged
