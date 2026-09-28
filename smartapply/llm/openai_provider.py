@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import TypeVar
 
+from httpx import DecodingError
 from openai import APIConnectionError, APITimeoutError, RateLimitError
 from pydantic import BaseModel, ValidationError
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -27,7 +28,12 @@ logger = get_logger(__name__)
 # Only these exception types should trigger a retry. Anything else (auth
 # failures, validation errors, bad-request) must fail fast so the caller can
 # fix the input or escalate.
-_RETRYABLE_ERRORS = (APIConnectionError, APITimeoutError, RateLimitError)
+_RETRYABLE_ERRORS = (
+    APIConnectionError,
+    APITimeoutError,
+    RateLimitError,
+    DecodingError,
+)
 
 T = TypeVar("T", bound=BaseModel)
 

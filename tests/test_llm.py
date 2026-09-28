@@ -6,7 +6,9 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+from httpx import DecodingError
 from pydantic import BaseModel
+from tenacity import wait_none
 
 from smartapply.llm import (
     JobAnalysis,
@@ -379,6 +381,33 @@ def test_build_analyzer_input_uses_manual_offer_body_without_legacy_metadata() -
         source="manual",
         source_metadata="",
     )
+
+
+# ---------------- OpenAI transport retries ----------------
+
+
+def test_openai_llm_retries_invalid_compressed_response() -> None:
+    from smartapply.llm.openai_provider import OpenAIProvider
+
+    calls = 0
+
+    class Completions:
+        @staticmethod
+        def create(**kwargs):  # noqa: ANN003
+            nonlocal calls
+            calls += 1
+            assert kwargs == {"model": "test-model"}
+            if calls < 3:
+                raise DecodingError("Error -3 while decompressing data: incorrect header check")
+            return "decoded"
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    provider = OpenAIProvider()
+    provider._client = client
+    retry_without_wait = provider._call_openai.retry_with(wait=wait_none())
+
+    assert retry_without_wait(provider, model="test-model") == "decoded"
+    assert calls == 3
 
 
 # ---------------- Cache key ----------------
