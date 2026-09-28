@@ -16,8 +16,10 @@ vert pour l’envoi, ambre pour l’archivage et les avertissements.
 - Contrôles standard : 40 px ; contrôles compacts conservés dans la page Offres.
 - Offres : partage 50/50, marge réservée au défilement, recherche extensible limitée à son panneau.
 - Tableau Offres : grille commune aux en-têtes et aux cellules, proportions calculées sur la largeur du panneau, postes et lieux sur deux lignes au maximum. Scores IA/Match neutres sans contour, sélection légère et lignes sans séparateurs décoratifs.
+- Dans la vue Nouvelle, la colonne `Filtre` remplace IA/Match, place les offres pertinentes avant les incertaines et l'action `Analyser (N)` ne traite que la sélection sans créer de shortlist persistante.
+- Doublons : le filtre `Pertinents` conserve uniquement les paires dont les deux offres ont passé le filtre local. Une republication confirmée devient principale, tandis que le dossier envoyé, les documents et l'historique des anciennes sources restent liés au groupe.
 - Zoom de l’offre : sans déplacement du titre, effet immédiat et valeur initiale de 1,15 à chaque lancement.
-- Notifications : superposées en haut, fermables, sans modifier la géométrie du contenu.
+- Notifications : toasts superposés en haut et tâche active en bas à droite, sans modifier la géométrie du contenu.
 - Profil, descriptions, diagnostics : retour à la ligne et hauteur adaptée au contenu.
 
 Les tokens partagés sont dans [`Theme.qml`](../smartapply/desktop/qml/components/Theme.qml).
