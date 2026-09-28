@@ -5,9 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import SimpleNamespace
 
-from httpx import DecodingError
-from tenacity import wait_none
-
 from smartapply.profile import get_profile
 from smartapply.ranking import (
     WEIGHTS,
@@ -67,35 +64,6 @@ def test_openai_embeddings_are_persistently_cached_and_usage_is_recorded(
         assert usage.purpose == "embeddings"
         assert usage.prompt_tokens == 9
         assert usage.cost_usd > 0
-
-
-def test_openai_embeddings_retry_invalid_compressed_response() -> None:
-    from smartapply.ranking.embeddings import OpenAIEmbeddingsProvider
-
-    calls = 0
-
-    class Embeddings:
-        @staticmethod
-        def create(**kwargs):  # noqa: ANN003
-            nonlocal calls
-            calls += 1
-            assert kwargs == {"model": "test-embedding", "input": ["offer"]}
-            if calls < 3:
-                raise DecodingError("Error -3 while decompressing data: incorrect header check")
-            return "decoded"
-
-    provider = OpenAIEmbeddingsProvider(model="test-embedding")
-    retry_without_wait = provider._create_embeddings.retry_with(wait=wait_none())
-
-    assert (
-        retry_without_wait(
-            provider,
-            SimpleNamespace(embeddings=Embeddings()),
-            ["offer"],
-        )
-        == "decoded"
-    )
-    assert calls == 3
 
 
 def test_local_embeddings_are_persistently_cached(isolated_db) -> None:

@@ -11,7 +11,6 @@ import math
 import os
 from abc import ABC, abstractmethod
 
-from httpx import DecodingError
 from openai import APIConnectionError, APITimeoutError, RateLimitError
 from sqlalchemy import select
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -24,12 +23,7 @@ from smartapply.llm.usage import estimate_cost_usd
 from smartapply.logging_setup import get_logger
 
 logger = get_logger(__name__)
-_RETRYABLE_ERRORS = (
-    APIConnectionError,
-    APITimeoutError,
-    RateLimitError,
-    DecodingError,
-)
+_RETRYABLE_ERRORS = (APIConnectionError, APITimeoutError, RateLimitError)
 
 
 class EmbeddingsProvider(ABC):
@@ -128,13 +122,7 @@ class OpenAIEmbeddingsProvider(EmbeddingsProvider):
         for start in range(0, len(missing_items), self.batch_size):
             batch_items = missing_items[start : start + self.batch_size]
             batch = [text for _, text in batch_items]
-            try:
-                response = self._create_embeddings(client, batch)
-            except DecodingError as exc:
-                raise RuntimeError(
-                    "OpenAI returned an unreadable compressed response after several attempts. "
-                    "Retry the operation; if it persists, check any VPN or network proxy."
-                ) from exc
+            response = self._create_embeddings(client, batch)
             data = sorted(
                 response.data,
                 key=lambda item: getattr(item, "index", 0),
