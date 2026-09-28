@@ -31,6 +31,7 @@ from typing import TypeVar
 from rapidfuzz import fuzz
 
 from smartapply.cv.assembly import profile_experiences
+from smartapply.cv.certificate_selection import certificate_policy_errors
 from smartapply.cv.project_selection import project_policy_errors
 from smartapply.cv.text_hygiene import evidence_metadata_warnings
 from smartapply.llm import AdaptedCV, AssembledCV, SkillSelectionBlock
@@ -156,6 +157,7 @@ class CvValidator:
 
         # ---- Projects ----
         errors.extend(project_policy_errors(cv.selected_project_ids, self.profile))
+        errors.extend(certificate_policy_errors(cv.selected_certificate_ids, self.profile))
 
         # ---- Skill categories ----
         if (

@@ -83,7 +83,11 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
         job_id = report.job_id
         job, analysis = self._load_job_analysis(job_id)
         offer_language = analysis.offer_language or "fr"
-        document_company = _document_company_label(job.company, offer_language)
+        document_company = _document_company_label(
+            job.company,
+            analysis.extracted_company_name,
+            offer_language,
+        )
 
         adapted, letter = self._generate_draft(
             job=job,

@@ -31,7 +31,7 @@ from smartapply.llm import (
     MotivationLetterRepair,
 )
 from smartapply.llm.prompts import application_draft, application_texts, cv_adaptation
-from smartapply.pipeline.apply.cv_writer import CvWriterMixin
+from smartapply.pipeline.apply.cv_writer import CvWriterMixin, _document_company_label
 from smartapply.pipeline.reports import ApplyReport
 from smartapply.profile import Degree, get_profile
 from smartapply.ranking import MockEmbeddingsProvider
@@ -213,6 +213,7 @@ def test_adapter_produces_letter_after_final_cv_and_review() -> None:
         "cv_adaptation",
         CVSelection(
             cv_title=cv.cv_title,
+            selected_certificate_ids=[],
             selected_project_ids=cv.selected_project_ids,
             project_selection_reasons=[
                 {
@@ -257,6 +258,7 @@ def test_adapter_keeps_three_final_projects_in_llm_order() -> None:
     chosen = [project.id for project in reversed(profile.projects[:3])]
     personalization = CVSelection(
         cv_title="Data Scientist",
+        selected_certificate_ids=[],
         selected_project_ids=chosen,
         project_selection_reasons=[
             {
@@ -614,6 +616,68 @@ def test_letter_renderer_uses_adapted_headline_and_fallback() -> None:
     )
 
     assert f'<p class="headline">{profile_headline}</p>' in fallback_html
+
+
+def test_experience_bullet_spacing_is_increased_by_half_for_every_layout() -> None:
+    html = HtmlApplicationRenderer(get_profile()).render_cv_html(_valid_adapted_cv())
+
+    for spacing in ("7.5px", "6px", "4.5px", "3px"):
+        assert f"--bullet-gap: {spacing};" in html
+    assert html.count("--bullet-gap: 7.5px;") == 2
+    assert "--bullet-gap: 9px;" not in html
+    assert "margin: 0 0 var(--bullet-gap) 0;" in html
+
+
+def test_very_airy_layout_uses_reduced_section_spacing() -> None:
+    html = HtmlApplicationRenderer(get_profile()).render_cv_html(_valid_adapted_cv())
+
+    very_airy = html.split("body.cv-very-airy {", maxsplit=1)[1].split("}", maxsplit=1)[0]
+    assert "--section-gap: 15px;" in very_airy
+    assert "--section-title-gap: 7px;" in very_airy
+    assert "--bullet-gap: 7.5px;" in very_airy
+
+
+def test_balanced_layout_uses_thirteen_and_a_half_pixel_section_gap() -> None:
+    html = HtmlApplicationRenderer(get_profile()).render_cv_html(_valid_adapted_cv())
+
+    balanced = html.split("body.cv-balanced {", maxsplit=1)[1].split("}", maxsplit=1)[0]
+    assert "--section-gap: 13.5px;" in balanced
+
+
+def test_dense_layouts_keep_readable_line_height_and_configured_section_gaps() -> None:
+    html = HtmlApplicationRenderer(get_profile()).render_cv_html(_valid_adapted_cv())
+
+    compact_and_ultra, ultra = html.split("body.cv-ultra {", maxsplit=2)[1:]
+    assert "--line-height: 1.36;" in compact_and_ultra
+    assert "--summary-line-height: 1.36;" in compact_and_ultra
+    assert "--section-gap: 10.5px;" in compact_and_ultra
+    assert "--line-height: 1.36;" in ultra
+    assert "--summary-line-height: 1.36;" in ultra
+    assert "--section-gap: 5px;" in ultra
+
+
+@pytest.mark.parametrize(
+    ("job_company", "extracted_company_name", "language", "expected"),
+    [
+        ("Acme", "Acme", "fr", "Acme"),
+        ("Acme", "", "fr", "Entreprise non communiquée"),
+        ("Agence", "Entreprise non communiquée", "fr", "Entreprise non communiquée"),
+        (
+            "l'entreprise est inconnue ne pretends pas savoir le nom",
+            "",
+            "fr",
+            "Entreprise non communiquée",
+        ),
+        ("Recruiter", "Unknown company", "en", "Company not disclosed"),
+    ],
+)
+def test_document_company_label_hides_anonymous_placeholders(
+    job_company: str,
+    extracted_company_name: str,
+    language: str,
+    expected: str,
+) -> None:
+    assert _document_company_label(job_company, extracted_company_name, language) == expected
 
 
 @pytest.mark.parametrize("filename_candidate_name", [None, "Nour Lachtar"])

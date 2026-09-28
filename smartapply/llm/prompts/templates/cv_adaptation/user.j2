@@ -20,6 +20,9 @@ experiences (read-only context; inserted verbatim by the application, never gene
 Project catalogue (selection_policy is internal metadata; these projects are candidates, not a final selection):
 {{ projects_block }}
 
+Certificate catalogue (candidates, not a final selection):
+{{ certificates_block }}
+
 === STYLE ===
 The style guidance below applies only to generated fields. It never authorizes changes to the static experience descriptions.
 Tone: {{ tone }}
@@ -37,7 +40,9 @@ Do:
 Don't:
   - {{ dont }}
 
-Produce JSON conforming to CVSelection: selected_project_ids, project_selection_reasons, cv_title, skills_profile_id, selected_skills, skills_order, warnings. Do not return experiences, experience IDs or rewritten bullets. Use experience evidence only as context for generated fields.
+Produce JSON conforming to CVSelection: selected_project_ids, selected_certificate_ids, project_selection_reasons, cv_title, skills_profile_id, selected_skills, skills_order, warnings. Do not return experiences, experience IDs or rewritten bullets. Use experience evidence only as context for generated fields.
+
+Certificate output rule: select 0 to 2 distinct IDs from the certificate catalogue in display order. Include a certificate only when it strengthens this application; return [] when none is relevant. Never invent a certificate.
 
 Project output rule:
 - Decide selected_project_ids first: exactly 3 unique projects, with a minimum and maximum of 3.

@@ -6,6 +6,7 @@ import re
 from datetime import date
 from typing import Any
 
+from smartapply.company_identity import is_anonymous_company
 from smartapply.cv.letter_writer import OBJECTIVE_TEXT_WARNING_PREFIXES, ApplicationTextWriter
 from smartapply.cv.motivation_validator import normalize_french_elisions
 from smartapply.cv.role_family import (
@@ -82,26 +83,23 @@ _ROLE_PHRASES = (
     "time series",
 )
 
-_ANONYMOUS_COMPANY_MARKERS = (
-    "confidentiel",
-    "non communiqu",
-    "anonyme",
-)
-
-
 def _norm(text: str | None) -> str:
     return " ".join((text or "").lower().replace("’", "'").split())
 
 
 def _is_anonymous_company(name: str | None) -> bool:
-    lowered = _norm(name)
-    return not lowered or any(marker in lowered for marker in _ANONYMOUS_COMPANY_MARKERS)
+    return is_anonymous_company(name)
 
 
-def _document_company_label(company: str | None, language: str) -> str:
-    if not _is_anonymous_company(company):
-        return (company or "").strip()
-    return "l'entreprise recruteuse" if language == "fr" else "the hiring company"
+def _document_company_label(
+    _job_company: str | None,
+    extracted_company_name: str | None,
+    language: str,
+) -> str:
+    """Use only the hiring entity confirmed by offer analysis."""
+    if not _is_anonymous_company(extracted_company_name):
+        return (extracted_company_name or "").strip()
+    return "Entreprise non communiquée" if language == "fr" else "Company not disclosed"
 
 
 def _word_anchors(text: str) -> set[str]:

@@ -64,6 +64,17 @@ def _format_projects(projects: list[Project]) -> str:
     return "\n".join(out)
 
 
+def _format_certificates(profile: Profile) -> str:
+    return (
+        "\n".join(
+            f"- id={cert.id} :: {cert.name} — {cert.issuer}"
+            + (f" — {cert.description}" if cert.description else "")
+            for cert in profile.certificates
+        )
+        or "- none"
+    )
+
+
 def _format_skill_catalog(profile: Profile) -> str:
     lines: list[str] = []
     for category in profile.skills.categories:
@@ -129,6 +140,7 @@ def build_user_prompt(
         summary_source=profile.identity.summary,
         experiences_block=_format_experiences(selected_experiences),
         projects_block=_format_projects(selected_projects),
+        certificates_block=_format_certificates(profile),
         tone=style.tone,
         voice=style.voice,
         do=do,

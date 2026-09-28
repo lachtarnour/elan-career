@@ -18,12 +18,14 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
+from smartapply.cv.certificate_selection import selected_certificates
 from smartapply.cv.education import EducationDisplay, education_entries_for_english
 from smartapply.cv.links import split_bullet_with_links
 from smartapply.cv.skill_profile import infer_skill_profile_id
 from smartapply.llm import AdaptedCV
 from smartapply.profile import (
     BulletLink,
+    Certificate,
     Profile,
     Project,
     TemplateStyle,
@@ -114,8 +116,11 @@ class CvDocxRenderer:
             self._write_section(doc, "Projects", lambda: self._write_projects(doc, adapted))
         if self.profile.languages:
             self._write_section(doc, "Languages", lambda: self._write_languages(doc))
-        if self.profile.certificates:
-            self._write_section(doc, "Certificates", lambda: self._write_certificates(doc))
+        certificates = selected_certificates(self.profile, adapted.selected_certificate_ids)
+        if certificates:
+            self._write_section(
+                doc, "Certificates", lambda: self._write_certificates(doc, certificates)
+            )
         return doc
 
     def save(self, adapted: AdaptedCV, path: str | Path) -> Path:
@@ -378,8 +383,8 @@ class CvDocxRenderer:
         r = p.add_run(" | ".join(bits))
         r.font.size = Pt(self.style.body_font_size)
 
-    def _write_certificates(self, doc: DocxDocument) -> None:
-        for cert in self.profile.certificates:
+    def _write_certificates(self, doc: DocxDocument, certificates: list[Certificate]) -> None:
+        for cert in certificates:
             p = doc.add_paragraph()
             r1 = p.add_run(cert.name)
             r1.bold = False

@@ -6,6 +6,7 @@ import pytest
 
 from smartapply.cv.adapter import CvAdapter
 from smartapply.cv.assembly import assemble_cv
+from smartapply.cv.certificate_selection import certificate_policy_errors
 from smartapply.cv.project_selection import validate_project_selection
 from smartapply.cv.role_contracts import apply_contract
 from smartapply.cv.selector import CvBlockSelector
@@ -57,6 +58,7 @@ def inputs():
 def draft(ids):
     return CVSelection(
         cv_title="Data Scientist",
+        selected_certificate_ids=[],
         selected_project_ids=ids,
         project_selection_reasons=[
             {
@@ -298,6 +300,77 @@ def test_normal_generation_uses_one_call_and_preserves_reasons_in_snapshot(input
     assert type(cv).model_validate_json(cv.model_dump_json()) == cv
 
 
+@pytest.mark.parametrize("count", [0, 1, 2])
+def test_valid_certificate_counts_use_the_project_selection_call(inputs, count):
+    profile, analysis = inputs
+    ids = [certificate.id for certificate in profile.certificates[:count]]
+    response = draft(["main1", "main2", "main3"]).model_copy(
+        update={"selected_certificate_ids": ids}
+    )
+    provider = SequenceProvider([response])
+
+    cv, _ = CvAdapter(profile, provider, MockEmbeddingsProvider()).adapt(
+        analysis, job_title="Data Scientist", job_company="Example"
+    )
+
+    assert len(provider.calls) == 1
+    assert cv.selected_certificate_ids == ids
+    assert certificate_policy_errors(ids, profile) == []
+
+
+@pytest.mark.parametrize(
+    ("ids", "error"),
+    [
+        (["missing"], "unknown_certificate_id:missing"),
+        (["cert_rag_dlai", "cert_rag_dlai"], "duplicate_certificate_id:cert_rag_dlai"),
+        (["cert_rag_dlai", "cert_foundation_langchain", "missing"], "too_many_certificates:max=2"),
+    ],
+)
+def test_invalid_certificate_selection_retries_with_same_cv_schema(inputs, ids, error):
+    profile, analysis = inputs
+    project_ids = ["main1", "main2", "main3"]
+    first = draft(project_ids).model_copy(update={"selected_certificate_ids": ids})
+    final = draft(project_ids).model_copy(update={"selected_certificate_ids": []})
+    provider = SequenceProvider([first, final])
+
+    cv, _ = CvAdapter(profile, provider, MockEmbeddingsProvider()).adapt(
+        analysis, job_title="Data Scientist", job_company="Example"
+    )
+
+    assert [call["purpose"] for call in provider.calls] == ["cv_adaptation"] * 2
+    assert [call["schema"] for call in provider.calls] == [CVSelection] * 2
+    assert error in provider.calls[1]["user"]
+    assert provider.calls[1]["refresh_cache"] is True
+    assert cv.selected_certificate_ids == []
+
+
+def test_second_invalid_certificate_selection_stops_generation(inputs):
+    profile, analysis = inputs
+    invalid = draft(["main1", "main2", "main3"]).model_copy(
+        update={"selected_certificate_ids": ["missing"]}
+    )
+    provider = SequenceProvider([invalid, invalid])
+    with pytest.raises(LLMError, match="unknown_certificate_id:missing"):
+        CvAdapter(profile, provider, MockEmbeddingsProvider()).adapt(
+            analysis, job_title="Data Scientist", job_company="Example"
+        )
+    assert len(provider.calls) == 2
+
+
+def test_final_cv_validator_rejects_invalid_certificate_ids_without_rewriting(inputs):
+    profile, _ = inputs
+    invalid = draft(["main1", "main2", "main3"]).model_copy(
+        update={"selected_certificate_ids": ["missing"]}
+    )
+    cv = assemble_cv(invalid, profile)
+    validator = CvValidator(profile)
+
+    assert "unknown_certificate_id:missing" in validator.validate(cv).errors
+    fixed, _ = validator.auto_fix(cv)
+    assert fixed.selected_certificate_ids == ["missing"]
+    assert "unknown_certificate_id:missing" in validator.validate(fixed).errors
+
+
 @pytest.mark.parametrize("initial_ids", [[], ["main1"], ["main1", "main2"]])
 def test_short_selection_retries_complete_personalization(inputs, initial_ids):
     profile, analysis = inputs
@@ -374,6 +447,7 @@ def test_first_structured_output_selects_evidence_without_generating_summary():
     assert fields.index("selected_project_ids") < fields.index("project_selection_reasons")
     assert "professional_summary" not in fields
     assert "project_selection_reasons" in schema["required"]
+    assert "selected_certificate_ids" in schema["required"]
 
 
 def test_auto_fix_never_silently_removes_selected_project(inputs):

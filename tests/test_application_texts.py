@@ -30,6 +30,7 @@ def text_inputs():
     profile = get_profile().model_copy(deep=True)
     cv = AssembledCV(
         cv_title="Data Scientist",
+        selected_certificate_ids=[],
         selected_experiences=profile_experiences(profile),
         selected_project_ids=["proj_evidence_rag", "proj_ner_camembert", "proj_smartapply"],
         skills_profile_id="mixed",

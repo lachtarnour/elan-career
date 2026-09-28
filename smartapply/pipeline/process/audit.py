@@ -2,13 +2,8 @@
 
 from __future__ import annotations
 
+from smartapply.company_identity import is_anonymous_company
 from smartapply.jobsearch.archive_reasons import decisive_rejection_reasons
-
-_ANONYMOUS_COMPANY_MARKERS = (
-    "non communiqu",  # "Entreprise non communiquée"
-    "confidentiel",
-    "anonyme",
-)
 
 _INTERMEDIARY_COMPANY_MARKERS = (
     "forums talents handicap",
@@ -50,10 +45,7 @@ def _rejection_audit_components(stage: str, reasons: list[str]) -> dict[str, obj
 
 
 def _is_anonymous_company(name: str | None) -> bool:
-    if not name:
-        return True
-    lowered = name.lower()
-    return any(marker in lowered for marker in _ANONYMOUS_COMPANY_MARKERS)
+    return is_anonymous_company(name)
 
 
 def _should_replace_job_company(current: str | None, extracted: str | None) -> bool:

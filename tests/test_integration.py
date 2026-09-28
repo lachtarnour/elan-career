@@ -154,6 +154,7 @@ def _register_llm_fixtures() -> None:
         "cv_adaptation",
         CVSelection(
             cv_title="Data Scientist – NLP & Multimodal AI",
+            selected_certificate_ids=[],
             selected_project_ids=[
                 "proj_evidence_rag",
                 "proj_ner_camembert",

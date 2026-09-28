@@ -78,6 +78,7 @@ def _register_llm_responses() -> None:
         "cv_adaptation",
         CVSelection(
             cv_title="Data Scientist – NLP & Multimodal AI",
+            selected_certificate_ids=[],
             selected_project_ids=["proj_evidence_rag", "proj_ner_camembert", "proj_smartapply"],
             project_selection_reasons=[
                 {

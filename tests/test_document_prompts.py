@@ -152,7 +152,10 @@ def _assembled_inputs(source_documents):
     return {
         **source_documents,
         "adapted_cv": AssembledCV.model_validate(
-            source_documents["adapted_cv"].model_dump(exclude={"professional_summary"})
+            {
+                **source_documents["adapted_cv"].model_dump(exclude={"professional_summary"}),
+                "selected_certificate_ids": [],
+            }
         ),
     }
 

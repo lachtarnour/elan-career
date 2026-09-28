@@ -74,6 +74,14 @@ def test_catalogue_exposes_fixed_selection_policy_without_mutating_profile(
     assert selection_inputs["profile"].model_dump() == before
 
 
+def test_cv_selection_prompt_exposes_certificates_without_extra_call(selection_inputs):
+    prompt = cv_adaptation.build_user_prompt(**selection_inputs)
+    for certificate in selection_inputs["profile"].certificates:
+        assert f"id={certificate.id} :: {certificate.name}" in prompt
+    assert "select 0 to 2 distinct IDs" in prompt
+    assert "return [] when none is relevant" in prompt
+
+
 @pytest.mark.parametrize("builder", [cv_adaptation, application_draft])
 def test_full_offer_is_available_for_exact_evidence_only_after_cacheable_prefix(
     builder, selection_inputs
@@ -179,7 +187,7 @@ def test_selection_audit_stays_out_of_letter_and_independent_review_sources(sele
     assert evidence["bullets"]
 
     assembled = AssembledCV.model_validate(
-        adapted.model_dump(exclude={"professional_summary"})
+        {**adapted.model_dump(exclude={"professional_summary"}), "selected_certificate_ids": []}
     )
     prompts = [
         motivation_letter.build_user_prompt(**shared),
