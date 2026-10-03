@@ -36,6 +36,11 @@ non analysée reste une intention annulable jusqu’au succès de l’analyse.
 Les changements enregistrés regroupent les actualisations sur 200 ms ; la progression
 ne recharge pas les listes. Chaque vue conserve une seule lecture active et la dernière
 demande suivante. Les listes conservent leur limite, leur sélection et leur défilement.
+Une actualisation du même contexte garde la liste et le détail utilisables ; le masque
+de chargement reste réservé au premier affichage et aux changements de requête ou
+d’offre. Au retour sur Offres, la recherche, le filtre, le tri, les sélections et le
+défilement sont conservés, y compris après consultation de Doublons. Une ouverture
+explicite de dossier prend la priorité sur cette restauration.
 Les diagnostics des fournisseurs sont conservés cinq minutes et renouvelés sur demande
 ou après modification de configuration.
 

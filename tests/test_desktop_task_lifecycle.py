@@ -270,3 +270,112 @@ def test_late_application_open_does_not_override_a_newer_selection(bridge):
     while bridge._read_pool.pending:
         bridge._read_pool.finish_next()
     assert bridge.currentJob["id"] == 2 and selected == []
+
+
+@pytest.mark.parametrize("rows", [[], [{"id": 1, "title": "Displayed offer"}]])
+def test_refresh_of_loaded_query_keeps_content_visible_even_when_empty(bridge, rows):
+    bridge.service.list_jobs = lambda **kwargs: rows
+    bridge._selected_job_id = 1
+    bridge.loadJobs("Python", "scraped", "published_date", False)
+    assert bridge.jobsLoading
+    bridge._read_pool.finish_next()
+    assert not bridge.jobsLoading
+    displayed = bridge.jobs.copy()
+
+    bridge.refreshJobs()
+
+    assert not bridge.jobsLoading and bridge.jobs == displayed
+    bridge._read_pool.finish_next()
+    assert not bridge.jobsLoading and bridge.jobs == displayed
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        ("B", "duplicate_review", "duplicate_confidence", False, True),
+        ("A", "scraped", "duplicate_confidence", False, True),
+        ("A", "duplicate_review", "title", False, True),
+        ("A", "duplicate_review", "duplicate_confidence", True, True),
+        ("A", "duplicate_review", "duplicate_confidence", False, False),
+    ],
+)
+def test_loading_tracks_applied_query_until_new_context_is_displayed(bridge, changed):
+    bridge.service.list_jobs = lambda **kwargs: [{"id": 1, "title": repr(kwargs)}]
+    bridge._selected_job_id = 1
+    bridge._duplicate_relevant_only = True
+    bridge.loadJobs("A", "duplicate_review", "duplicate_confidence", False)
+    bridge._read_pool.finish_next()
+    displayed = bridge.jobs.copy()
+    search, status, sort_key, ascending, relevant_only = changed
+    bridge._duplicate_relevant_only = relevant_only
+
+    bridge.loadJobs(search, status, sort_key, ascending)
+    bridge.refreshJobs()
+
+    assert bridge.jobsLoading and bridge.jobs == displayed
+    bridge._read_pool.finish_next()
+    assert bridge.jobsLoading and bridge.jobs == displayed
+    bridge._read_pool.finish_next()
+    assert not bridge.jobsLoading and bridge.jobs != displayed
+
+
+def test_return_to_displayed_query_ignores_late_other_list_result(bridge):
+    bridge.service.list_jobs = lambda **kwargs: [{"id": 1, "title": kwargs["search"]}]
+    bridge._selected_job_id = 1
+    bridge.loadJobs("A", "scraped", "title", True)
+    bridge._read_pool.finish_next()
+    displayed = bridge.jobs.copy()
+
+    bridge.loadJobs("B", "scraped", "title", True)
+    assert bridge.jobsLoading
+    bridge.loadJobs("A", "scraped", "title", True)
+
+    assert not bridge.jobsLoading and bridge.jobs == displayed
+    bridge._read_pool.finish_next()
+    assert not bridge.jobsLoading and bridge.jobs == displayed
+    bridge._read_pool.finish_next()
+    assert not bridge.jobsLoading and bridge.jobs == displayed
+
+
+def test_offer_loading_compares_displayed_id_and_ignores_late_other_offer(bridge):
+    bridge.service.get_job = lambda job: {"id": job}
+    bridge._selected_job_id = 1
+    bridge._current_job = {"id": 1}
+    bridge.selectJob(2)
+    assert bridge.jobDetailLoading and bridge.currentJob["id"] == 1
+    bridge.refreshSelectedJob()
+    assert bridge.jobDetailLoading and bridge.currentJob["id"] == 1
+
+    bridge.selectJob(1)
+
+    assert not bridge.jobDetailLoading and bridge.currentJob["id"] == 1
+    bridge._read_pool.finish_next()
+    assert not bridge.jobDetailLoading and bridge.currentJob["id"] == 1
+    bridge._read_pool.finish_next()
+    assert not bridge.jobDetailLoading and bridge.currentJob["id"] == 1
+
+
+@pytest.mark.parametrize("refresh", ["direct", "selected_action", "database_change"])
+def test_passive_detail_refresh_preserves_pending_application_navigation(bridge, refresh):
+    routes = []
+    bridge._selected_job_id = 1
+    bridge._current_job = {"id": 1}
+    bridge.service.get_application = lambda app: SimpleNamespace(job_id=2, status="sent")
+    bridge.service.get_job = lambda job: {"id": job}
+    bridge.navigationRequested.connect(lambda *args: routes.append(args))
+    bridge.openApplication(7)
+
+    if refresh == "direct":
+        bridge.refreshSelectedJob()
+    elif refresh == "selected_action":
+        bridge._refresh_selected(1)
+    else:
+        bridge._active_route = "jobs"
+        bridge._dirty_views.add("detail")
+        bridge._flush_refresh()
+
+    assert not bridge.jobDetailLoading and bridge.currentJob["id"] == 1
+    while bridge._read_pool.pending:
+        bridge._read_pool.finish_next()
+    assert routes == [("jobs?status=sent", 2)]
+    assert bridge.currentJob["id"] == 2 and not bridge.jobDetailLoading

@@ -9,11 +9,16 @@ Item {
     signal navigateRequested(string route)
     signal filterChanged(string status)
 
-    property int selectedId: AppBridge.currentJob.id || 0
+    property int selectedId: displayedJobId
+    property bool activeView: visible
+    property real savedListScrollY: 0
+    property bool returningToOffers: false
+    property bool restoreListScroll: false
     // A generated application is displayed as part of its offer. This keeps
     // the offer list and the application tracking state in one workspace.
     property var applicationData: AppBridge.currentJob.application || ({})
     property int displayedJobId: 0
+    readonly property bool detailMatchesSelection: displayedJobId === Number(AppBridge.currentJob.id || 0)
     property int notesApplicationId: 0
     property bool loadingNoteText: false
     property var noteDrafts: ({})
@@ -297,6 +302,7 @@ Item {
         selectedJobs = next
     }
     function sortBy(key) {
+        restoreListScroll = false
         if (sortKey === key) sortAscending = !sortAscending
         else {
             sortKey = key
@@ -314,24 +320,51 @@ Item {
         if (!statusFilter) return
         var index = statusFilter.indexOfValue(requestedFilter)
         if (index < 0) return
-        filterStatus = requestedFilter
-        useDefaultSortForStatus(requestedFilter)
+        if (filterStatus !== requestedFilter) {
+            filterStatus = requestedFilter
+            useDefaultSortForStatus(requestedFilter)
+            clearSelection()
+            savedListScrollY = 0
+            restoreListScroll = false
+        }
         statusFilter.currentIndex = index
+    }
+
+    function refreshOffers(jobId) {
+        applyRequestedFilter()
+        searchTimer.stop()
+        restoreListScroll = returningToOffers && !jobId
+        returningToOffers = false
+        AppBridge.loadJobs(searchField.text, filterStatus, sortKey, sortAscending)
+        var target = Number(jobId || displayedJobId)
+        if (target) AppBridge.selectJob(target)
+        else updateSelectedDetail()
     }
 
     onRequestedFilterChanged: applyRequestedFilter()
     Component.onCompleted: {
         applyRequestedFilter()
-        updateSelectedDetail()
+        if (activeView) updateSelectedDetail()
     }
-    onVisibleChanged: if (!visible) flushNotes()
+    onActiveViewChanged: {
+        if (!activeView && jobsTable) {
+            restoreListScroll = false
+            savedListScrollY = jobsTable.contentY
+            returningToOffers = true
+            searchTimer.stop()
+            flushNotes()
+        }
+    }
     Component.onDestruction: if (AppBridge) flushNotes()
     Timer {
         id: searchTimer
+        objectName: "offerSearchDebounce"
         interval: 260
         onTriggered: {
-            root.clearSelection()
-            AppBridge.loadJobs(searchField.text, statusFilter.currentValue || "", root.sortKey, root.sortAscending)
+            if (root.activeView) {
+                root.clearSelection()
+                AppBridge.loadJobs(searchField.text, statusFilter.currentValue || "", root.sortKey, root.sortAscending)
+            }
         }
     }
 
@@ -344,7 +377,17 @@ Item {
     Connections {
         target: AppBridge
         function onJobSelectionClearRequested() { root.clearSelection() }
-        function onCurrentJobChanged() { root.updateSelectedDetail() }
+        function onCurrentJobChanged() { if (root.activeView) root.updateSelectedDetail() }
+        function onJobsChanged() {
+            if (!root.activeView || !root.restoreListScroll) return
+            Qt.callLater(function() {
+                if (root.activeView && root.restoreListScroll) {
+                    jobsTable.forceLayout()
+                    jobsTable.contentY = root.savedListScrollY
+                    root.restoreListScroll = false
+                }
+            })
+        }
         function onNotesFlushRequested() { root.flushNotes() }
         function onApplicationNotesSaved(applicationId, revision) {
             var draft = root.noteDrafts[String(applicationId)]
@@ -402,6 +445,7 @@ Item {
                         model: AppBridge.jobStatuses
                         currentIndex: Math.max(0, indexOfValue(root.filterStatus))
                         onActivated: {
+                            root.restoreListScroll = false
                             root.filterStatus = currentValue
                             root.useDefaultSortForStatus(currentValue)
                             root.filterChanged(currentValue)
@@ -468,7 +512,10 @@ Item {
                             font.pixelSize: 12
                             iconSource: Theme.icon("search")
                             placeholderText: "Entreprise, poste, ville…"
-                            onTextChanged: searchTimer.restart()
+                            onTextChanged: {
+                                root.restoreListScroll = false
+                                searchTimer.restart()
+                            }
                             onActiveFocusChanged: {
                                 if (!activeFocus && text.length === 0)
                                     searchCollapseTimer.restart()
@@ -699,6 +746,7 @@ Item {
                             }
                             ListView {
                                 id: jobsTable
+                                objectName: "offerListViewport"
                                 anchors.fill: parent
                                 anchors.margins: 4
                                 visible: AppBridge.jobs.length > 0
@@ -707,6 +755,7 @@ Item {
                                 reuseItems: true
                                 cacheBuffer: 420
                                 boundsBehavior: Flickable.StopAtBounds
+                                onMovementStarted: root.restoreListScroll = false
                                 model: AppBridge.jobsModel || root.sortedJobs
                                 ScrollBar.vertical: AppScrollBar { objectName: "offerTableScrollBar" }
                                 delegate: Rectangle {
@@ -818,6 +867,7 @@ Item {
                                 }
                             }
                             Rectangle {
+                                objectName: "offerListLoadingOverlay"
                                 anchors.fill: parent
                                 visible: AppBridge.jobsLoading
                                 color: "#B60F0D16"
@@ -861,13 +911,15 @@ Item {
                     anchors.topMargin: 0
                     anchors.bottomMargin: 0
                     EmptyState {
-                        visible: !AppBridge.currentJob.id
+                        visible: !AppBridge.currentJob.id || !root.detailMatchesSelection
                         anchors.centerIn: parent
                         iconSource: Theme.icon("briefcase")
-                        title: "Aucune offre sélectionnée"
+                        title: root.selectedId ? "Offre indisponible" : "Aucune offre sélectionnée"
                     }
                     ColumnLayout {
-                        visible: Boolean(AppBridge.currentJob.id)
+                        objectName: "offerDetailContent"
+                        visible: Boolean(AppBridge.currentJob.id) && root.detailMatchesSelection
+                        enabled: !AppBridge.jobDetailLoading && root.detailMatchesSelection
                         anchors.fill: parent
                         spacing: 12
                         Flickable {
@@ -1592,6 +1644,7 @@ Item {
                         }
                     }
                     Rectangle {
+                        objectName: "offerDetailLoadingOverlay"
                         anchors.fill: parent
                         visible: AppBridge.jobDetailLoading
                         color: "#B60F0D16"

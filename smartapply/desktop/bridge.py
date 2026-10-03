@@ -245,6 +245,7 @@ class DesktopBridge(QObject):
         self._workflow_refresh_timer.setSingleShot(True)
         self._workflow_refresh_timer.timeout.connect(self._flush_refresh)
         self._jobs_loading = False
+        self._displayed_jobs_query: tuple | None = None
         self._job_detail_loading = False
         self._job_search = ""
         self._job_status = JobStatus.SCRAPED
@@ -554,8 +555,13 @@ class DesktopBridge(QObject):
         self._job_status = status
         self._job_sort_key = sort_key
         self._job_sort_ascending = sort_ascending
-        if not self._jobs_loading:
-            self._jobs_loading = True
+        duplicates_only = (
+            self._duplicate_relevant_only if status == JobStatus.DUPLICATE_REVIEW else False
+        )
+        query = (search, status, sort_key, sort_ascending, duplicates_only)
+        loading = query != getattr(self, "_displayed_jobs_query", None)
+        if self._jobs_loading != loading:
+            self._jobs_loading = loading
             self.jobsLoadingChanged.emit()
         self._start_read(
             "jobs",
@@ -564,10 +570,8 @@ class DesktopBridge(QObject):
             status=status or None,
             sort_key=sort_key,
             sort_ascending=sort_ascending,
-            only_relevant_duplicates=(
-                self._duplicate_relevant_only if status == JobStatus.DUPLICATE_REVIEW else False
-            ),
-            on_success=self._jobs_loaded,
+            only_relevant_duplicates=duplicates_only,
+            on_success=lambda rows: self._jobs_loaded(rows, query),
             on_finished=self._jobs_read_finished,
         )
 
@@ -576,12 +580,13 @@ class DesktopBridge(QObject):
         """Refresh offers without resetting the current page state."""
         self.loadJobs(
             self._job_search,
-            self._job_status or JobStatus.SCRAPED,
+            self._job_status,
             self._job_sort_key,
             self._job_sort_ascending,
         )
 
-    def _jobs_loaded(self, rows: list[Any]) -> None:
+    def _jobs_loaded(self, rows: list[Any], query: tuple | None = None) -> None:
+        self._displayed_jobs_query = query
         self._jobs = _enrich_rows(rows)
         if getattr(self, "_jobs_model", None) is not None:
             self._jobs_model.replace(self._jobs)
@@ -600,8 +605,17 @@ class DesktopBridge(QObject):
         self._selected_job_id = job_id
         if hasattr(self, "_read_tokens"):
             self._read_tokens["open_application"] = self._read_tokens.get("open_application", 0) + 1
-        if not self._job_detail_loading:
-            self._job_detail_loading = True
+        self.refreshSelectedJob()
+
+    @Slot()
+    def refreshSelectedJob(self) -> None:  # noqa: N802
+        """Reread the selected offer without superseding an explicit navigation."""
+        job_id = self._selected_job_id
+        if not job_id:
+            return
+        loading = job_id != int(self._current_job.get("id") or 0)
+        if self._job_detail_loading != loading:
+            self._job_detail_loading = loading
             self.jobDetailLoadingChanged.emit()
         self._start_read(
             "job_detail",
@@ -1711,7 +1725,7 @@ class DesktopBridge(QObject):
 
     def _refresh_selected(self, job_id):
         if job_id == getattr(self, "_selected_job_id", 0):
-            self.selectJob(job_id)
+            self.refreshSelectedJob()
 
     @Slot(object)
     def _database_changed(self, tables):
@@ -1757,7 +1771,7 @@ class DesktopBridge(QObject):
             if "detail" in self._dirty_views:
                 self._dirty_views.discard("detail")
                 if self._selected_job_id:
-                    self.selectJob(self._selected_job_id)
+                    self.refreshSelectedJob()
 
     @staticmethod
     def _job_ids(values: list[Any]) -> list[int]:

@@ -34,6 +34,7 @@ ApplicationWindow {
     property string currentRoute: "dashboard"
     property string pendingRoute: "dashboard"
     property string jobsFilterStatus: "scraped"
+    property int requestedJobId: 0
     property real pageOffset: 0
     property bool dashboardLoaded: true
     property bool searchLoaded: false
@@ -81,13 +82,10 @@ ApplicationWindow {
         if (page === "companies") AppBridge.loadCompanies()
         if (page === "duplicates") AppBridge.loadJobs("", "duplicate_review", "duplicate_confidence", false)
         if (page === "jobs") {
-            var status = routeStatus(route) || jobsFilterStatus
-            AppBridge.loadJobs(
-                "",
-                status,
-                status === "scraped" ? "filter_disposition" : "score",
-                status === "scraped"
-            )
+            if (jobsLoader.item) {
+                jobsLoader.item.refreshOffers(requestedJobId)
+                requestedJobId = 0
+            }
         }
         if (page === "profile") AppBridge.refreshProfile()
         if (page === "settings" || page === "search") AppBridge.refreshDiagnosticsIfStale()
@@ -105,9 +103,10 @@ ApplicationWindow {
         else if (page === "settings") settingsLoaded = true
     }
 
-    function navigate(route) {
+    function navigate(route, selectedId) {
         var page = routePage(route)
         var status = routeStatus(route)
+        requestedJobId = page === "jobs" ? Number(selectedId || 0) : 0
         if (page === "jobs" && status) jobsFilterStatus = status
         if (pageSwitch.running && pendingRoute === route) return
         if (page === currentRoute) {
@@ -265,10 +264,13 @@ ApplicationWindow {
                         sourceComponent: Component { DuplicatesPage { onNavigateRequested: function(route) { window.navigate(route) } } }
                     }
                     Loader {
+                        id: jobsLoader
                         active: window.jobsLoaded
                         asynchronous: true
+                        onLoaded: if (window.currentRoute === "jobs") window.refreshRoute("jobs")
                         sourceComponent: Component {
                             JobsPage {
+                                activeView: window.currentRoute === "jobs"
                                 requestedFilter: window.jobsFilterStatus
                                 onFilterChanged: function(status) { window.jobsFilterStatus = status }
                                 onNavigateRequested: function(route) { window.navigate(route) }
@@ -588,7 +590,9 @@ ApplicationWindow {
     Connections {
         target: AppBridge
         function onToastRequested(title, message, kind) { toast.show(title, message, kind) }
-        function onNavigationRequested(route, selectedId) { window.navigate(route) }
+        function onNavigationRequested(route, selectedId) {
+            window.navigate(route, selectedId)
+        }
         function onShutdownReadyChanged() { if (AppBridge.shutdownReady) window.close() }
     }
 
