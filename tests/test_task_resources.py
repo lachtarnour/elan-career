@@ -1,5 +1,9 @@
 """Contradictory operations are reserved by duplicate group, not globally."""
 
+import os
+import selectors
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 
@@ -7,6 +11,7 @@ import pytest
 
 from smartapply.concurrency import (
     TaskConflictError,
+    application_publication,
     busy_job_ids,
     job_operation,
     subscribe_resource_changes,
@@ -127,3 +132,44 @@ def test_database_notifications_follow_commits_not_reads_notes_or_rollbacks(isol
     finally:
         unsubscribe()
         unsubscribe_topics()
+
+
+def test_publication_lease_is_shared_by_processes_with_different_caches(isolated_db):
+    from smartapply.concurrency import _publication_lock_path
+
+    program = """
+import sys
+from smartapply.concurrency import application_publication
+with application_publication(7, 42):
+    print('ready', flush=True)
+    sys.stdin.readline()
+"""
+    env = dict(os.environ, CACHE_DIR=str(isolated_db / "another-process-cache"))
+    child = subprocess.Popen(
+        [sys.executable, "-c", program],
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(child.stdout, selectors.EVENT_READ)
+            assert selector.select(timeout=5), "The publication owner did not acquire its lease"
+            assert child.stdout.readline().strip() == "ready"
+        with pytest.raises(TaskConflictError), application_publication(7, 42):
+            pytest.fail("Another process already owns this dossier")
+        with application_publication(8, 43):
+            pass
+        lock = _publication_lock_path(42)
+        inode = lock.stat().st_ino
+    finally:
+        try:
+            child.communicate("release\n", timeout=5)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.communicate()
+    assert child.returncode == 0
+    with application_publication(7, 42):
+        assert lock.stat().st_ino == inode

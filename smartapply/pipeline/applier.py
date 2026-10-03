@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from smartapply.concurrency import job_operation
+from smartapply.concurrency import application_publication, job_operation
 from smartapply.config import get_settings
 from smartapply.cv import CvAdapter, CvValidator
 from smartapply.cv.motivation_validator import MotivationLetterValidator
@@ -66,16 +66,19 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
                 report,
                 force_regenerate=force_regenerate,
             )
+            owns_publication = False
             try:
-                check_cancelled(self.stop_requested)
-                return self._do_apply(
-                    report=report,
-                    form_url=form_url,
-                    refresh_cache=force_regenerate,
-                    artifact_dir=artifact_dir,
-                )
+                with application_publication(report.job_id, report.application_id):
+                    owns_publication = True
+                    check_cancelled(self.stop_requested)
+                    return self._do_apply(
+                        report=report,
+                        form_url=form_url,
+                        refresh_cache=force_regenerate,
+                        artifact_dir=artifact_dir,
+                    )
             except Exception:
-                if created_reservation:
+                if created_reservation and owns_publication:
                     self._release_application_reservation(report)
                 raise
 

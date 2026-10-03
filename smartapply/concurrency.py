@@ -1,9 +1,12 @@
-"""Process-local reservations for operations on offers and their aliases."""
+"""Offer reservations and exclusive publication of application documents."""
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from threading import RLock, get_ident
 
 from sqlalchemy import or_, select
@@ -111,3 +114,40 @@ def job_operation(job_ids: Iterable[int], *, operation: str) -> Iterator[None]:
                 else:
                     _claims[job_id] = (claim[0], claim[1], claim[2] - 1)
         _notify()
+
+
+def _publication_lock_path(application_id: int) -> Path:
+    from smartapply.config import get_settings
+    from smartapply.database import get_engine
+
+    url = get_engine().url
+    if url.get_backend_name() == "sqlite" and url.database not in {None, "", ":memory:"}:
+        database = Path(url.database).expanduser().resolve()
+        identity = str(database)
+        directory = database.parent / ".elan-locks"
+    else:
+        identity = url.render_as_string(hide_password=False)
+        directory = get_settings().cache_dir / ".elan-locks"
+    fingerprint = hashlib.sha256(identity.encode()).hexdigest()[:24]
+    return directory / fingerprint / f"application-{int(application_id)}.lock"
+
+
+@contextmanager
+def application_publication(job_id: int, application_id: int) -> Iterator[None]:
+    """Prevent another local process from regenerating the same dossier.
+
+    SQLite leases are anchored beside the canonical DB, independent of cache
+    configuration. The inode stays in place after release; unlinking it would
+    allow a third process to acquire a different inode while a waiter owns it.
+    """
+    path = _publication_lock_path(application_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise TaskConflictError(job_id, "génération dans un autre processus") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
