@@ -163,16 +163,6 @@ rebuild. Previously saved analyses, scores, CVs and letters are historical outpu
 not automatically refreshed caches: rerun the corresponding operation to update
 them. None of these changes requires deleting the database or all caches.
 
-### Explicit database repairs
-
-The maintenance commands in `tools/repair_*.py` are read-only by default and
-print a JSON plan. Always run that plan against a copied SQLite database first,
-close Élan before touching the active database, and keep the backup until the
-result has been checked. `--apply` uses one immediate transaction, verifies that
-the plan did not change, preserves row counts, and runs SQLite foreign-key and
-integrity checks. These tools repair only the narrowly documented historical
-cases; they are not general migrations and never justify deleting a dossier.
-
 ## Adapt the profile and matching rules
 
 Élan is primarily designed for AI Engineer profiles seeking employment. Using it for another role or field requires adapting the profile data, search role families, and static matching rules, including changes to the source code. The repository publishes a safe example profile; review the files below for your target role, country, and experience level.
@@ -375,6 +365,6 @@ make check
 .venv/bin/elan --help
 ```
 
-The test suite uses fictional fixtures and a temporary runtime, with no private profile or API credentials required. Tokenizer tests may download a public vocabulary on their first run.
+The test suite uses fictional fixtures and a temporary runtime, with no private profile or API credentials required. Install the desktop dependencies to run the Qt interface tests.
 
 See [Contributing](../CONTRIBUTING.md) for the project structure and development workflow, the [visual verification guide](desktop-design.md) for UI checks, and the [source documentation](sources/README.md) for connectors.

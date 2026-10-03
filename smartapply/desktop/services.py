@@ -170,6 +170,7 @@ class JobRow:
     status: str
     status_label: str
     filter_disposition: str
+    published_date: str
     score: float | None
     llm_score: float | None
     contract: str
@@ -488,6 +489,7 @@ class DesktopService:
                     Job.description,
                     Job.cleaned_description,
                     Job.source,
+                    Job.published_date,
                     Job.scraped_at,
                     Job.status,
                     Job.archived_at,
@@ -601,6 +603,7 @@ class DesktopService:
             ),
             "company": Job.company,
             "title": Job.title,
+            "published_date": Job.published_date,
             # Experience is displayed from the same seniority signal when it
             # is available; exact numeric extraction remains a derived text
             # value and is not suitable for a portable SQL expression.
@@ -826,6 +829,7 @@ class DesktopService:
             status=display_status,
             status_label=DesktopService._desktop_status_label(display_status),
             filter_disposition=filter_disposition,
+            published_date=_date_text(job.published_date),
             score=(job.score.final_score if job.score else None),
             llm_score=llm_score,
             contract=job.contract_type or "",

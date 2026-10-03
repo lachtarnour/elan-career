@@ -29,32 +29,25 @@ Les tokens partagés sont dans [`Theme.qml`](../smartapply/desktop/qml/component
 Depuis la racine du dépôt :
 
 ```sh
-.venv/bin/python tools/desktop_visual_check.py --widths 1320,1480,1800,2524 --output /tmp/elan-visual-review
-.venv/bin/pytest tests/test_desktop_services.py -q
-.venv/bin/ruff check tools/desktop_visual_check.py
+.venv/bin/pytest tests/test_desktop_services.py tests/test_desktop_notifications.py tests/test_source_diagnostics_refresh.py -q
 ```
 
-Le contrôle visuel utilise PySide6, le style Basic et un moteur de rendu logiciel.
-Il crée une base temporaire contenant des offres fictives et utilise le profil d’exemple public.
-Pour vérifier vos propres données, ajoutez `--database /chemin/vers/une-sauvegarde.db` : seule une copie temporaire est utilisée. Cette base doit contenir au moins deux offres prêtes à envoyer pour les interactions du tableau.
-Il n’effectue ni vérification réseau des sources, ni génération de documents, ni envoi,
-ni décision sur les doublons. Les états de sources connectées, de génération disponible,
-de profil long et de comparaison de doublons sont des fixtures en mémoire.
+Les tests Qt chargent réellement QML avec des services inertes et des données fictives.
+Ils vérifient notamment les notifications et la conservation des choix de sources,
+sans utiliser la base active ou les fournisseurs réels.
 
-Le dossier de sortie contient les captures et `diagnostics.json`, qui répertorie les
-avertissements QML et les assertions. Un échec de contrôle produit un code de sortie non nul.
-
-La recette couvre les huit pages en 1 320 × 820, 1 480 × 920, 1 800 × 1 000 et 2 524 × 1 000,
-ainsi que la barre d’outils Offres en 1 559 et 1 560 px, de part et d’autre du
-changement de largeur de la navigation. Les colonnes sont contrôlées pour détecter les chevauchements, les désalignements et le recouvrement par la barre de défilement. Elle exerce aussi le tri, la sélection et le filtrage des offres,
-Échap, l’ordre de tabulation du formulaire, sa validation, le zoom, la navigation
-au clavier et la fermeture des notifications.
+Compléter ces tests par une vérification interactive des pages en 1 320 × 820,
+1 480 × 920, 1 800 × 1 000 et 2 524 × 1 000. Vérifier les chevauchements de colonnes,
+le tri, la sélection, le filtrage, Échap, la navigation au clavier et le zoom.
+Pour les scénarios avec données existantes, utiliser uniquement une copie temporaire
+de la base et des fournisseurs simulés. Conserver les captures et rapports dans
+`artifacts/` ou un dossier temporaire, hors Git.
 
 La page Entreprises conserve les neuf champs du CSV importé dans la table SQLite
 `companies`. La colonne `checked` est enregistrée dès le clic et reste inchangée
 au redémarrage. Une nouvelle installation commence avec une liste vide ; les
 entreprises sont ajoutées manuellement ou importées explicitement. Les noms en doublon
-(casse et espaces) sont refusés. La recette vérifie aussi les filtres, les coches,
+(casse et espaces) sont refusés. Vérifier aussi les filtres, les coches,
 la validation du popup, l’ajout manuel et sa fermeture avec Échap.
 
 La maintenance `make sync-companies` actualise les fiches non cochées depuis le

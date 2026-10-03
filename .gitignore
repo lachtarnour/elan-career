@@ -45,6 +45,8 @@ token.json
 /output/
 /tmp/
 /test-results/
+/artifacts/
+/tools/
 /.backups/
 /test.ipynb
 /daily scrapper/
@@ -60,8 +62,7 @@ token.json
 *.sqlite3-*
 *.log
 
-# ---- Local demo production and obsolete captures ----
-/tools/demo/
+# ---- Obsolete captures ----
 /docs/screenshots/applications.png
 
 # ---- Editors ----

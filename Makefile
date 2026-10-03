@@ -67,11 +67,11 @@ test-fast:
 	$(BIN)/pytest -m "not integration and not llm"
 
 lint:
-	$(BIN)/ruff check smartapply tests tools/desktop_visual_check.py
+	$(BIN)/ruff check smartapply tests
 
 format:
-	$(BIN)/ruff format smartapply tests tools/desktop_visual_check.py
-	$(BIN)/ruff check --fix smartapply tests tools/desktop_visual_check.py
+	$(BIN)/ruff format smartapply tests
+	$(BIN)/ruff check --fix smartapply tests
 
 run-desktop:
 	$(BIN)/elan-desktop

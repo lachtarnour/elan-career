@@ -76,11 +76,6 @@ URL de candidature modifiée ne crée ni seconde offre ni second dossier. Cette
 règle reste limitée à la source `francetravail` : le même texte provenant d'une
 autre source suit le parcours normal de rapprochement.
 
-Pour une base historique, `tools/repair_francetravail_identity.py` affiche un
-plan en lecture seule par défaut. Exécuter d'abord ce plan sur une sauvegarde ;
-`--apply` effectue ensuite une transaction, conserve les alias et dossiers, puis
-vérifie les clés étrangères et l'intégrité SQLite.
-
 ## Stratégie filtre
 
 Adapter : `build_francetravail_filter_facts`.

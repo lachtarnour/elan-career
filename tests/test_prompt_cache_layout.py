@@ -31,20 +31,13 @@ def _analysis(
     )
 
 
-def _common_prefix(first: str, second: str) -> str:
-    common = []
-    for first_character, second_character in zip(first, second, strict=False):
-        if first_character != second_character:
-            break
-        common.append(first_character)
-    return "".join(common)
-
-
-def _assert_large_stable_prefix(first: str, second: str, boundary: str) -> None:
-    """Protect the cache layout without downloading a tokenizer vocabulary."""
-    prefix = _common_prefix(first, second)
-    assert len(prefix) >= 16_384
-    assert boundary in prefix[-256:]
+def _assert_stable_prefix(first: str, second: str, boundary: str) -> None:
+    """Offer changes must leave all candidate context and instructions cacheable."""
+    first_prefix, first_context = first.split(boundary, 1)
+    second_prefix, second_context = second.split(boundary, 1)
+    assert first_prefix == second_prefix
+    assert first_prefix
+    assert first_context != second_context
 
 
 def _different_analyses() -> tuple[JobAnalysis, JobAnalysis]:
@@ -90,7 +83,7 @@ def test_application_draft_keeps_profile_and_instructions_in_cacheable_prefix() 
     assert first.index("=== PROFILE") < first.index("=== MOTIVATION LETTER")
     assert first.index("=== MOTIVATION LETTER") < first.index("=== STYLE")
     assert first.index("=== STYLE") < first.index("=== JOB")
-    _assert_large_stable_prefix(
+    _assert_stable_prefix(
         f"{application_draft.build_system_prompt()}\n{first}",
         f"{application_draft.build_system_prompt()}\n{second}",
         "=== JOB ===",
@@ -120,7 +113,7 @@ def test_cv_adaptation_keeps_profile_and_instructions_in_cacheable_prefix() -> N
 
     assert first.index("=== PROFILE") < first.index("=== STYLE")
     assert first.index("=== STYLE") < first.index("=== JOB")
-    _assert_large_stable_prefix(
+    _assert_stable_prefix(
         f"{cv_adaptation.build_system_prompt()}\n{first}",
         f"{cv_adaptation.build_system_prompt()}\n{second}",
         "=== JOB ===",
@@ -156,7 +149,7 @@ def test_form_questions_keeps_profile_before_offer_specific_context() -> None:
     )
 
     assert first.index("CANDIDATE PROFILE JSON") < first.index("APPLICATION CONTEXT")
-    _assert_large_stable_prefix(
+    _assert_stable_prefix(
         f"{first_system}\n{first}",
         f"{second_system}\n{second}",
         "APPLICATION CONTEXT",

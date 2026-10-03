@@ -183,6 +183,29 @@ def test_job_rows_include_experience_and_application_state(isolated_db) -> None:
     assert detail.application.job_id == job_id
 
 
+def test_new_offer_rows_expose_and_sort_by_publication_date(isolated_db) -> None:
+    older_id = _job(external_id="manual:older-publication")
+    newer_id = _job(external_id="manual:newer-publication")
+    with session_scope() as session:
+        older = session.get(Job, older_id)
+        newer = session.get(Job, newer_id)
+        assert older is not None
+        assert newer is not None
+        older.published_date = datetime(2026, 9, 28, 8, 0, tzinfo=timezone.utc)
+        newer.published_date = datetime(2026, 10, 1, 14, 30, tzinfo=timezone.utc)
+        mark_filtered(session, older_id)
+        mark_filtered(session, newer_id)
+
+    rows = DesktopService().list_jobs(
+        status=JobStatus.SCRAPED,
+        sort_key="published_date",
+        sort_ascending=False,
+    )
+
+    assert [row.id for row in rows] == [newer_id, older_id]
+    assert [row.published_date for row in rows] == ["01/10/2026", "28/09/2026"]
+
+
 def test_dashboard_counts_confirmed_duplicate_submissions_once(isolated_db) -> None:
     root_id = _job(external_id="manual:dashboard-canonical")
     alias_id = _job(external_id="manual:dashboard-alias")

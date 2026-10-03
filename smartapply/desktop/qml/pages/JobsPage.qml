@@ -32,11 +32,13 @@ Item {
     readonly property int experienceWidth: Math.round(52 + 12 * tableScale)
     readonly property int scoreWidth: Math.round(42 + 6 * tableScale)
     readonly property int llmScoreWidth: scoreWidth
+    readonly property int publishedDateWidth: Math.round(76 + 12 * tableScale)
     readonly property bool isNewOffersFilter: filterStatus === "scraped"
-    // The filter disposition replaces the two score columns in the Nouvelle
-    // view, while keeping the same right-hand footprint in the table.
+    // Nouvelle shows the source publication date beside the local-filter
+    // disposition. Unknown publication dates remain explicit instead of
+    // falling back to the import date.
     readonly property int filterDispositionWidth: scoreWidth + llmScoreWidth + columnGap
-    readonly property int rightColumnsWidth: isNewOffersFilter ? filterDispositionWidth : scoreWidth + llmScoreWidth + columnGap
+    readonly property int rightColumnsWidth: isNewOffersFilter ? publishedDateWidth + columnGap + filterDispositionWidth : scoreWidth + llmScoreWidth + columnGap
     readonly property int visibleColumnGapCount: isNewOffersFilter ? 5 : 6
     readonly property real textColumnsWidth: Math.max(0, tableContentWidth - selectWidth - experienceWidth - rightColumnsWidth - columnGap * visibleColumnGapCount)
     readonly property int companyWidth: Math.round(textColumnsWidth * 0.26)
@@ -113,8 +115,9 @@ Item {
     function scoreX(contentWidth) { return contentWidth - scoreWidth }
     function llmScoreX(contentWidth) { return scoreX(contentWidth) - columnGap - llmScoreWidth }
     function filterDispositionX(contentWidth) { return contentWidth - filterDispositionWidth }
+    function publishedDateX(contentWidth) { return filterDispositionX(contentWidth) - columnGap - publishedDateWidth }
     function locationX(contentWidth) {
-        var rightColumnX = isNewOffersFilter ? filterDispositionX(contentWidth) : llmScoreX(contentWidth)
+        var rightColumnX = isNewOffersFilter ? publishedDateX(contentWidth) : llmScoreX(contentWidth)
         return rightColumnX - columnGap - locationWidth
     }
     function experienceX(contentWidth) { return locationX(contentWidth) - columnGap - experienceWidth }
@@ -221,7 +224,7 @@ Item {
         if (sortKey === key) sortAscending = !sortAscending
         else {
             sortKey = key
-            sortAscending = key === "score" ? false : true
+            sortAscending = key === "score" || key === "published_date" ? false : true
         }
         AppBridge.loadJobs(searchField.text, statusFilter.currentValue || "", sortKey, sortAscending)
     }
@@ -589,6 +592,7 @@ Item {
                                 SortHeader { x: root.locationX(parent.width); width: root.locationWidth; anchors.verticalCenter: parent.verticalCenter; title: "Lieu"; sortKey: "location"; active: root.sortKey === sortKey; ascending: root.sortAscending; onSortRequested: function(key) { root.sortBy(key) } }
                                 SortHeader { visible: !root.isNewOffersFilter; x: root.llmScoreX(parent.width); width: root.llmScoreWidth; anchors.verticalCenter: parent.verticalCenter; title: "IA"; sortKey: "llm_score"; active: root.sortKey === sortKey; ascending: root.sortAscending; centered: true; onSortRequested: function(key) { root.sortBy(key) } }
                                 SortHeader { objectName: "offerMatchHeader"; visible: !root.isNewOffersFilter; x: root.scoreX(parent.width); width: root.scoreWidth; anchors.verticalCenter: parent.verticalCenter; title: "Match"; sortKey: "score"; active: root.sortKey === sortKey; ascending: root.sortAscending; centered: true; onSortRequested: function(key) { root.sortBy(key) } }
+                                SortHeader { objectName: "offerPublishedDateHeader"; visible: root.isNewOffersFilter; x: root.publishedDateX(parent.width); width: root.publishedDateWidth; anchors.verticalCenter: parent.verticalCenter; title: "Date"; sortKey: "published_date"; active: root.sortKey === sortKey; ascending: root.sortAscending; centered: true; onSortRequested: function(key) { root.sortBy(key) } }
                                 SortHeader { objectName: "offerFilterHeader"; visible: root.isNewOffersFilter; x: root.filterDispositionX(parent.width); width: root.filterDispositionWidth; anchors.verticalCenter: parent.verticalCenter; title: "Filtre"; sortKey: "filter_disposition"; active: root.sortKey === sortKey; ascending: root.sortAscending; centered: true; onSortRequested: function(key) { root.sortBy(key) } }
                             }
                         }
@@ -692,6 +696,17 @@ Item {
                                             color: modelData.score === null || modelData.score === undefined ? Theme.inkFaint : Theme.inkSoft
                                             font.pixelSize: root.tableTextSize - 1
                                             font.weight: Font.DemiBold
+                                        }
+                                        Text {
+                                            objectName: "offerPublishedDate-" + modelData.id
+                                            visible: root.isNewOffersFilter
+                                            x: root.publishedDateX(parent.width)
+                                            width: root.publishedDateWidth
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            horizontalAlignment: Text.AlignHCenter
+                                            text: modelData.published_date || "—"
+                                            color: modelData.published_date && modelData.published_date !== "—" ? Theme.inkMuted : Theme.inkFaint
+                                            font.pixelSize: root.tableTextSize - 1
                                         }
                                         Text {
                                             objectName: "offerFilter-" + modelData.id

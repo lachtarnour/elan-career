@@ -146,53 +146,247 @@ def backfill_usage_job_external_ids() -> int:
     return int(result.rowcount or 0)
 
 
-def backfill_duplicate_reviews() -> int:
-    """Hold legacy fuzzy matches for review without merging or deleting rows.
+def _confirmed_duplicate_components(jobs: list[Job]) -> dict[int, tuple[Job, ...]]:
+    """Index identity evidence without treating pending reviews as confirmed."""
+    parents = {int(job.id): int(job.id) for job in jobs}
 
-    New ingests perform the same check before persistence.  This one-time-safe
-    pass protects databases created before duplicate review existed, including
-    rows that already own an archived or active application.
+    def root(job_id: int) -> int:
+        while parents[job_id] != job_id:
+            parents[job_id] = parents[parents[job_id]]
+            job_id = parents[job_id]
+        return job_id
+
+    for job in jobs:
+        canonical_id = job.canonical_job_id
+        if (
+            job.duplicate_review_status == JobDuplicateStatus.CONFIRMED
+            and canonical_id in parents
+        ):
+            parents[root(int(job.id))] = root(int(canonical_id))
+
+    groups: dict[int, list[Job]] = {}
+    for job in jobs:
+        groups.setdefault(root(int(job.id)), []).append(job)
+    members = {group_id: tuple(group) for group_id, group in groups.items()}
+    return {id(job): members[root(int(job.id))] for job in jobs}
+
+
+def backfill_duplicate_reviews() -> int:
+    """Repair legacy fuzzy reviews without merging or deleting rows.
+
+    New ingests perform the same checks before persistence. This idempotent pass
+    protects databases created before duplicate review existed, including rows
+    that already own an archived or active application.
     """
-    from smartapply.dedup import Deduplicator
+    from smartapply.dedup import (
+        Deduplicator,
+        normalize_company,
+        offers_within_duplicate_group_time_window,
+    )
+    from smartapply.dedup.deduplicator import (
+        MAX_FUZZY_CONFIDENCE,
+        eligible_for_fuzzy_duplicate_group,
+        linked_duplicate_components,
+        offers_share_strong_identity,
+    )
 
     with session_scope() as session:
         jobs = session.execute(select(Job).order_by(Job.id.asc())).scalars().all()
+        jobs_by_id = {int(job.id): job for job in jobs}
         matcher = Deduplicator()
-        updated = 0
-        for index, job in enumerate(jobs):
-            review_status = job.duplicate_review_status or JobDuplicateStatus.NONE
-            candidate = matcher.find_probable_duplicate(job, jobs[:index])
-            if candidate is None or int(candidate.job.id) == int(job.id):
+        updated_ids: set[int] = set()
+        initial_review_states = {
+            int(job.id): (
+                job.possible_duplicate_of_id,
+                job.duplicate_review_status,
+                job.duplicate_match_type,
+                job.duplicate_confidence,
+                job.status,
+                job.shortlisted_at,
+                job.shortlist_origin,
+            )
+            for job in jobs
+        }
+        confirmed_components = _confirmed_duplicate_components(jobs)
+
+        def release_pending_review(job: Job) -> None:
+            job.possible_duplicate_of_id = None
+            job.duplicate_review_status = JobDuplicateStatus.NONE
+            job.duplicate_match_type = None
+            job.duplicate_confidence = None
+            updated_ids.add(int(job.id))
+
+        def identity_evidence(job: Job, candidate: Job):
+            # A pending sibling is a constraint, never positive evidence that
+            # this offer matches the stored reference. Only that reference and
+            # its confirmed aliases can support the review or its confidence.
+            members = tuple(
+                member
+                for member in confirmed_components.get(id(candidate), (candidate,))
+                if member is not job
+            )
+            strong_identity = any(offers_share_strong_identity(job, member) for member in members)
+            match = (
+                matcher.find_probable_duplicate(job, members, components=confirmed_components)
+                if not strong_identity and (job.duplicate_match_type or "fuzzy") == "fuzzy"
+                else None
+            )
+            return strong_identity, match
+
+        # Remove unsupported edges first, before using the remaining graph for
+        # conservative location/date constraints. Identity evidence is fixed
+        # because this repair never changes confirmed aliases or source data.
+        for job in jobs:
+            if job.duplicate_review_status != JobDuplicateStatus.PENDING:
+                continue
+            candidate = jobs_by_id.get(int(job.possible_duplicate_of_id or 0))
+            if candidate is None:
+                release_pending_review(job)
+                continue
+            fuzzy_review = (job.duplicate_match_type or "fuzzy") == "fuzzy"
+            strong_identity, recomputed_match = identity_evidence(job, candidate)
+            invalid_fuzzy_identity = fuzzy_review and not strong_identity and recomputed_match is None
+            invalid_exact_identity = job.duplicate_match_type == "exact_url" and not strong_identity
+            if invalid_fuzzy_identity or invalid_exact_identity:
+                release_pending_review(job)
                 continue
 
-            if review_status != JobDuplicateStatus.NONE:
+            if fuzzy_review and not strong_identity:
+                if job.duplicate_confidence != recomputed_match.confidence:
+                    job.duplicate_confidence = recomputed_match.confidence
+                    updated_ids.add(int(job.id))
+            elif (
+                fuzzy_review
+                and job.duplicate_confidence is not None
+                and job.duplicate_confidence > MAX_FUZZY_CONFIDENCE
+            ):
+                # A legacy row protected by a strong identity may not satisfy
+                # the fuzzy matcher, but it still must not display 100% fuzzy
+                # certainty.
+                job.duplicate_confidence = MAX_FUZZY_CONFIDENCE
+                updated_ids.add(int(job.id))
+
+        linked_components = linked_duplicate_components(jobs)
+        for job in jobs:
+            if job.duplicate_review_status != JobDuplicateStatus.PENDING:
                 continue
-            candidate_archived = bool(
-                candidate.job.archived_at or candidate.job.status == JobStatus.ARCHIVED
+            candidate = jobs_by_id[int(job.possible_duplicate_of_id)]
+            strong_identity, _ = identity_evidence(job, candidate)
+            if not offers_within_duplicate_group_time_window(
+                job, candidate, jobs, components=linked_components
+            ) or (
+                (job.duplicate_match_type or "fuzzy") == "fuzzy"
+                and not strong_identity
+                and not eligible_for_fuzzy_duplicate_group(
+                    job, candidate, jobs, components=linked_components
+                )
+            ):
+                release_pending_review(job)
+
+        # Rebuild after all removals. New edges must be compatible with both
+        # complete groups, including reviews already pointing to the target.
+        linked_components = linked_duplicate_components(jobs)
+        candidates_by_company: dict[str, list[Job]] = {}
+        for job in jobs:
+            review_status = job.duplicate_review_status or JobDuplicateStatus.NONE
+            company_key = normalize_company(job.company)
+            previous_candidates = candidates_by_company.get(company_key, ())
+            if review_status == JobDuplicateStatus.NONE:
+                candidate = matcher.find_probable_duplicate(
+                    job,
+                    previous_candidates,
+                    components=linked_components,
+                )
+                target_members = linked_components.get(id(job), (job,))
+                if candidate is not None and len(target_members) > 1:
+                    # The normal matcher checks this offer against the full
+                    # reference group. Incoming reviews also require every
+                    # target-side member to remain compatible with that group.
+                    compatible_candidates = [
+                        previous
+                        for previous in previous_candidates
+                        if previous not in target_members
+                        and all(
+                            eligible_for_fuzzy_duplicate_group(
+                                member, previous, jobs, components=linked_components
+                            )
+                            for member in target_members
+                        )
+                    ]
+                    candidate = matcher.find_probable_duplicate(
+                        job,
+                        compatible_candidates,
+                        components=linked_components,
+                    )
+                if candidate is not None and int(candidate.job.id) != int(job.id):
+                    candidate_archived = bool(
+                        candidate.job.archived_at or candidate.job.status == JobStatus.ARCHIVED
+                    )
+                    job_archived = bool(job.archived_at or job.status == JobStatus.ARCHIVED)
+                    if job_archived and candidate_archived:
+                        # A pair with no actionable offer does not need a human
+                        # decision. Record the skip so this legacy repair remains
+                        # idempotent on future startups.
+                        job.possible_duplicate_of_id = None
+                        job.duplicate_review_status = JobDuplicateStatus.REJECTED
+                        job.duplicate_match_type = candidate.match_type
+                        job.duplicate_confidence = candidate.confidence
+                        job.status = JobStatus.ARCHIVED
+                        updated_ids.add(int(job.id))
+                    else:
+                        job.possible_duplicate_of_id = int(candidate.job.id)
+                        job.duplicate_review_status = JobDuplicateStatus.PENDING
+                        job.duplicate_match_type = candidate.match_type
+                        job.duplicate_confidence = candidate.confidence
+                        # An old shortlist marker must not remain actionable while
+                        # the user is deciding. Existing analysis/application
+                        # history stays intact and is still used by the guard.
+                        job.shortlisted_at = None
+                        job.shortlist_origin = None
+                        updated_ids.add(int(job.id))
+                        linked_components = linked_duplicate_components(jobs)
+            if company_key:
+                candidates_by_company.setdefault(company_key, []).append(job)
+
+        # A chosen reference can have a confirmed alias outside the earlier
+        # company bucket. Normalize against those fixed identity members now;
+        # later pending reviews cannot inflate an earlier link's confidence.
+        for job in jobs:
+            if (
+                job.duplicate_review_status != JobDuplicateStatus.PENDING
+                or (job.duplicate_match_type or "fuzzy") != "fuzzy"
+            ):
+                continue
+            candidate = jobs_by_id.get(int(job.possible_duplicate_of_id or 0))
+            if candidate is None:
+                release_pending_review(job)
+                continue
+            strong_identity, recomputed_match = identity_evidence(job, candidate)
+            if strong_identity:
+                if (
+                    job.duplicate_confidence is not None
+                    and job.duplicate_confidence > MAX_FUZZY_CONFIDENCE
+                ):
+                    job.duplicate_confidence = MAX_FUZZY_CONFIDENCE
+                    updated_ids.add(int(job.id))
+                continue
+            if recomputed_match is not None and job.duplicate_confidence != recomputed_match.confidence:
+                job.duplicate_confidence = recomputed_match.confidence
+                updated_ids.add(int(job.id))
+        return sum(
+            (
+                job.possible_duplicate_of_id,
+                job.duplicate_review_status,
+                job.duplicate_match_type,
+                job.duplicate_confidence,
+                job.status,
+                job.shortlisted_at,
+                job.shortlist_origin,
             )
-            job_archived = bool(job.archived_at or job.status == JobStatus.ARCHIVED)
-            if job_archived and candidate_archived:
-                # A pair with no actionable offer does not need a human
-                # decision. Record the skip so this legacy repair remains
-                # idempotent on future startups.
-                job.possible_duplicate_of_id = None
-                job.duplicate_review_status = JobDuplicateStatus.REJECTED
-                job.duplicate_match_type = candidate.match_type
-                job.duplicate_confidence = candidate.confidence
-                job.status = JobStatus.ARCHIVED
-                updated += 1
-                continue
-            job.possible_duplicate_of_id = int(candidate.job.id)
-            job.duplicate_review_status = JobDuplicateStatus.PENDING
-            job.duplicate_match_type = candidate.match_type
-            job.duplicate_confidence = candidate.confidence
-            # An old shortlist marker must not remain actionable while the
-            # user is deciding.  Existing analysis/application history stays
-            # intact and is still used by the application guard.
-            job.shortlisted_at = None
-            job.shortlist_origin = None
-            updated += 1
-        return updated
+            != initial_review_states[job_id]
+            for job_id in updated_ids
+            if (job := jobs_by_id[job_id]) is not None
+        )
 
 
 def backfill_shortlisted_at() -> int:

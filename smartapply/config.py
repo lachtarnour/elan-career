@@ -73,7 +73,17 @@ class Settings(BaseSettings):
     linkedin_experience_level: str = Field(default="2,3,4")
     linkedin_remote: str = Field(default="1,2,3")
     linkedin_date_posted: str = Field(default="week")
-    linkedin_timeout: int = Field(default=180, ge=1, le=300)
+    # Network timeout for each short Apify API call. Actor execution itself has
+    # no client-side deadline: it is tracked asynchronously by run id.
+    linkedin_http_timeout: int = Field(default=30, ge=5, le=120)
+    linkedin_poll_wait_seconds: int = Field(default=5, ge=1, le=60)
+    # Bound only consecutive failures while reading a known run/dataset. A
+    # successful status response resets both limits; Actor runtime stays open.
+    linkedin_read_max_attempts: int = Field(default=5, ge=1, le=20)
+    linkedin_read_failure_budget_seconds: int = Field(default=180, ge=30, le=1800)
+    # Legacy values up to 5 still parse, but the LinkedIn runtime enforces a
+    # hard safety ceiling of three Actor runs per fixed cohort.
+    linkedin_max_concurrent_runs: int = Field(default=3, ge=1, le=5)
     linkedin_max_results: int = Field(default=50, ge=1, le=300)
 
     # Welcome to the Jungle personalized matches

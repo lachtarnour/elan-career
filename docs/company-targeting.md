@@ -51,35 +51,6 @@ de la base. `--dry-run` affiche les différences sans les appliquer. Après une
 synchronisation, revenez sur la page Entreprises pour recharger la liste ; aucun
 rebuild n’est nécessaire. Le CSV reste privé et n’est pas copié dans le paquet.
 
-## Reproduire un classement documenté
-
-L’outil optionnel de classement utilise des décisions préparées dans un audit
-JSON privé. Il ne consulte ni le Web ni la base de données :
-
-```bash
-.venv/bin/python tools/rank_companies.py --check
-.venv/bin/python tools/rank_companies.py
-make check-companies-sync
-make sync-companies
-```
-
-`--csv` et `--audit` permettent de choisir d’autres fichiers. L’audit contient
-`as_of` (date ISO) et `companies`, avec exactement les mêmes entreprises que le
-CSV. Chaque entrée documente `company`, `action`, `constraint`, `fit`, `fit_basis`,
-`work`, `maturity`, `evidence`, `reason` et `sources`.
-
-Les actions `apply`, `qualify_offer`, `targeted_watch`, `broaden` et
-`historical_or_unverified` correspondent aux priorités 1 à 5. À action égale, le
-tri compare contrainte, adéquation, travail, structure, niveau de preuve, puis
-nom. Les valeurs catégorielles admises sont définies dans
-[`tools/rank_companies.py`](../tools/rank_companies.py).
-
-Une action `apply` exige `evidence: "offer_read"` et les cinq indicateurs
-`eligibility` à `true` : `open`, `france`, `permanent`, `experience_compatible`,
-`no_required_phd`. Ces critères correspondent à la politique de ce classement ;
-ils ne conviennent pas nécessairement à toutes les recherches. Une information
-inconnue ne valide pas un critère. `--check` vérifie la reproductibilité du CSV,
-pas l’ouverture actuelle des offres : les sources doivent être revérifiées.
-
-Les tests du classement et de la synchronisation utilisent uniquement des
-entreprises et justifications fictives, indépendantes des fichiers privés.
+Les tests de synchronisation utilisent uniquement des entreprises fictives,
+indépendantes des fichiers privés. Les évaluations et recherches personnelles
+restent locales ; le dépôt ne fournit pas d’outil de classement automatique.

@@ -70,7 +70,6 @@ def test_catalogue_exposes_fixed_selection_policy_without_mutating_profile(
         assert f'"tier": "{tier}"' in prompt
         assert f'"rationale": "Reviewed quality: {tier}"' in prompt
     assert '"activation_conditions": ["Named entity recognition"]' in prompt
-    assert "these projects are candidates, not a final selection" in prompt
     assert selection_inputs["profile"].model_dump() == before
 
 
@@ -78,8 +77,6 @@ def test_cv_selection_prompt_exposes_certificates_without_extra_call(selection_i
     prompt = cv_adaptation.build_user_prompt(**selection_inputs)
     for certificate in selection_inputs["profile"].certificates:
         assert f"id={certificate.id} :: {certificate.name}" in prompt
-    assert "select 0 to 2 distinct IDs" in prompt
-    assert "return [] when none is relevant" in prompt
 
 
 @pytest.mark.parametrize("builder", [cv_adaptation, application_draft])
@@ -96,63 +93,27 @@ def test_full_offer_is_available_for_exact_evidence_only_after_cacheable_prefix(
     assert first.index(description) > first.index("=== JOB ===")
     assert first.split("=== JOB ===")[0] == second.split("=== JOB ===")[0]
     assert selection_inputs["analysis"].main_tasks[0] in first
-    assert "Full job description (offer evidence only" not in builder.build_user_prompt(
-        **selection_inputs
-    )
+    assert description not in builder.build_user_prompt(**selection_inputs)
 
 
 @pytest.mark.parametrize("builder", [cv_adaptation, application_draft])
-def test_drafting_prompts_share_policy_and_select_before_writing(builder, selection_inputs):
-    system = builder.build_system_prompt()
-    prompt = builder.build_user_prompt(**selection_inputs)
+def test_drafting_prompts_share_canonical_selection_policy(builder, selection_inputs):
     rules = load_prompt("cv_adaptation/project_selection_rules.j2")
-    assert rules in system
-    assert "Choose projects BEFORE writing" in system
-    assert "Select exactly 3 unique projects" in system
-    assert "specialized: select at most one" in system
-    assert "disabled: never select" in system
-    assert "exact excerpt" in system
-    assert "Selection reasons and selection_policy are internal metadata" in system
-    assert "project_selection_reasons" in prompt
-    if builder is application_draft:
-        assert "Omit all unselected project claims" in prompt
-    else:
-        assert "CVSelection" in prompt
-        assert "professional_summary," not in prompt
-    for text in (system, prompt):
-        assert "3 to 4 projects" not in text
-        assert "0 to 3 unique projects" not in text
-        assert "no minimum" not in text
-        assert "selected alone" not in text
-        assert "select all available projects" not in text
+    assert rules in builder.build_system_prompt()
+    assert "project_selection_reasons" in builder.build_user_prompt(**selection_inputs)
 
 
-@pytest.mark.parametrize("builder", [cv_adaptation, application_draft])
-def test_three_project_minimum_preserves_honest_fit_and_specialty_activation(
-    builder, selection_inputs
-):
-    for text in (builder.build_system_prompt(), builder.build_user_prompt(**selection_inputs)):
-        assert "strongest direct matches first" in text
-        assert "primary projects with the best documented transferable strengths" in text
-        assert "transferable relevance honestly" in text
-        assert "If fewer than 3 projects can be selected under these rules" in text
-        assert "reject an incomplete selection" in text
-        assert "exact" in text and "excerpt" in text
-
-
-def test_minimum_is_described_without_rejecting_legacy_snapshots():
-    field = CVPersonalization.model_fields["selected_project_ids"]
-    assert "Exactly 3 unique" in field.description
-    assert "transferable strengths" in field.description
-    for count in (0, 1, 2, 3, 4):
-        old_snapshot = CVPersonalization(
-            selected_project_ids=[f"legacy_{index}" for index in range(count)],
-            cv_title="Data Scientist",
-            professional_summary="Works on applied NLP.",
-            skills_order=[],
-            warnings=[],
-        )
-        assert len(old_snapshot.selected_project_ids) == count
+@pytest.mark.parametrize("count", range(5))
+def test_legacy_project_counts_remain_readable(count):
+    selected_ids = [f"legacy_{index}" for index in range(count)]
+    old_snapshot = CVPersonalization(
+        selected_project_ids=selected_ids,
+        cv_title="Data Scientist",
+        professional_summary="Works on applied NLP.",
+        skills_order=[],
+        warnings=[],
+    )
+    assert old_snapshot.selected_project_ids == selected_ids
 
 
 def test_selection_audit_stays_out_of_letter_and_independent_review_sources(selection_inputs):

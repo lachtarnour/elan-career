@@ -25,6 +25,7 @@ from smartapply.database.repository import (
     set_score,
     upsert_job,
 )
+from smartapply.dedup import Deduplicator
 from smartapply.desktop.services import DesktopService
 from smartapply.jobsearch.workflow import APPLICATION_STATUSES
 from smartapply.offers import RawJob, make_external_id
@@ -73,6 +74,10 @@ def _create_review_pair() -> tuple[int, int]:
         ("https://www.linkedin.com/jobs/search/?keywords=data", False),
         ("https://www.linkedin.com/jobs/collections/recommended/", False),
         ("https://www.linkedin.com/jobs/view/4464028174", True),
+        (
+            "https://fr.linkedin.com/jobs/view/data-scientist-acme-4464028174?position=2",
+            True,
+        ),
         ("https://example.test/jobs", False),
         ("https://example.test/jobs/search?q=data", False),
         ("https://example.test/jobs/data-scientist-42", True),
@@ -585,6 +590,792 @@ def test_same_direct_offer_url_becomes_an_archived_alias(isolated_db) -> None:
         assert alias.shortlisted_at is None
 
 
+def test_linkedin_slug_and_numeric_urls_share_one_strong_identity(isolated_db) -> None:
+    ingestor = Ingestor()
+    first = ingestor._persist(
+        "serpapi",
+        [
+            _raw(
+                "serpapi:linkedin-numeric",
+                "https://www.linkedin.com/jobs/view/4464028174?position=1",
+                source="serpapi",
+            )
+        ],
+    )
+    second = ingestor._persist(
+        "linkedin",
+        [
+            _raw(
+                "linkedin:slug",
+                "https://fr.linkedin.com/jobs/view/data-scientist-acme-4464028174"
+                "?position=2&utm_source=search",
+                source="linkedin",
+            )
+        ],
+    )
+
+    assert second.aliases_created == 1
+    assert second.duplicate_review_ids == []
+    with session_scope() as session:
+        alias = session.query(Job).filter(Job.external_id == "linkedin:slug").one()
+        assert alias.canonical_job_id == first.job_ids[0]
+        assert alias.duplicate_review_status == JobDuplicateStatus.CONFIRMED
+
+
+def test_same_direct_offer_url_over_one_month_apart_stays_distinct(isolated_db) -> None:
+    published = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    ingestor = Ingestor()
+    first = _raw(
+        "serpapi:old-republication",
+        "https://acme.test/jobs/republication",
+        source="serpapi",
+    ).model_copy(update={"published_date": published})
+    later = _raw(
+        "linkedin:new-republication",
+        "https://acme.test/jobs/republication",
+        source="linkedin",
+    ).model_copy(update={"published_date": published + timedelta(days=31)})
+
+    first_report = ingestor._persist("serpapi", [first])
+    later_report = ingestor._persist("linkedin", [later])
+
+    assert later_report.aliases_created == 0
+    assert later_report.duplicate_review_ids == []
+    with session_scope() as session:
+        old_job = session.get(Job, first_report.job_ids[0])
+        new_job = session.get(Job, later_report.job_ids[0])
+        assert old_job is not None
+        assert new_job is not None
+        assert old_job.canonical_job_id is None
+        assert new_job.canonical_job_id is None
+        assert new_job.duplicate_review_status == JobDuplicateStatus.NONE
+
+
+def test_exact_url_alias_cannot_bridge_republications_over_one_month(isolated_db) -> None:
+    published = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    url = "https://acme.test/jobs/chain-republication"
+    ingestor = Ingestor()
+
+    first = ingestor._persist(
+        "serpapi",
+        [
+            _raw("serpapi:chain-day-1", url, source="serpapi").model_copy(
+                update={"published_date": published}
+            )
+        ],
+    )
+    middle = ingestor._persist(
+        "linkedin",
+        [
+            _raw("linkedin:chain-day-20", url, source="linkedin").model_copy(
+                update={"published_date": published + timedelta(days=19)}
+            )
+        ],
+    )
+    later = ingestor._persist(
+        "linkedin",
+        [
+            _raw("linkedin:chain-day-45", url, source="linkedin").model_copy(
+                update={"published_date": published + timedelta(days=44)}
+            )
+        ],
+    )
+
+    assert middle.aliases_created == 1
+    assert later.aliases_created == 0
+    assert later.duplicate_review_ids == []
+    with session_scope() as session:
+        later_job = session.get(Job, later.job_ids[0])
+        assert later_job is not None
+        assert later_job.canonical_job_id is None
+        assert later_job.duplicate_review_status == JobDuplicateStatus.NONE
+        assert canonical_job(session, later_job.id).id != first.job_ids[0]
+
+
+def test_backfill_releases_pending_duplicate_over_one_month_apart(isolated_db) -> None:
+    root_id, duplicate_id = _create_review_pair()
+    published = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    with session_scope() as session:
+        root = session.get(Job, root_id)
+        duplicate = session.get(Job, duplicate_id)
+        assert root is not None
+        assert duplicate is not None
+        root.published_date = published
+        duplicate.published_date = published + timedelta(days=31)
+
+    assert backfill_duplicate_reviews() == 1
+    assert backfill_duplicate_reviews() == 0
+    with session_scope() as session:
+        duplicate = session.get(Job, duplicate_id)
+        assert duplicate is not None
+        assert duplicate.possible_duplicate_of_id is None
+        assert duplicate.duplicate_review_status == JobDuplicateStatus.NONE
+        assert duplicate.duplicate_match_type is None
+        assert duplicate.duplicate_confidence is None
+
+
+def test_backfill_relink_checks_aliases_outside_the_company_bucket(isolated_db) -> None:
+    root_id, duplicate_id = _create_review_pair()
+    published = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    with session_scope() as session:
+        root = session.get(Job, root_id)
+        duplicate = session.get(Job, duplicate_id)
+        assert root is not None
+        assert duplicate is not None
+        root.published_date = published
+        duplicate.published_date = published + timedelta(days=1)
+        alias = upsert_job(
+            session,
+            external_id="legacy:old-alias-other-company",
+            title=root.title,
+            company="Entreprise non communiquée",
+            location=root.location,
+            description=root.description,
+            application_url="https://acme.test/jobs/old-alias",
+            source="linkedin",
+            published_date=published - timedelta(days=61),
+        )
+        alias.canonical_job_id = root_id
+        alias.duplicate_review_status = JobDuplicateStatus.CONFIRMED
+        alias.duplicate_match_type = "exact_url"
+        alias.duplicate_confidence = 1.0
+        alias.archived_at = datetime.now(timezone.utc)
+        alias.status = JobStatus.ARCHIVED
+
+    assert backfill_duplicate_reviews() == 1
+    assert backfill_duplicate_reviews() == 0
+    with session_scope() as session:
+        duplicate = session.get(Job, duplicate_id)
+        assert duplicate is not None
+        assert duplicate.possible_duplicate_of_id is None
+        assert duplicate.duplicate_review_status == JobDuplicateStatus.NONE
+
+
+def test_backfill_strong_url_still_respects_full_group_time_window(isolated_db) -> None:
+    root_id, duplicate_id = _create_review_pair()
+    published = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    direct_url = "https://acme.test/jobs/shared-strong-identity"
+    with session_scope() as session:
+        root = session.get(Job, root_id)
+        duplicate = session.get(Job, duplicate_id)
+        assert root is not None
+        assert duplicate is not None
+        root.published_date = published
+        duplicate.published_date = published + timedelta(days=1)
+        root.application_url = duplicate.application_url = direct_url
+        alias = upsert_job(
+            session,
+            external_id="legacy:old-strong-alias",
+            title=root.title,
+            company="Entreprise non communiquée",
+            location=root.location,
+            description=root.description,
+            application_url=direct_url,
+            source="linkedin",
+            published_date=published - timedelta(days=61),
+        )
+        alias.canonical_job_id = root_id
+        alias.duplicate_review_status = JobDuplicateStatus.CONFIRMED
+        alias.duplicate_match_type = "exact_url"
+        alias.duplicate_confidence = 1.0
+        alias.archived_at = datetime.now(timezone.utc)
+        alias.status = JobStatus.ARCHIVED
+
+    assert backfill_duplicate_reviews() == 1
+    assert backfill_duplicate_reviews() == 0
+    with session_scope() as session:
+        duplicate = session.get(Job, duplicate_id)
+        assert duplicate is not None
+        assert duplicate.possible_duplicate_of_id is None
+        assert duplicate.duplicate_review_status == JobDuplicateStatus.NONE
+
+
+def test_backfill_releases_anonymous_fuzzy_pair_without_touching_history(isolated_db) -> None:
+    root_id, duplicate_id = _create_review_pair()
+    analyzed_at = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    with session_scope() as session:
+        root = session.get(Job, root_id)
+        duplicate = session.get(Job, duplicate_id)
+        assert root is not None
+        assert duplicate is not None
+        root.company = duplicate.company = "Entreprise non communiquée"
+        duplicate.analyzed_at = analyzed_at
+        duplicate.source_data = {"legacy": "preserve"}
+        application = create_or_get_application(session, duplicate_id)
+        application.status = JobStatus.ARCHIVED
+        application.notes = "Historique à conserver"
+        application_id = application.id
+
+    assert backfill_duplicate_reviews() == 1
+    assert backfill_duplicate_reviews() == 0
+    with session_scope() as session:
+        duplicate = session.get(Job, duplicate_id)
+        application = session.get(Application, application_id)
+        assert duplicate is not None
+        assert duplicate.possible_duplicate_of_id is None
+        assert duplicate.duplicate_review_status == JobDuplicateStatus.NONE
+        assert duplicate.duplicate_match_type is None
+        assert duplicate.duplicate_confidence is None
+        assert duplicate.analyzed_at.replace(tzinfo=timezone.utc) == analyzed_at
+        assert duplicate.source_data == {"legacy": "preserve"}
+        assert application is not None
+        assert application.job_id == duplicate_id
+        assert application.status == JobStatus.ARCHIVED
+        assert application.notes == "Historique à conserver"
+
+
+def test_backfill_releases_fuzzy_pair_in_different_precise_cities(isolated_db) -> None:
+    root_id, duplicate_id = _create_review_pair()
+    with session_scope() as session:
+        root = session.get(Job, root_id)
+        duplicate = session.get(Job, duplicate_id)
+        assert root is not None
+        assert duplicate is not None
+        root.location = "75 - Paris"
+        root.source_data = {"lieuTravail": {"commune": "75056"}}
+        duplicate.location = "69 - Lyon"
+        duplicate.source_data = {"lieuTravail": {"commune": "69123"}}
+
+    assert backfill_duplicate_reviews() == 1
+    assert backfill_duplicate_reviews() == 0
+    with session_scope() as session:
+        duplicate = session.get(Job, duplicate_id)
+        assert duplicate is not None
+        assert duplicate.possible_duplicate_of_id is None
+        assert duplicate.duplicate_review_status == JobDuplicateStatus.NONE
+        assert duplicate.duplicate_match_type is None
+        assert duplicate.duplicate_confidence is None
+
+
+def test_backfill_caps_existing_fuzzy_confidence_below_certainty(isolated_db) -> None:
+    _root_id, duplicate_id = _create_review_pair()
+    with session_scope() as session:
+        duplicate = session.get(Job, duplicate_id)
+        assert duplicate is not None
+        duplicate.duplicate_confidence = 1.0
+
+    assert backfill_duplicate_reviews() == 1
+    assert backfill_duplicate_reviews() == 0
+    with session_scope() as session:
+        duplicate = session.get(Job, duplicate_id)
+        assert duplicate is not None
+        assert duplicate.duplicate_review_status == JobDuplicateStatus.PENDING
+        assert duplicate.duplicate_confidence == 0.99
+
+
+def test_backfill_recomputes_pending_confidence_with_precise_location(isolated_db) -> None:
+    root_id, duplicate_id = _create_review_pair()
+    with session_scope() as session:
+        root = session.get(Job, root_id)
+        duplicate = session.get(Job, duplicate_id)
+        assert root is not None
+        assert duplicate is not None
+        root.location = "75 - Paris"
+        duplicate.location = "Paris, Île-de-France, France"
+        duplicate.description = (
+            "Nous recherchons un Data Scientist pour développer des pipelines de données "
+            "et des modèles Python et PyTorch en environnement de production."
+        )
+        expected = Deduplicator().find_probable_duplicate(duplicate, [root])
+        assert expected is not None
+        assert expected.location_score == 100.0
+        duplicate.duplicate_confidence = 0.5
+        expected_confidence = expected.confidence
+
+    assert backfill_duplicate_reviews() == 1
+    assert backfill_duplicate_reviews() == 0
+    with session_scope() as session:
+        duplicate = session.get(Job, duplicate_id)
+        assert duplicate is not None
+        assert duplicate.duplicate_review_status == JobDuplicateStatus.PENDING
+        assert duplicate.duplicate_confidence == expected_confidence
+
+
+def test_backfill_recomputes_fuzzy_confidence_from_confirmed_alias(isolated_db) -> None:
+    published = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    with session_scope() as session:
+        root = upsert_job(
+            session,
+            external_id="legacy:component-root",
+            title="Platform Engineer",
+            company="Acme SAS",
+            location="Paris",
+            description="Infrastructure cloud Kubernetes et observabilité.",
+            application_url="https://acme.test/jobs/component-root",
+            source="serpapi",
+            published_date=published,
+        )
+        alias = upsert_job(
+            session,
+            external_id="legacy:component-alias",
+            title="Data Scientist",
+            company="Acme SAS",
+            location="Paris",
+            description=_DESCRIPTION,
+            application_url="https://acme.test/jobs/component-alias",
+            source="linkedin",
+            published_date=published,
+        )
+        alias.canonical_job_id = root.id
+        alias.duplicate_review_status = JobDuplicateStatus.CONFIRMED
+        alias.duplicate_match_type = "exact_url"
+        alias.duplicate_confidence = 1.0
+        alias.status = JobStatus.ARCHIVED
+        target = upsert_job(
+            session,
+            external_id="legacy:component-target",
+            title="Data Scientist",
+            company="Acme SAS",
+            location="Paris",
+            description=_DESCRIPTION,
+            application_url="https://acme.test/jobs/component-target",
+            source="francetravail",
+            published_date=published,
+        )
+        target.possible_duplicate_of_id = root.id
+        target.duplicate_review_status = JobDuplicateStatus.PENDING
+        target.duplicate_match_type = "fuzzy"
+        target.duplicate_confidence = 0.5
+        expected = Deduplicator().find_probable_duplicate(target, [alias])
+        assert expected is not None
+        root_id = int(root.id)
+        target_id = int(target.id)
+        expected_confidence = expected.confidence
+
+    assert backfill_duplicate_reviews() == 1
+    assert backfill_duplicate_reviews() == 0
+    with session_scope() as session:
+        target = session.get(Job, target_id)
+        assert target is not None
+        assert target.possible_duplicate_of_id == root_id
+        assert target.duplicate_review_status == JobDuplicateStatus.PENDING
+        assert target.duplicate_confidence == expected_confidence
+
+
+def test_backfill_later_pending_member_does_not_inflate_reference_confidence(isolated_db) -> None:
+    published = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    target_description = _DESCRIPTION
+    root_description = (
+        "Nous recherchons un Data Scientist pour développer des modèles Python "
+        "dans une plateforme cloud et maintenir les services analytiques."
+    )
+    with session_scope() as session:
+        root = upsert_job(
+            session,
+            external_id="legacy:growing-root",
+            title="Data Scientist",
+            company="Acme SAS",
+            location="Paris",
+            description=root_description,
+            application_url="https://acme.test/jobs/growing-root",
+            source="serpapi",
+            published_date=published,
+        )
+        target = upsert_job(
+            session,
+            external_id="legacy:growing-target",
+            title="Data Scientist",
+            company="Acme SAS",
+            location="Paris",
+            description=target_description,
+            application_url="https://acme.test/jobs/growing-target",
+            source="linkedin",
+            published_date=published,
+        )
+        initial_match = Deduplicator().find_probable_duplicate(target, [root])
+        assert initial_match is not None
+        expected_confidence = initial_match.confidence
+        target.possible_duplicate_of_id = root.id
+        target.duplicate_review_status = JobDuplicateStatus.PENDING
+        target.duplicate_match_type = "fuzzy"
+        target.duplicate_confidence = initial_match.confidence
+        later_member = upsert_job(
+            session,
+            external_id="legacy:growing-later-member",
+            title="Data Scientist",
+            company="Acme SAS",
+            location="Paris",
+            description=target_description,
+            application_url="https://acme.test/jobs/growing-later-member",
+            source="francetravail",
+            published_date=published,
+        )
+        target_id = int(target.id)
+        later_member_id = int(later_member.id)
+
+    assert backfill_duplicate_reviews() == 1
+    assert backfill_duplicate_reviews() == 0
+    with session_scope() as session:
+        target = session.get(Job, target_id)
+        later_member = session.get(Job, later_member_id)
+        assert target is not None
+        assert later_member is not None
+        assert target.duplicate_confidence == expected_confidence
+        assert later_member.duplicate_review_status == JobDuplicateStatus.PENDING
+        assert later_member.possible_duplicate_of_id == target_id
+
+
+@pytest.mark.parametrize("sibling_location", ["Paris", "Lyon"])
+def test_backfill_pending_siblings_cannot_prove_a_match_to_unrelated_reference(
+    isolated_db, sibling_location
+) -> None:
+    root_id, target_id = _create_review_pair()
+    with session_scope() as session:
+        root = session.get(Job, root_id)
+        target = session.get(Job, target_id)
+        root.title = "Comptable fournisseurs"
+        root.description = root.cleaned_description = (
+            "Gestion des factures, clôtures et rapprochements bancaires."
+        )
+        target.location = ""
+        target.duplicate_confidence = 0.5
+        sibling = upsert_job(
+            session,
+            external_id="legacy:unsupported-pending-sibling",
+            title="Data Scientist",
+            company="Acme SAS",
+            location=sibling_location,
+            description=_DESCRIPTION,
+            application_url="https://acme.test/jobs/unsupported-pending-sibling",
+            source="linkedin",
+        )
+        sibling.possible_duplicate_of_id = root_id
+        sibling.duplicate_review_status = JobDuplicateStatus.PENDING
+        sibling.duplicate_match_type = "fuzzy"
+        sibling.duplicate_confidence = 0.5
+        sibling_id = int(sibling.id)
+        application = create_or_get_application(session, root_id)
+        application.status = JobStatus.SENT
+        application.notes = "Dossier envoyé à conserver"
+        application.cv_docx_path = "/documents/original/CV.docx"
+        application_id = int(application.id)
+
+    assert backfill_duplicate_reviews() == 2
+    assert backfill_duplicate_reviews() == 0
+    with session_scope() as session:
+        target = session.get(Job, target_id)
+        sibling = session.get(Job, sibling_id)
+        application = session.get(Application, application_id)
+        assert target.duplicate_review_status == JobDuplicateStatus.NONE
+        assert target.possible_duplicate_of_id is None
+        assert sibling.duplicate_review_status == JobDuplicateStatus.PENDING
+        assert sibling.possible_duplicate_of_id == target_id
+        assert application_for_duplicate_group(session, target_id) is None
+        assert application_for_duplicate_group(session, sibling_id) is None
+        assert application.job_id == root_id
+        assert application.status == JobStatus.SENT
+        assert application.notes == "Dossier envoyé à conserver"
+        assert application.cv_docx_path == "/documents/original/CV.docx"
+
+
+def test_backfill_strong_identity_from_pending_sibling_does_not_protect_wrong_reference(
+    isolated_db,
+) -> None:
+    root_id, target_id = _create_review_pair()
+    shared_url = "https://acme.test/jobs/shared-pending-identity"
+    with session_scope() as session:
+        root = session.get(Job, root_id)
+        target = session.get(Job, target_id)
+        root.company = target.company = "Entreprise non communiquée"
+        target.application_url = shared_url
+        sibling = upsert_job(
+            session,
+            external_id="legacy:strong-pending-sibling",
+            title=target.title,
+            company=target.company,
+            location=target.location,
+            description=_DESCRIPTION,
+            application_url=shared_url,
+            source="linkedin",
+        )
+        sibling.possible_duplicate_of_id = root_id
+        sibling.duplicate_review_status = JobDuplicateStatus.PENDING
+        sibling.duplicate_match_type = "fuzzy"
+        sibling.duplicate_confidence = 0.5
+        sibling_id = int(sibling.id)
+
+    assert backfill_duplicate_reviews() == 2
+    assert backfill_duplicate_reviews() == 0
+    with session_scope() as session:
+        for job_id in (target_id, sibling_id):
+            job = session.get(Job, job_id)
+            assert job.possible_duplicate_of_id is None
+            assert job.duplicate_review_status == JobDuplicateStatus.NONE
+            assert job.duplicate_confidence is None
+
+
+@pytest.mark.parametrize("conflict", ["location", "date"])
+def test_backfill_new_link_respects_full_incoming_pending_group(isolated_db, conflict) -> None:
+    published = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    with session_scope() as session:
+        root = upsert_job(
+            session,
+            external_id="legacy:join-paris-root",
+            title="Data Scientist",
+            company="Acme SAS",
+            location="Paris",
+            description=_DESCRIPTION,
+            application_url="https://acme.test/jobs/join-paris-root",
+            source="serpapi",
+            published_date=published,
+        )
+        bridge = upsert_job(
+            session,
+            external_id="legacy:join-unknown-bridge",
+            title=root.title,
+            company=root.company,
+            location="",
+            description=_DESCRIPTION,
+            application_url="https://acme.test/jobs/join-unknown-bridge",
+            source="linkedin",
+            published_date=published + timedelta(days=20) if conflict == "date" else published,
+        )
+        child = upsert_job(
+            session,
+            external_id="legacy:join-lyon-child",
+            title=root.title,
+            company=root.company,
+            location="Lyon" if conflict == "location" else "Paris",
+            description=_DESCRIPTION,
+            application_url="https://acme.test/jobs/join-lyon-child",
+            source="francetravail",
+            published_date=published + timedelta(days=40) if conflict == "date" else published,
+        )
+        child.possible_duplicate_of_id = bridge.id
+        child.duplicate_review_status = JobDuplicateStatus.PENDING
+        child.duplicate_match_type = "fuzzy"
+        match = Deduplicator().find_probable_duplicate(child, [bridge])
+        assert match is not None
+        child.duplicate_confidence = match.confidence
+        bridge_id, child_id = int(bridge.id), int(child.id)
+
+    assert backfill_duplicate_reviews() == 0
+    assert backfill_duplicate_reviews() == 0
+    with session_scope() as session:
+        bridge = session.get(Job, bridge_id)
+        child = session.get(Job, child_id)
+        assert bridge.possible_duplicate_of_id is None
+        assert bridge.duplicate_review_status == JobDuplicateStatus.NONE
+        assert child.possible_duplicate_of_id == bridge_id
+        assert child.duplicate_review_status == JobDuplicateStatus.PENDING
+
+
+def test_backfill_finds_strong_identity_in_confirmed_alias(isolated_db) -> None:
+    published = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    shared_url = "https://acme.test/jobs/identity-through-alias"
+    with session_scope() as session:
+        root = upsert_job(
+            session,
+            external_id="legacy:strong-component-root",
+            title="Platform Engineer",
+            company="Entreprise non communiquée",
+            location="Paris",
+            description="Infrastructure cloud et Kubernetes.",
+            application_url="https://acme.test/jobs/different-root-url",
+            source="serpapi",
+            published_date=published,
+        )
+        alias = upsert_job(
+            session,
+            external_id="legacy:strong-component-alias",
+            title="Data Scientist",
+            company="Entreprise non communiquée",
+            location="Paris",
+            description=_DESCRIPTION,
+            application_url=shared_url,
+            source="linkedin",
+            published_date=published,
+        )
+        alias.canonical_job_id = root.id
+        alias.duplicate_review_status = JobDuplicateStatus.CONFIRMED
+        alias.duplicate_match_type = "exact_url"
+        alias.duplicate_confidence = 1.0
+        alias.status = JobStatus.ARCHIVED
+        target = upsert_job(
+            session,
+            external_id="legacy:strong-component-target",
+            title="Data Scientist",
+            company="Entreprise non communiquée",
+            location="Lyon",
+            description=_DESCRIPTION,
+            application_url=shared_url,
+            source="francetravail",
+            published_date=published,
+        )
+        target.possible_duplicate_of_id = root.id
+        target.duplicate_review_status = JobDuplicateStatus.PENDING
+        target.duplicate_match_type = "exact_url"
+        target.duplicate_confidence = 1.0
+        root_id = int(root.id)
+        target_id = int(target.id)
+
+    assert backfill_duplicate_reviews() == 0
+    with session_scope() as session:
+        target = session.get(Job, target_id)
+        assert target is not None
+        assert target.possible_duplicate_of_id == root_id
+        assert target.duplicate_review_status == JobDuplicateStatus.PENDING
+        assert target.duplicate_match_type == "exact_url"
+        assert target.duplicate_confidence == 1.0
+
+
+def test_backfill_releases_fuzzy_review_that_matches_no_group_member(isolated_db) -> None:
+    _root_id, duplicate_id = _create_review_pair()
+    with session_scope() as session:
+        duplicate = session.get(Job, duplicate_id)
+        assert duplicate is not None
+        duplicate.title = "Comptable fournisseurs"
+        duplicate.description = "Gestion des factures, clôtures et rapprochements bancaires."
+
+    assert backfill_duplicate_reviews() == 1
+    assert backfill_duplicate_reviews() == 0
+    with session_scope() as session:
+        duplicate = session.get(Job, duplicate_id)
+        assert duplicate is not None
+        assert duplicate.possible_duplicate_of_id is None
+        assert duplicate.duplicate_review_status == JobDuplicateStatus.NONE
+
+
+def test_backfill_reclassifies_exact_url_review_without_strong_identity(isolated_db) -> None:
+    root_id, duplicate_id = _create_review_pair()
+    with session_scope() as session:
+        duplicate = session.get(Job, duplicate_id)
+        assert duplicate is not None
+        duplicate.duplicate_match_type = "exact_url"
+        duplicate.duplicate_confidence = 1.0
+
+    assert backfill_duplicate_reviews() == 1
+    assert backfill_duplicate_reviews() == 0
+    with session_scope() as session:
+        duplicate = session.get(Job, duplicate_id)
+        assert duplicate is not None
+        assert duplicate.possible_duplicate_of_id == root_id
+        assert duplicate.duplicate_review_status == JobDuplicateStatus.PENDING
+        assert duplicate.duplicate_match_type == "fuzzy"
+        assert duplicate.duplicate_confidence == 0.99
+
+
+@pytest.mark.parametrize(
+    "review_status",
+    [JobDuplicateStatus.CONFIRMED, JobDuplicateStatus.REJECTED],
+)
+def test_location_backfill_preserves_resolved_review_and_history(
+    isolated_db,
+    review_status,
+) -> None:
+    root_id, duplicate_id = _create_review_pair()
+    with session_scope() as session:
+        root = session.get(Job, root_id)
+        duplicate = session.get(Job, duplicate_id)
+        assert root is not None
+        assert duplicate is not None
+        root.location = "Paris"
+        duplicate.location = "Lyon"
+        duplicate.duplicate_review_status = review_status
+        duplicate.possible_duplicate_of_id = None
+        duplicate.canonical_job_id = (
+            root_id if review_status == JobDuplicateStatus.CONFIRMED else None
+        )
+        duplicate.duplicate_confidence = 0.87
+        application = create_or_get_application(session, duplicate_id)
+        application.notes = "Historique résolu à préserver"
+        application_id = application.id
+
+    assert backfill_duplicate_reviews() == 0
+    with session_scope() as session:
+        duplicate = session.get(Job, duplicate_id)
+        application = session.get(Application, application_id)
+        assert duplicate is not None
+        assert duplicate.duplicate_review_status == review_status
+        assert duplicate.duplicate_confidence == 0.87
+        assert duplicate.possible_duplicate_of_id is None
+        assert duplicate.canonical_job_id == (
+            root_id if review_status == JobDuplicateStatus.CONFIRMED else None
+        )
+        assert application is not None
+        assert application.notes == "Historique résolu à préserver"
+
+
+def test_backfill_preserves_mislabeled_fuzzy_pair_with_same_direct_url(isolated_db) -> None:
+    root_id, duplicate_id = _create_review_pair()
+    direct_url = (
+        "https://fr.linkedin.com/jobs/view/data-scientist-acme-4464028174"
+        "?position=2&utm_source=legacy"
+    )
+    with session_scope() as session:
+        root = session.get(Job, root_id)
+        duplicate = session.get(Job, duplicate_id)
+        assert root is not None
+        assert duplicate is not None
+        root.company = duplicate.company = "Entreprise non communiquée"
+        root.location = "75 - Paris"
+        duplicate.location = "69 - Lyon"
+        root.application_url = "https://www.linkedin.com/jobs/view/4464028174?position=1"
+        duplicate.application_url = direct_url
+        duplicate.duplicate_confidence = 1.0
+
+    assert backfill_duplicate_reviews() == 1
+    assert backfill_duplicate_reviews() == 0
+    with session_scope() as session:
+        duplicate = session.get(Job, duplicate_id)
+        assert duplicate is not None
+        assert duplicate.possible_duplicate_of_id == root_id
+        assert duplicate.duplicate_review_status == JobDuplicateStatus.PENDING
+        assert duplicate.duplicate_match_type == "fuzzy"
+        assert duplicate.duplicate_confidence == 0.99
+
+
+def test_backfill_preserves_mislabeled_fuzzy_pair_with_same_france_travail_id(
+    isolated_db,
+) -> None:
+    root_id, duplicate_id = _create_review_pair()
+    with session_scope() as session:
+        root = session.get(Job, root_id)
+        duplicate = session.get(Job, duplicate_id)
+        assert root is not None
+        assert duplicate is not None
+        root.company = duplicate.company = "Entreprise non communiquée"
+        root.source = duplicate.source = "francetravail"
+        root.location = "75 - Paris"
+        duplicate.location = "69 - Lyon"
+        root.source_data = {
+            "id": "213HYVJ",
+            "lieuTravail": {"commune": "75056"},
+        }
+        duplicate.source_data = {
+            "id": "213HYVJ",
+            "lieuTravail": {"commune": "69123"},
+        }
+
+    assert backfill_duplicate_reviews() == 0
+    with session_scope() as session:
+        duplicate = session.get(Job, duplicate_id)
+        assert duplicate is not None
+        assert duplicate.possible_duplicate_of_id == root_id
+        assert duplicate.duplicate_review_status == JobDuplicateStatus.PENDING
+        assert duplicate.duplicate_match_type == "fuzzy"
+
+
+def test_backfill_does_not_treat_shared_search_page_as_strong_identity(isolated_db) -> None:
+    root_id, duplicate_id = _create_review_pair()
+    with session_scope() as session:
+        root = session.get(Job, root_id)
+        duplicate = session.get(Job, duplicate_id)
+        assert root is not None
+        assert duplicate is not None
+        root.company = duplicate.company = "Entreprise non communiquée"
+        root.application_url = duplicate.application_url = (
+            "https://www.linkedin.com/jobs/search/?keywords=data"
+        )
+
+    assert backfill_duplicate_reviews() == 1
+    with session_scope() as session:
+        duplicate = session.get(Job, duplicate_id)
+        assert duplicate is not None
+        assert duplicate.possible_duplicate_of_id is None
+        assert duplicate.duplicate_review_status == JobDuplicateStatus.NONE
+
+
 def test_manual_direct_url_with_different_label_requires_review(isolated_db) -> None:
     ingestor = Ingestor()
     first = ingestor._persist(
@@ -609,6 +1400,36 @@ def test_manual_direct_url_with_different_label_requires_review(isolated_db) -> 
         assert reviewed.duplicate_review_status == JobDuplicateStatus.PENDING
         assert reviewed.duplicate_match_type == "exact_url"
         assert reviewed.duplicate_confidence == 1.0
+
+
+def test_exact_url_identity_remains_strong_for_anonymous_employer(isolated_db) -> None:
+    ingestor = Ingestor()
+    first = _raw(
+        "serpapi:anonymous-url",
+        "https://acme.test/jobs/anonymous-identity",
+        source="serpapi",
+    ).model_copy(
+        update={"company": "Entreprise non communiquée", "location": "75 - Paris"}
+    )
+    second = _raw(
+        "linkedin:anonymous-url",
+        "https://acme.test/jobs/anonymous-identity",
+        source="linkedin",
+    ).model_copy(
+        update={"company": "Entreprise non communiquée", "location": "69 - Lyon"}
+    )
+
+    first_report = ingestor._persist("serpapi", [first])
+    second_report = ingestor._persist("linkedin", [second])
+
+    assert second_report.aliases_created == 1
+    assert backfill_duplicate_reviews() == 0
+    with session_scope() as session:
+        alias = session.query(Job).filter(Job.external_id == second.external_id).one()
+        assert alias.canonical_job_id == first_report.job_ids[0]
+        assert alias.duplicate_review_status == JobDuplicateStatus.CONFIRMED
+        assert alias.duplicate_match_type == "exact_url"
+        assert alias.duplicate_confidence == 1.0
 
 
 def test_legacy_france_travail_id_does_not_create_another_row_or_application(isolated_db) -> None:

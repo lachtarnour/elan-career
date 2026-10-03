@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from smartapply.database import session_scope
@@ -14,8 +15,14 @@ from smartapply.database.repository import (
     list_known_jobs,
     upsert_job,
 )
-from smartapply.dedup import Deduplicator, DuplicateCandidate
+from smartapply.dedup import (
+    Deduplicator,
+    DuplicateCandidate,
+    offers_within_duplicate_group_time_window,
+)
+from smartapply.dedup.deduplicator import linked_duplicate_components
 from smartapply.logging_setup import get_logger
+from smartapply.offer_identity import is_direct_offer_url
 from smartapply.offers import ManualOfferInput, RawJob
 from smartapply.parsing import clean_description
 from smartapply.pipeline.ingest import (
@@ -31,6 +38,10 @@ from smartapply.pipeline.ingest import (
 )
 from smartapply.pipeline.ingest.dedupe import _native_offer_key
 from smartapply.scrapers import ManualScraper, get_scraper
+from smartapply.scrapers.apify_recovery import (
+    ApifyRecoveryJournal,
+    ApifyRecoveryJournalError,
+)
 
 logger = get_logger(__name__)
 
@@ -131,11 +142,18 @@ class Ingestor:
             hit_raw_seen_cap=collect_result.hit_raw_seen_cap,
             cancelled=collect_result.cancelled,
             warnings=[*collect_result.warnings, *source_warnings],
+            completed_source_run_ids=collect_result.completed_source_run_ids,
+            source_run_journal_path=(
+                str(scraper.recovery_journal.path)
+                if source.strip().lower() == "linkedin"
+                and getattr(scraper, "recovery_journal", None) is not None
+                else None
+            ),
         )
 
     def persist_collection(self, collection: IngestCollection) -> IngestReport:
         """Persist one completed collection; callers may serialize this step."""
-        return self._persist(
+        report = self._persist(
             collection.source,
             collection.raw_jobs,
             search_audit=collection.search_audit,
@@ -144,7 +162,20 @@ class Ingestor:
             hit_raw_seen_cap=collection.hit_raw_seen_cap,
             cancelled=collection.cancelled,
             warnings=collection.warnings,
+            completed_source_run_ids=collection.completed_source_run_ids,
         )
+        if collection.completed_source_run_ids and collection.source_run_journal_path:
+            try:
+                ApifyRecoveryJournal(Path(collection.source_run_journal_path)).remove_many(
+                    collection.completed_source_run_ids
+                )
+            except ApifyRecoveryJournalError as exc:
+                report.warnings.append(
+                    "Les offres LinkedIn ont été enregistrées, mais le journal de "
+                    "récupération Apify n’a pas pu être finalisé. Le prochain passage "
+                    f"pourra relire les mêmes datasets : {exc}"
+                )
+        return report
 
     def from_url(self, url: str) -> IngestReport:
         return self._persist("manual", [ManualScraper().from_url(url)])
@@ -181,6 +212,7 @@ class Ingestor:
         hit_raw_seen_cap: bool = False,
         cancelled: bool = False,
         warnings: list[str] | None = None,
+        completed_source_run_ids: list[str] | None = None,
     ) -> IngestReport:
         job_ids: list[int] = []
         inserted = 0
@@ -354,6 +386,7 @@ class Ingestor:
             aliases_created=aliases_created,
             search_audit=search_audit or [],
             warnings=warnings or [],
+            completed_source_run_ids=completed_source_run_ids or [],
         )
 
     @staticmethod
@@ -389,14 +422,23 @@ def _matching_known_job(raw: RawJob, known_jobs) -> object | None:  # noqa: ANN0
     raw_url = _normalize_application_url(raw.application_url)
     if not raw_url:
         return None
-    for job in known_jobs:
+    components = linked_duplicate_components(known_jobs)
+    matches = [
+        job
+        for job in known_jobs
         if (
             raw_url == _normalize_application_url(job.application_url)
             and _same_offer_label(raw.company, job.company)
             and _same_offer_label(raw.title, job.title)
-        ):
-            return job
-    return None
+            and offers_within_duplicate_group_time_window(
+                raw,
+                job,
+                known_jobs,
+                components=components,
+            )
+        )
+    ]
+    return min(matches, key=_job_identity_priority) if matches else None
 
 
 def _same_offer_label(left: str | None, right: str | None) -> bool:
@@ -408,39 +450,24 @@ def _matching_exact_offer_url(raw: RawJob, known_jobs: list[Any]) -> object | No
     raw_url = _normalize_application_url(raw.application_url)
     if not raw_url or not _is_direct_offer_url(raw.application_url):
         return None
+    components = linked_duplicate_components(known_jobs)
     matches = [
         job
         for job in known_jobs
         if raw_url == _normalize_application_url(getattr(job, "application_url", None))
+        and offers_within_duplicate_group_time_window(
+            raw,
+            job,
+            known_jobs,
+            components=components,
+        )
     ]
     return min(matches, key=_job_identity_priority) if matches else None
 
 
 def _is_direct_offer_url(url: str | None) -> bool:
-    value = (url or "").strip().lower()
-    if not value:
-        return False
-    from urllib.parse import urlsplit
-
-    parsed = urlsplit(value if "://" in value else f"https://{value}")
-    path = parsed.path.rstrip("/")
-    if "/offres/recherche/detail/" in path:
-        return True
-    segments = [segment for segment in path.split("/") if segment]
-    if parsed.netloc.endswith("linkedin.com"):
-        return len(segments) >= 3 and segments[-3:-1] == ["jobs", "view"] and segments[-1].isdigit()
-
-    generic_leafs = {
-        "alert", "alerts", "collection", "collections", "recommended",
-        "saved", "search", "results",
-    }
-    for marker in ("jobs", "job", "vacancies", "vacancy", "offers", "offer"):
-        if marker not in segments:
-            continue
-        leaf = segments[-1]
-        if leaf != marker and leaf not in generic_leafs:
-            return True
-    return False
+    """Compatibility wrapper around the shared direct-offer classifier."""
+    return is_direct_offer_url(url)
 
 
 def _canonical_job(job: Any, known_jobs: list[Any]) -> Any:

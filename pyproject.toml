@@ -39,7 +39,6 @@ dev = [
     "pytest-mock>=3.12",
     "ruff>=0.4",
     "mypy>=1.10",
-    "tiktoken>=0.7",
 ]
 
 [project.scripts]
@@ -59,6 +58,8 @@ include = ["smartapply*"]
 smartapply = [
   "cv/templates/*.j2",
   "cv/*.json",
+  "dedup/data/*.json",
+  "dedup/data/*.txt",
   "desktop/resources/*.svg",
   "desktop/resources/icons/*.svg",
   "desktop/qml/*.qml",

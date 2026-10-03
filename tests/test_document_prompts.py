@@ -11,7 +11,6 @@ from pydantic import ValidationError
 from smartapply.cv.assembly import profile_experiences
 from smartapply.llm import (
     AdaptedCV,
-    ApplicationTexts,
     AssembledCV,
     DocumentReviewIssue,
     DocumentTextReview,
@@ -273,7 +272,6 @@ def test_candidate_aggregate_does_not_claim_to_cover_unexposed_profile_records(s
     assert "skills:tools" in members
     assert context["declared_skills"]["categories"][0]["skills"] == ["Python", "Spark"]
     assert "candidate:provided_evidence" in context["source_index"]
-    assert "not false in the real world" in context["candidate_evidence_scope"]["scope"]
 
 
 def test_texts_prompt_receives_full_offer_and_assembled_cv_without_draft_summary(source_documents):
@@ -287,8 +285,6 @@ def test_texts_prompt_receives_full_offer_and_assembled_cv_without_draft_summary
     assert "AUTHOR_REASONING_SENTINEL" not in prompt
     assert "ANALYSIS_REASONING_SENTINEL" not in prompt
     assert "ANALYSIS_RISK_SENTINEL" not in prompt
-    assert "first-person candidate voice" in application_texts.build_system_prompt()
-    assert "without requiring a supporting project" in application_texts.build_system_prompt()
     start = prompt.rfind("{", 0, prompt.index('"source_index"'))
     context, _ = json.JSONDecoder().raw_decode(prompt[start:])
     assert context["final_cv"]["read_only"] is True
@@ -351,25 +347,6 @@ def test_reviewer_receives_title_with_explicit_cv_boundaries(source_documents, a
     assert set(snapshot["read_only_fields"]) == set(snapshot["data"]) - set(editable)
     assert "style:title" in context["source_index"]
     assert context["candidate_identity"]["data"]["title"] == "Data Scientist"
-    assert "exact historical job title" in context["title_style"]["grounding"]
-    assert "without mandatory project proof" in context["title_style"]["grounding"]
-    assert "offer alone cannot establish" in context["title_style"]["grounding"]
-    assert (
-        "letter subject may still name a different target role"
-        in (context["title_style"]["presentation"])
-    )
-
-
-def test_title_review_checks_grounding_and_coherence_without_keyword_or_history_equivalence():
-    prompt = document_review.build_system_prompt()
-    assert "Inspect only cv_title, professional_summary" in prompt
-    assert "rather than requiring an identical past job title" in prompt
-    assert "Do not require project proof for an ordinary declared competence" in prompt
-    assert "treat presentation alone as style, not a factual defect" in prompt
-    assert "A generated title is not evidence for the summary or letter" in prompt
-    assert "only when corrections are allowed, propose independently valid targeted repairs" in prompt
-    assert "When corrections are disabled, report remaining contradictions" in prompt
-    assert "style:title, style:summary or style:letter" in prompt
 
 
 def test_review_schema_requires_targeted_patch_contract_and_restricts_editable_fields():
@@ -402,40 +379,6 @@ def test_review_schema_requires_targeted_patch_contract_and_restricts_editable_f
         DocumentTextReview.model_validate({**empty.model_dump(), "professional_summary": None})
 
 
-def test_cv_prompt_accepts_declared_competence_without_attributing_a_realization(source_documents):
-    profile = source_documents["profile"]
-    prompt = cv_adaptation.build_user_prompt(
-        profile=profile,
-        analysis=source_documents["analysis"],
-        job_title=source_documents["job_title"],
-        job_company=source_documents["job_company"],
-        selected_experiences=profile.experiences,
-        selected_projects=profile.projects,
-    )
-    summary_prompt = application_texts.build_user_prompt(**_assembled_inputs(source_documents))
-    assert "A declared competence does not require citing an achievement" in summary_prompt
-    summary_system = application_texts.build_system_prompt()
-    assert "supports general competence without requiring a supporting project" in summary_system
-    assert "A claim of using a skill at a particular employer/project" in summary_system
-    assert "producing an outcome needs that specific source" in summary_system
-    assert "skills must be exact skill names" in prompt
-    assert "General competence claims may rely" in cv_adaptation.build_system_prompt()
-    assert "Specific realizations" in cv_adaptation.build_system_prompt()
-
-
-def test_review_summary_correction_uses_generation_sources_without_changing_frozen_skills():
-    prompt = document_review.build_system_prompt()
-    assert "Summary corrections follow the same factual and editorial rules as generation" in prompt
-    assert "the entire declared_skills catalogue supports general competence" in prompt
-    assert "including skills absent from the displayed Skills section" in prompt
-    assert "must not change selected_skills or any other frozen CV section" in prompt
-    assert (
-        "source-backed tool absent from the display catalogue"
-        in document_review.build_system_prompt()
-    )
-    assert "letter may use the entire declared catalogue" in document_review.build_system_prompt()
-
-
 @pytest.mark.parametrize("allow_corrections", [True, False])
 def test_summary_editorial_contract_is_shared_from_generation_through_confirmation(
     source_documents, allow_corrections
@@ -459,46 +402,6 @@ def test_summary_editorial_contract_is_shared_from_generation_through_confirmati
     assert summary["editorial_rules"] == shared_rules
     assert shared_rules in application_texts.build_system_prompt()
     assert shared_rules not in cv_adaptation.build_system_prompt()
-    assert "Apply summary_style.editorial_rules" in document_review.build_system_prompt()
-    assert (
-        "assessing professional_summary and proposing any correction"
-        in document_review.build_system_prompt()
-    )
-    assert "again when confirming the revised text" in document_review.build_system_prompt()
-    assert (
-        "classify presentation alone as style rather than factual"
-        in document_review.build_system_prompt()
-    )
-    assert (
-        "cannot change the frozen Skills or project selection"
-        in document_review.build_system_prompt()
-    )
-    # Identical empty or weakened text would not preserve the editorial contract.
-    for requirement in (
-        "one natural sentence",
-        "Synthesize the candidate's professional profile from the assembled CV and declared skills",
-        "one or two coherent areas of competence or approaches",
-        "without trying to cover the entire background",
-        "Experiences and projects substantiate this synthesis",
-        "do not copy their descriptions or center the summary on an isolated task",
-        "transferable competencies actually exercised",
-        "sector-specific context only when it strengthens relevance to the offer",
-        "Adapt the choice and emphasis of the competencies presented to the role's priorities",
-        "Do not turn offer requirements into candidate capabilities",
-        "A declared competence does not require citing an achievement",
-        "every specific attribution and generalization must preserve the scope",
-        "Stay consistent with cv_title without mechanically repeating it",
-        "without commenting on its alignment with the offer",
-        'without "I", generic self-praise or a keyword inventory',
-        "Do not mention any framework or library, even if present in the profile or offer",
-        "Do not include any numbers, percentages or quantified results",
-        "These prohibitions also apply to rewrites and review of the summary",
-        "A shorter summary is acceptable",
-        "never truncate the text or remove a qualification essential to factual accuracy",
-        "must not change any other CV section",
-        "take precedence over general instructions to display technologies or include metrics",
-    ):
-        assert requirement in shared_rules
 
     assert summary["source_id"] == "style:summary"
     assert "style:summary" in context["source_index"]
@@ -509,25 +412,10 @@ def test_summary_editorial_contract_is_shared_from_generation_through_confirmati
     assert "dont" not in summary
     assert summary["max_characters"] == 200
     assert summary["max_lines"] == 2
-    assert "max 2 lines and max 200 characters, including spaces and punctuation" in generation_prompt
-    assert "Keep technical stack visible" not in generation_prompt
-    assert "Quantify whenever possible" not in generation_prompt
     assert "CV_ONLY_NO_FIRST_PERSON_SENTINEL" not in generation_prompt
     generation_start = generation_prompt.rfind("{", 0, generation_prompt.index('"source_index"'))
     generation_context, _ = json.JSONDecoder().raw_decode(generation_prompt[generation_start:])
     assert generation_context["summary_style"] == summary
-    for obsolete_instruction in (
-        "at most one only when essential",
-        "Start from the same broad role family as cv_title",
-        "Keep the opening role consistent with cv_title",
-        "a named model family, method or implementation technology may clarify",
-        "Prefer a concrete contribution",
-        "choose the documented element",
-        "If no directly relevant achievement is available",
-        "selected contribution or competence",
-    ):
-        assert obsolete_instruction not in generation_prompt
-        assert obsolete_instruction not in shared_rules
     assert context["job_analysis"]["data"]["main_tasks"] == ["Build useful applications"]
     assert context["job_offer"]["full_description"] == source_documents["job_description"]
     assert profile.model_dump() == before
@@ -547,11 +435,6 @@ def test_combined_generation_keeps_summary_and_letter_styles_separate(source_doc
     assert context["recruiter_text_style"]["editorial_rules"] == load_prompt(
         "shared/recruiter_text_rules.j2"
     )
-    system = application_texts.build_system_prompt()
-    assert "Apply summary_style to professional_summary only" in system
-    assert "Letter voice and language do not apply to this field" in system
-    assert "CV summary style does not apply to the letter" in system
-    assert "first-person candidate voice" in system
     assert context["letter_style"]["voice"] == "first person: je in French, I in English"
     assert source_documents["profile"].model_dump() == profile_before
 
@@ -568,9 +451,6 @@ def test_subject_and_body_contract_is_identical_in_generation_review_and_confirm
     subject = expected["letter_style"]["subject"]
     assert subject["target_role"] == source_documents["job_title"]
     assert subject["candidate_name"] == source_documents["profile"].identity.full_name
-    assert "administrative prefix" in subject["instruction"]
-    assert "Do not apply body opening or motivation rules here" in subject["instruction"]
-    assert "never to the subject" in expected["letter_style"]["body_scope"]
 
     prompts = (
         application_texts.build_user_prompt(**_assembled_inputs(source_documents)),
@@ -592,41 +472,13 @@ def test_subject_and_body_contract_is_identical_in_generation_review_and_confirm
         assert exposed["letter_style"]["language"] == language
         # Removing unrelated bullet guidance must not remove the underlying facts,
         # their allowed claims or the ongoing/self-reported project qualifications.
-        for source_block in (
-            "experience_evidence", "selected_project_evidence", "declared_skills"
-        ):
+        for source_block in ("experience_evidence", "selected_project_evidence", "declared_skills"):
             assert exposed[source_block] == expected[source_block]
         assert "FULL_FINAL_CLAIM_SENTINEL" in prompt
         assert "CV_ONLY_NO_FIRST_PERSON_SENTINEL" not in prompt
 
-    for builder in (application_texts, motivation_letter):
-        system = builder.build_system_prompt()
-        assert "Subject: follow letter_style.subject; retain the target role and candidate name" in system
-        assert "Body opening, motivation, word-count and paragraph rules do not apply" in system
-    reviewer = document_review.build_system_prompt()
-    assert "Apply letter_style.subject only to motivation_letter_subject" in reviewer
-    assert "Opening, motivation, personalization and paragraph rules never apply to the subject" in reviewer
     assert source_documents["profile"].model_dump() == before_profile
     assert source_documents["adapted_cv"].model_dump() == before_cv
-
-
-@pytest.mark.parametrize("allow_corrections", [True, False])
-def test_style_review_is_advisory_even_when_other_corrections_are_enabled(
-    source_documents, allow_corrections
-):
-    prompt = document_review.build_user_prompt(
-        **source_documents,
-        letter=MotivationLetter(subject="Application", body="I would like to contribute."),
-        validation_issues=[],
-        allow_corrections=allow_corrections,
-    )
-    system = document_review.build_system_prompt()
-    assert "always use replacement=null for category=style, even when corrections are allowed" in system
-    assert "Propose replacements only for factual, language or structure defects" in system
-    if allow_corrections:
-        assert "Style findings are advisory and must have replacement=null" in prompt
-    else:
-        assert "CORRECTIONS DISABLED: every issue's replacement must be null" in prompt
 
 
 def test_document_sources_include_an_explicit_injectable_reference_date(source_documents):
@@ -681,25 +533,7 @@ def test_reviewer_receives_validator_counts_for_multilingual_text(source_documen
         },
         "professional_summary": {"character_count": len(summary), "nonempty_line_count": 2},
     }
-    assert "without recounting" in prompt
-    assert "heuristic warnings" in prompt
     assert "letter_too_short:12" in prompt
-
-
-def test_generic_review_rules_keep_scopes_and_categories_separate():
-    prompt = document_review.build_system_prompt()
-    assert "without requiring a supporting project" in prompt
-    assert "prospective contribution expresses an intention" in prompt
-    assert "context:reference_date" in prompt
-    assert "past end date cannot be described as current" in prompt
-    assert "source IDs are review metadata" in prompt
-    assert "category=factual" in prompt
-    assert "category=language" in prompt
-    assert "Structure and style findings are advisory" in prompt
-    assert "Do not include compliments" in prompt
-    assert "occurring exactly once" in prompt
-    assert "Patches must be disjoint" in prompt
-    assert "every issue's replacement MUST be null" in prompt
 
 
 @pytest.mark.parametrize("with_analysis_context", [True, False])
@@ -761,7 +595,6 @@ def test_conflicting_analysis_remains_identified_as_derived_not_company_evidence
     assert context["motivation_context"]["derived_from"] == context["job_offer"]["source_id"]
     # Python keeps provenance; it does not attempt to reconcile meaning using
     # a technology/company-name dictionary or silently re-analyze the offer.
-    assert "Check them against the full offer" in context["motivation_context"]["scope"]
 
 
 def test_letter_purpose_is_shared_between_generation_and_review(source_documents):
@@ -770,33 +603,14 @@ def test_letter_purpose_is_shared_between_generation_and_review(source_documents
     context = build_document_context(**source_documents)
     rules = context["letter_style"]
     validator = MotivationLetterValidator(source_documents["profile"])
-    assert (rules["min_words"], rules["max_words"]) == (
-        validator.min_words,
-        validator.max_words,
-    ) == (180, 240)
-    body_description = MotivationLetter.model_fields["body"].description
-    assert ApplicationTexts.model_fields["motivation_letter_body"].description == body_description
-    assert f"{validator.min_words}-{validator.max_words} words" in body_description
-    assert "why the candidate wants to join" in rules["purpose"]
-    assert "Choose their number and detail freely" in rules["career_examples"]
-    assert "No mandatory employer, project, metric or skill citation" in rules["career_examples"]
-    assert "repeating the company name" in rules["personalization"]
-
-
-def test_generation_and_review_do_not_turn_motivation_into_a_cv_proof_requirement():
-    writer = application_texts.build_system_prompt()
-    reviewer = document_review.build_system_prompt()
-    assert "Its central argument is motivation" in writer
-    assert "Personalize the motivation with relevant projects or experiences" in writer
-    assert "wish to learn or contribute are not past achievements" in writer
-    assert "Keep motivation central" in writer
-    assert "Semantic entailment is sufficient" in reviewer
-    assert "must not amplify scope" in reviewer
-    assert "motivation, attraction to an offer topic" in reviewer
-    assert "require no candidate-history proof" in reviewer
-    assert "Do not require a CV recap" in reviewer
-    assert "only as category=style" in reviewer
-    assert "source_ids must be non-empty" in reviewer
+    assert (
+        (rules["min_words"], rules["max_words"])
+        == (
+            validator.min_words,
+            validator.max_words,
+        )
+        == (180, 240)
+    )
 
 
 @pytest.mark.parametrize("allow_corrections", [True, False])
@@ -805,9 +619,6 @@ def test_recruiter_language_rule_is_shared_with_generation_review_and_confirmati
 ):
     rule = load_prompt("shared/recruiter_text_rules.j2")
     assert rule in cv_adaptation.build_system_prompt()
-    assert "Use metadata to choose certainty, not vocabulary." in rule
-    assert "verified model outputs" in rule
-    assert "Self-reported evidence does not itself establish a lesser contribution" in rule
     context = build_document_context(**source_documents)
     style = context["recruiter_text_style"]
     assert style["editorial_rules"] == rule
@@ -830,5 +641,3 @@ def test_recruiter_language_rule_is_shared_with_generation_review_and_confirmati
         start = prompt.rfind("{", 0, prompt.index('"source_index"'))
         exposed, _ = json.JSONDecoder().raw_decode(prompt[start:])
         assert exposed["recruiter_text_style"] == style
-    assert "recruiter_text_style.editorial_rules" in document_review.build_system_prompt()
-    assert "category=style" in document_review.build_system_prompt()

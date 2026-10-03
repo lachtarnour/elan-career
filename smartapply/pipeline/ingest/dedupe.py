@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit
 
+from smartapply.offer_identity import normalize_application_url
 from smartapply.offers import RawJob
 
 
@@ -64,39 +63,5 @@ def _native_offer_key(source: str, source_data: Any) -> tuple[str, str] | None:
 
 
 def _normalize_application_url(url: str | None) -> str:
-    value = (url or "").strip()
-    if not value or value.startswith("mailto:"):
-        return ""
-    parsed = urlsplit(value if "://" in value else f"https://{value}")
-    host = parsed.netloc.lower().removeprefix("www.")
-    if not host:
-        return ""
-    path = re.sub(r"/+", "/", parsed.path).rstrip("/")
-    query = _normalized_non_tracking_query(parsed.query)
-    normalized = f"{host}{path}".lower()
-    if query:
-        normalized = f"{normalized}?{query}"
-    return normalized
-
-
-def _normalized_non_tracking_query(query: str) -> str:
-    tracking_prefixes = ("utm_",)
-    tracking_names = {
-        "fbclid",
-        "alternatechannel",
-        "ebp",
-        "gclid",
-        "mc_cid",
-        "mc_eid",
-        "ref",
-        "refid",
-        "source",
-        "trackingid",
-        "utm",
-    }
-    kept = [
-        (key, value)
-        for key, value in parse_qsl(query, keep_blank_values=True)
-        if key.lower() not in tracking_names and not key.lower().startswith(tracking_prefixes)
-    ]
-    return urlencode(sorted(kept), doseq=True)
+    """Compatibility wrapper around the shared URL identity normalizer."""
+    return normalize_application_url(url)

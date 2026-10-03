@@ -1,6 +1,11 @@
 """Scrapers — collect jobs from multiple sources via a common interface."""
 
-from smartapply.scrapers.base import Scraper, ScraperConfigError, ScraperError
+from smartapply.scrapers.base import (
+    Scraper,
+    ScraperConfigError,
+    ScraperError,
+    ScraperStopError,
+)
 from smartapply.scrapers.francetravail import FranceTravailScraper
 from smartapply.scrapers.linkedin import LinkedInJobsScraper
 from smartapply.scrapers.manual import ManualScraper
@@ -22,6 +27,7 @@ __all__ = [
     "Scraper",
     "ScraperConfigError",
     "ScraperError",
+    "ScraperStopError",
     "SERPAPI_DATE_POSTED_LABELS",
     "SERPAPI_DATE_POSTED_OPTIONS",
     "SerpApiGoogleJobsScraper",

@@ -61,6 +61,15 @@ def _fast_pdf(request, monkeypatch):
     monkeypatch.setattr("smartapply.cv.html_renderer.html_to_pdf", _fake_pdf)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_default_apify_recovery_journal():
+    """Prevent direct scraper tests from sharing durable run acknowledgements."""
+    journal_path = _gs().cache_dir / "apify_pending_runs.json"
+    journal_path.unlink(missing_ok=True)
+    yield
+    journal_path.unlink(missing_ok=True)
+
+
 @pytest.fixture
 def isolated_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Per-test SQLite DB + output dir, with cached settings/engine reset.

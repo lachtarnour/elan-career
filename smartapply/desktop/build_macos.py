@@ -228,6 +228,8 @@ def build_bundle(*, smoke_test: bool = True) -> Path:
         "--add-data",
         f"{PROJECT_ROOT / 'smartapply' / 'cv' / 'role_contracts.json'}:smartapply/cv",
         "--add-data",
+        f"{PROJECT_ROOT / 'smartapply' / 'dedup' / 'data'}:smartapply/dedup/data",
+        "--add-data",
         f"{PROJECT_ROOT / 'smartapply' / 'llm' / 'prompts' / 'templates'}:smartapply/llm/prompts/templates",
         str(entry),
     ]
