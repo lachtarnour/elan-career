@@ -24,7 +24,7 @@ def _bridge():
     return bridge, notifications
 
 
-def test_restore_pending_pair_opens_duplicate_review_without_dossier_warning():
+def test_restore_pending_pair_reports_review_without_changing_context():
     bridge, notifications = _bridge()
     destinations = []
     selected = []
@@ -39,8 +39,8 @@ def test_restore_pending_pair_opens_duplicate_review_without_dossier_warning():
             "warnings": [{"category": "duplicate_review", "job_id": 42, "message": "À vérifier"}],
         }
     )
-    assert destinations == [("duplicates", 42)]
-    assert selected == [42]
+    assert destinations == []
+    assert selected == []
     assert "1 doublon à vérifier" in notifications[0][1]
     assert notifications[0][2] == "warning"
 

@@ -19,7 +19,7 @@ Item {
         selectedSourceKeys = next
     }
     function runSearch() {
-        if (AppBridge.busy || selectedSources().length === 0 || !queryField.text.trim()) return
+        if (AppBridge.shutdownRequested || selectedSources().length === 0 || !queryField.text.trim()) return
         maxResults.commitInput()
         AppBridge.searchJobs(queryField.text, locationField.text, selectedSources(), maxResults.value, freshness.currentValue)
     }
@@ -121,11 +121,11 @@ Item {
                         spacing: 12
                         Item { Layout.fillWidth: true }
                         AppButton {
-                            text: AppBridge.canCancel ? "Annuler" : "Rechercher"
-                            iconSource: Theme.icon(AppBridge.canCancel ? "x" : "search")
-                            kind: AppBridge.canCancel ? "danger" : "primary"
-                            enabled: AppBridge.canCancel || (!AppBridge.busy && root.selectedSources().length > 0 && queryField.text.trim().length > 0)
-                            onClicked: if (AppBridge.canCancel) AppBridge.cancelCurrentTask(); else root.runSearch()
+                            text: "Rechercher"
+                            iconSource: Theme.icon("search")
+                            kind: "primary"
+                            enabled: !AppBridge.shutdownRequested && root.selectedSources().length > 0 && queryField.text.trim().length > 0
+                            onClicked: root.runSearch()
                         }
                     }
                 }
@@ -198,7 +198,7 @@ Item {
                     }
                     Text { text: "Offres à retenir"; color: Theme.inkMuted; font.pixelSize: 12 }
                     AppSpinBox { id: topK; from: 1; to: 100; value: AppBridge.analysisTopK; Layout.preferredWidth: 132; onUserValueModified: function(value) { AppBridge.setAnalysisTopK(Number(value)) } }
-                    AppButton { text: "Analyser"; iconSource: Theme.icon("sparkle"); kind: "primary"; enabled: !AppBridge.busy; onClicked: { topK.commitInput(); AppBridge.processPending(topK.value) } }
+                    AppButton { text: "Analyser"; iconSource: Theme.icon("sparkle"); kind: "primary"; enabled: !AppBridge.shutdownRequested; onClicked: { topK.commitInput(); AppBridge.processPending(topK.value) } }
                 }
             }
         }

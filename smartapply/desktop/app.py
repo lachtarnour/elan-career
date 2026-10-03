@@ -12,7 +12,7 @@ from smartapply.desktop.bootstrap import prepare_runtime_environment
 
 RUNTIME = prepare_runtime_environment()
 
-from PySide6.QtCore import QTimer, QUrl  # noqa: E402
+from PySide6.QtCore import QEvent, QObject, QTimer, QUrl  # noqa: E402
 from PySide6.QtGui import QFont, QGuiApplication, QIcon  # noqa: E402
 from PySide6.QtQml import QQmlApplicationEngine  # noqa: E402
 
@@ -40,8 +40,27 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+class ShutdownGuard(QObject):
+    """Catch native Quit before Qt starts destroying windows and workers."""
+
+    def __init__(self, application, bridge):
+        super().__init__(application)
+        self.bridge = bridge
+        application.installEventFilter(self)
+        bridge.shutdownReadyChanged.connect(
+            lambda: application.quit() if bridge.shutdownReady else None
+        )
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        if event.type() == QEvent.Type.Quit and not self.bridge.shutdownReady:
+            self.bridge.requestShutdown()
+            return True
+        return super().eventFilter(watched, event)
+
+
 def create_engine(application: QGuiApplication) -> tuple[QQmlApplicationEngine, DesktopBridge]:
     bridge = DesktopBridge()
+    bridge._shutdown_guard = ShutdownGuard(application, bridge)
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("AppBridge", bridge)
     engine.load(QUrl.fromLocalFile(str(qml_path())))
@@ -73,10 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         engine, _bridge = create_engine(application)
         if args.smoke_test:
-            from smartapply.pipeline import Pipeline
-
-            Pipeline()
-            QTimer.singleShot(1400, application.quit)
+            QTimer.singleShot(1400, _bridge.requestShutdown)
         return application.exec()
     except Exception:
         logger.exception("Desktop startup failed")

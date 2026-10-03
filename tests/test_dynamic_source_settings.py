@@ -140,6 +140,8 @@ def test_desktop_search_uses_refreshed_linkedin_limit_and_token(source_env, monk
         return IngestCollection(source=source, raw_jobs=[])
 
     monkeypatch.setattr(Ingestor, "collect_source", collect)
+    monkeypatch.setattr("smartapply.desktop.services.ensure_startup_maintenance_complete", lambda: None)
+    monkeypatch.setattr(DesktopService, "source_diagnostics_stale", lambda self: False)
     monkeypatch.setattr(
         Pipeline,
         "persist_collection",

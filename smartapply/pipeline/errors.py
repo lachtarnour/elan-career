@@ -3,6 +3,19 @@
 from __future__ import annotations
 
 
+class TaskCancelledError(RuntimeError):
+    def __init__(self):
+        super().__init__("Tâche annulée avant publication du résultat.")
+
+
+class StaleTaskResultError(RuntimeError):
+    def __init__(self):
+        super().__init__(
+            "L’offre ou la candidature a changé pendant le traitement. "
+            "Le résultat périmé n’a pas été enregistré ; aucun nouvel appel IA n’a été lancé."
+        )
+
+
 class ApplicationAlreadyExistsError(RuntimeError):
     """Raised before generation when a job already owns an application."""
 

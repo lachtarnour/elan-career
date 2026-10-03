@@ -1591,13 +1591,16 @@ def test_archived_only_duplicate_pair_is_not_shown_in_review_queue(isolated_db) 
 
 
 @pytest.mark.parametrize("old_rejected,new_rejected", [(True, True), (True, False), (False, True), (False, False)])
-def test_review_filters_both_offers_before_display(isolated_db, old_rejected, new_rejected) -> None:
+def test_explicit_filtering_prepares_both_offers_for_review(isolated_db, old_rejected, new_rejected) -> None:
+    from smartapply.pipeline import Pipeline
+
     root_id, duplicate_id = _create_review_pair()
     with session_scope() as session:
         for job_id, rejected in ((root_id, old_rejected), (duplicate_id, new_rejected)):
             job = session.get(Job, job_id)
             job.contract_type = "stage" if rejected else "CDI"
 
+    Pipeline().filter_pending(job_ids=[root_id, duplicate_id])
     service = DesktopService()
     rows = service.list_jobs(status=JobStatus.DUPLICATE_REVIEW)
     assert [row.id for row in rows] == ([] if old_rejected and new_rejected else [duplicate_id])
@@ -1614,8 +1617,6 @@ def test_review_filters_both_offers_before_display(isolated_db, old_rejected, ne
         duplicate = session.get(Job, duplicate_id)
         assert duplicate.duplicate_review_status == JobDuplicateStatus.PENDING
         assert duplicate_id not in {job.id for job in list_pending_processing(session)}
-
-    from smartapply.pipeline import Pipeline
 
     assert Pipeline().filter_pending(job_ids=[root_id, duplicate_id]).total == 0
     assert Pipeline().analyze_jobs([duplicate_id]).analyzed == 0

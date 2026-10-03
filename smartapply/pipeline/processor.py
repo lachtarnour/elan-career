@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from smartapply.config import get_settings
 from smartapply.database import session_scope
 from smartapply.database.models import Job
@@ -33,7 +35,9 @@ class Processor(AnalysisMixin, LocalFilterMixin, RankingMixin, DeduplicationMixi
         job_filter: JobFilter,
         scorer: JobScorer,
         llm: LLMProvider,
+        stop_requested: Callable[[], bool] | None = None,
     ):
+        self.stop_requested = stop_requested
         self.profile = profile
         self.deduplicator = deduplicator
         self.filter = job_filter
@@ -75,6 +79,7 @@ class Processor(AnalysisMixin, LocalFilterMixin, RankingMixin, DeduplicationMixi
             top_ranked=len(analysis_candidates),
             analyzed=analyzed,
             analysis_errors=analysis_errors,
+            cancelled=bool(self.stop_requested and self.stop_requested()),
         )
 
 

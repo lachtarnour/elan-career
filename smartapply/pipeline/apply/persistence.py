@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from smartapply.database import session_scope
+from smartapply.database import write_session_scope
 from smartapply.database.models import Application, Job, JobDuplicateStatus, JobStatus
 from smartapply.database.repository import (
     application_for_duplicate_group,
@@ -19,8 +20,13 @@ from smartapply.database.repository import (
     upsert_document,
 )
 from smartapply.llm import MotivationLetter
-from smartapply.pipeline.errors import ApplicationAlreadyExistsError, DuplicateReviewRequiredError
+from smartapply.pipeline.errors import (
+    ApplicationAlreadyExistsError,
+    DuplicateReviewRequiredError,
+    StaleTaskResultError,
+)
 from smartapply.pipeline.reports import ApplyReport
+from smartapply.pipeline.snapshots import job_is_active
 
 _STALE_RESERVATION_AFTER = timedelta(minutes=30)
 
@@ -50,7 +56,7 @@ class ApplicationPersistenceMixin:
         force_regenerate: bool = False,
     ) -> bool:
         try:
-            with session_scope() as session:
+            with write_session_scope() as session:
                 job = session.get(Job, report.job_id)
                 if job is None:
                     raise ValueError(f"Offre introuvable: {report.job_id}")
@@ -89,12 +95,22 @@ class ApplicationPersistenceMixin:
                                 report.job_id,
                                 existing.id,
                             )
+                        if not job_is_active(root) or existing.form_submitted_at is not None:
+                            raise StaleTaskResultError()
                         existing.updated_at = datetime.now(timezone.utc)
                         report.application_id = existing.id
                         return True
+                    if not job_is_active(root) or (existing is not None and (
+                        existing.form_submitted_at is not None
+                        or existing.status in {JobStatus.SENT, JobStatus.INTERVIEW,
+                                           JobStatus.REJECTED, JobStatus.ARCHIVED}
+                    )):
+                        raise StaleTaskResultError()
                     report.application_id = existing.id
                     return False
 
+                if not job_is_active(root):
+                    raise StaleTaskResultError()
                 application = Application(job_id=report.job_id)
                 session.add(application)
                 session.flush()
@@ -106,7 +122,7 @@ class ApplicationPersistenceMixin:
     def _release_application_reservation(self, report: ApplyReport) -> None:
         if report.application_id is None:
             return
-        with session_scope() as session:
+        with write_session_scope() as session:
             application = session.get(Application, report.application_id)
             if application is None or application.job_id != report.job_id:
                 return
@@ -115,7 +131,14 @@ class ApplicationPersistenceMixin:
                 or application.cv_json
                 or application.cv_docx_path
                 or application.cv_pdf_path
+                or application.form_submitted_at is not None
+                or application.status != JobStatus.ANALYZED
             ):
+                return
+            if application.notes:
+                # Preserve an independently edited note while making this
+                # cancelled empty reservation immediately retryable.
+                application.updated_at = datetime.now(timezone.utc) - _STALE_RESERVATION_AFTER
                 return
             session.delete(application)
 
@@ -127,8 +150,9 @@ class ApplicationPersistenceMixin:
         letter: MotivationLetter,
         form_url: str | None,
         status: str,
+        session=None,
     ) -> None:
-        with session_scope() as session:
+        with (nullcontext(session) if session is not None else write_session_scope()) as session:
             application = (
                 session.get(Application, report.application_id)
                 if report.application_id is not None

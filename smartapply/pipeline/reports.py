@@ -18,6 +18,7 @@ class ProcessReport:
     top_ranked: int
     analyzed: int
     analysis_errors: list[dict[str, Any]] = field(default_factory=list)
+    cancelled: bool = False
 
 
 @dataclass
@@ -50,6 +51,7 @@ class AnalyzeReport:
     analyzed: int
     skipped_missing: int
     errors: list[dict[str, Any]] = field(default_factory=list)
+    cancelled: bool = False
 
 
 @dataclass

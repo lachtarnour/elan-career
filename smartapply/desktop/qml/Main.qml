@@ -24,6 +24,12 @@ ApplicationWindow {
     title: ""
     color: Theme.canvas
     font.family: Theme.fontFamily
+    Component.onCompleted: AppBridge.setActiveRoute(currentRoute)
+    onCurrentRouteChanged: AppBridge.setActiveRoute(currentRoute)
+    onClosing: function(event) {
+        event.accepted = AppBridge.shutdownReady
+        if (!event.accepted) AppBridge.requestShutdown()
+    }
 
     property string currentRoute: "dashboard"
     property string pendingRoute: "dashboard"
@@ -84,7 +90,7 @@ ApplicationWindow {
             )
         }
         if (page === "profile") AppBridge.refreshProfile()
-        if (page === "settings" || page === "search") AppBridge.refreshDiagnostics()
+        if (page === "settings" || page === "search") AppBridge.refreshDiagnosticsIfStale()
     }
 
     function ensureRouteLoaded(route) {
@@ -520,7 +526,7 @@ ApplicationWindow {
         objectName: "busyTaskNotification"
         z: 50
         visible: opacity > 0
-        opacity: AppBridge.busy ? 1 : 0
+        opacity: AppBridge.busy || AppBridge.shutdownRequested || AppBridge.queuedTaskCount > 0 || AppBridge.maintenanceFailed ? 1 : 0
         anchors.right: parent.right
         anchors.rightMargin: 28
         anchors.bottom: parent.bottom
@@ -538,9 +544,43 @@ ApplicationWindow {
             Item {
                 Layout.preferredWidth: 18; Layout.preferredHeight: 18
                 Rectangle { width: 6; height: 6; radius: 3; color: Theme.accentBright; anchors.top: parent.top; anchors.horizontalCenter: parent.horizontalCenter }
-                RotationAnimation on rotation { running: AppBridge.busy; from: 0; to: 360; duration: 850; loops: Animation.Infinite }
+                RotationAnimation on rotation { running: AppBridge.busy || AppBridge.shutdownRequested; from: 0; to: 360; duration: 850; loops: Animation.Infinite }
             }
-            Text { Layout.fillWidth: true; text: AppBridge.busyLabel || "Traitement en cours…"; color: Theme.inkSoft; font.pixelSize: 12; font.weight: Font.DemiBold; elide: Text.ElideRight }
+            Text {
+                Layout.fillWidth: true
+                text: AppBridge.shutdownRequested ? "Fermeture en cours…"
+                    : AppBridge.maintenanceFailed ? "Vérification des offres à reprendre"
+                    : (AppBridge.busyLabel || "Traitement en cours…")
+                        + (AppBridge.queuedTaskCount > 0 ? " · " + AppBridge.queuedTaskCount + " en attente" : "")
+                color: Theme.inkSoft
+                font.pixelSize: 12
+                font.weight: Font.DemiBold
+                elide: Text.ElideRight
+            }
+            AppButton {
+                objectName: "cancelCurrentTaskAction"
+                visible: AppBridge.canCancel && !AppBridge.shutdownRequested
+                text: "Annuler"
+                quiet: true
+                implicitHeight: 28
+                onClicked: AppBridge.cancelCurrentTask()
+            }
+            AppButton {
+                objectName: "maintenanceRetryAction"
+                visible: AppBridge.maintenanceFailed && !AppBridge.shutdownRequested
+                text: "Réessayer"
+                quiet: true
+                implicitHeight: 28
+                onClicked: AppBridge.retryStartupMaintenance()
+            }
+            AppButton {
+                objectName: "shutdownRetryNotesAction"
+                visible: AppBridge.shutdownRequested
+                text: "Réessayer"
+                quiet: true
+                implicitHeight: 28
+                onClicked: AppBridge.retryNotesSave()
+            }
         }
         Behavior on opacity { NumberAnimation { duration: 180 } }
     }
@@ -549,6 +589,7 @@ ApplicationWindow {
         target: AppBridge
         function onToastRequested(title, message, kind) { toast.show(title, message, kind) }
         function onNavigationRequested(route, selectedId) { window.navigate(route) }
+        function onShutdownReadyChanged() { if (AppBridge.shutdownReady) window.close() }
     }
 
 }

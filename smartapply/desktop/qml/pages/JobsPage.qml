@@ -13,6 +13,13 @@ Item {
     // A generated application is displayed as part of its offer. This keeps
     // the offer list and the application tracking state in one workspace.
     property var applicationData: AppBridge.currentJob.application || ({})
+    property int displayedJobId: 0
+    property int notesApplicationId: 0
+    property bool loadingNoteText: false
+    property var noteDrafts: ({})
+    readonly property var activeNoteDraft: noteDrafts[String(notesApplicationId)] || ({})
+    readonly property bool selectedJobBusy: (AppBridge.busyJobIds || []).indexOf(Number(selectedId)) >= 0
+    readonly property bool duplicateCandidateBusy: (AppBridge.busyJobIds || []).indexOf(Number((AppBridge.currentJob.duplicate_candidate || {}).id || 0)) >= 0
     property bool documentReviewDetailsExpanded: false
     readonly property var documentDiagnostics: applicationData.warnings || []
     readonly property int documentReviewPointCount: documentDiagnostics.filter(function(item) {
@@ -72,6 +79,75 @@ Item {
 
     function isReviewInformation(message) {
         return message.indexOf("text_review_corrected:") === 0
+    }
+
+    function setNoteDraft(applicationId, draft) {
+        var next = {}
+        for (var key in noteDrafts) next[key] = noteDrafts[key]
+        next[String(applicationId)] = draft
+        noteDrafts = next
+    }
+
+    function loadActiveNotes() {
+        var key = String(notesApplicationId)
+        if (notesApplicationId && !noteDrafts[key]) {
+            setNoteDraft(notesApplicationId, {
+                text: String((AppBridge.currentJob.application || {}).notes || ""), revision: 0,
+                savedRevision: 0, submittedRevision: 0, error: ""
+            })
+        }
+        loadingNoteText = true
+        applicationNotes.text = notesApplicationId ? noteDrafts[key].text : ""
+        loadingNoteText = false
+    }
+
+    function editNote(text) {
+        if (loadingNoteText || !notesApplicationId) return
+        var draft = noteDrafts[String(notesApplicationId)]
+        if (!draft || draft.text === text) return
+        setNoteDraft(notesApplicationId, {
+            text: text, revision: draft.revision + 1,
+            savedRevision: draft.savedRevision, submittedRevision: draft.submittedRevision,
+            error: ""
+        })
+        applicationNotesSaveTimer.restart()
+    }
+
+    function saveNote(applicationId) {
+        var draft = noteDrafts[String(applicationId)]
+        if (!draft || draft.revision <= draft.savedRevision || draft.revision <= draft.submittedRevision) return
+        setNoteDraft(applicationId, {
+            text: draft.text, revision: draft.revision,
+            savedRevision: draft.savedRevision, submittedRevision: draft.revision, error: ""
+        })
+        AppBridge.saveApplicationNotes(Number(applicationId), draft.text, draft.revision)
+    }
+
+    function flushNotes() {
+        applicationNotesSaveTimer.stop()
+        for (var key in noteDrafts) saveNote(Number(key))
+    }
+
+    function updateSelectedDetail() {
+        var nextJobId = Number(AppBridge.currentJob.id || 0)
+        var nextApplicationId = Number((AppBridge.currentJob.application || {}).id || 0)
+        if (notesApplicationId !== nextApplicationId) {
+            saveNote(notesApplicationId)
+            notesApplicationId = nextApplicationId
+            loadActiveNotes()
+        }
+        if (displayedJobId !== nextJobId) {
+            displayedJobId = nextJobId
+            detailViewport.contentY = 0
+            documentReviewDetailsExpanded = false
+            var index = selectedIndex()
+            if (index >= 0) jobsTable.positionViewAtIndex(index, ListView.Contain)
+        }
+    }
+
+    function anyJobBusy(ids) {
+        var protectedIds = AppBridge.busyJobIds || []
+        return ids.some(function(id) { return protectedIds.indexOf(Number(id)) >= 0 })
     }
 
     function documentDiagnosticLabel(message) {
@@ -244,7 +320,12 @@ Item {
     }
 
     onRequestedFilterChanged: applyRequestedFilter()
-    Component.onCompleted: applyRequestedFilter()
+    Component.onCompleted: {
+        applyRequestedFilter()
+        updateSelectedDetail()
+    }
+    onVisibleChanged: if (!visible) flushNotes()
+    Component.onDestruction: if (AppBridge) flushNotes()
     Timer {
         id: searchTimer
         interval: 260
@@ -257,22 +338,31 @@ Item {
     Timer {
         id: applicationNotesSaveTimer
         interval: 500
-        onTriggered: {
-            if (root.applicationData.id && applicationNotes.activeFocus)
-                AppBridge.updateApplication(root.applicationData.id, "", applicationNotes.text, false)
-        }
+        onTriggered: root.flushNotes()
     }
 
     Connections {
         target: AppBridge
         function onJobSelectionClearRequested() { root.clearSelection() }
-        function onCurrentJobChanged() {
-            detailViewport.contentY = 0
-            root.documentReviewDetailsExpanded = false
-            if (applicationNotes)
-                applicationNotes.text = root.applicationData.notes || ""
-            var index = root.selectedIndex()
-            if (index >= 0) jobsTable.positionViewAtIndex(index, ListView.Contain)
+        function onCurrentJobChanged() { root.updateSelectedDetail() }
+        function onNotesFlushRequested() { root.flushNotes() }
+        function onApplicationNotesSaved(applicationId, revision) {
+            var draft = root.noteDrafts[String(applicationId)]
+            if (!draft) return
+            root.setNoteDraft(applicationId, {
+                text: draft.text, revision: draft.revision,
+                savedRevision: Math.max(draft.savedRevision, revision),
+                submittedRevision: draft.submittedRevision,
+                error: revision >= draft.revision ? "" : draft.error
+            })
+        }
+        function onApplicationNotesSaveFailed(applicationId, revision, message) {
+            var draft = root.noteDrafts[String(applicationId)]
+            if (!draft || revision < draft.submittedRevision) return
+            root.setNoteDraft(applicationId, {
+                text: draft.text, revision: draft.revision, savedRevision: draft.savedRevision,
+                submittedRevision: draft.savedRevision, error: message
+            })
         }
     }
 
@@ -413,7 +503,7 @@ Item {
                         iconSize: 14
                         fontPixelSize: 11
                         implicitHeight: 34
-                        enabled: !AppBridge.busy
+                        enabled: !AppBridge.shutdownRequested
                         onClicked: AppBridge.generateShortlistedApplications()
                     }
                     RowLayout {
@@ -454,7 +544,7 @@ Item {
                             iconSize: 14
                             fontPixelSize: 11
                             implicitHeight: 34
-                            enabled: !AppBridge.busy
+                            enabled: !AppBridge.shutdownRequested
                             onClicked: {
                                 topK.commitInput()
                                 AppBridge.updateShortlist(topK.value)
@@ -509,7 +599,7 @@ Item {
                         iconSize: 13
                         fontPixelSize: 11
                         implicitHeight: 30
-                        enabled: root.topLabelIds.length > 0 && !AppBridge.busy
+                        enabled: root.topLabelIds.length > 0 && !root.anyJobBusy(root.topLabelIds) && !AppBridge.shutdownRequested
                         onClicked: AppBridge.labelJobsAsTop(root.topLabelIds)
                     }
                     AppButton {
@@ -521,7 +611,7 @@ Item {
                         iconSize: 13
                         fontPixelSize: 11
                         implicitHeight: 30
-                        enabled: !AppBridge.busy
+                        enabled: !AppBridge.shutdownRequested
                         onClicked: AppBridge.analyzeSelectedJobs(root.selectedIds)
                     }
                     AppButton {
@@ -532,7 +622,7 @@ Item {
                         iconSize: 13
                         fontPixelSize: 11
                         implicitHeight: 30
-                        enabled: root.rescueIds.length > 0 && !AppBridge.busy
+                        enabled: root.rescueIds.length > 0 && !AppBridge.shutdownRequested
                         onClicked: AppBridge.rescueJobs(root.rescueIds)
                     }
                     AppButton {
@@ -544,7 +634,7 @@ Item {
                         iconSize: 13
                         fontPixelSize: 11
                         implicitHeight: 30
-                        enabled: root.generationIds.length > 0 && !AppBridge.busy
+                        enabled: root.generationIds.length > 0 && !AppBridge.shutdownRequested
                         onClicked: AppBridge.generateApplications(root.generationIds)
                     }
                 }
@@ -617,7 +707,7 @@ Item {
                                 reuseItems: true
                                 cacheBuffer: 420
                                 boundsBehavior: Flickable.StopAtBounds
-                                model: root.sortedJobs
+                                model: AppBridge.jobsModel || root.sortedJobs
                                 ScrollBar.vertical: AppScrollBar { objectName: "offerTableScrollBar" }
                                 delegate: Rectangle {
                                     id: jobRow
@@ -782,6 +872,7 @@ Item {
                         spacing: 12
                         Flickable {
                             id: detailViewport
+                            objectName: "offerDetailViewport"
                             Layout.fillWidth: true
                             Layout.fillHeight: true
                             contentWidth: width
@@ -1114,7 +1205,7 @@ Item {
                                                 fontPixelSize: root.detailButtonFontSize
                                                 refined: true
                                                 implicitHeight: 36
-                                                enabled: !AppBridge.busy
+                                                enabled: !AppBridge.shutdownRequested && !root.selectedJobBusy && !root.duplicateCandidateBusy
                                                 onClicked: AppBridge.resolveDuplicate(AppBridge.currentJob.id, true)
                                             }
                                             AppButton {
@@ -1123,7 +1214,7 @@ Item {
                                                 fontPixelSize: root.detailButtonFontSize
                                                 refined: true
                                                 implicitHeight: 36
-                                                enabled: !AppBridge.busy
+                                                enabled: !AppBridge.shutdownRequested && !root.selectedJobBusy && !root.duplicateCandidateBusy
                                                 onClicked: AppBridge.resolveDuplicate(AppBridge.currentJob.id, false)
                                             }
                                         }
@@ -1181,13 +1272,35 @@ Item {
                                 }
                                 AppTextArea {
                                     id: applicationNotes
+                                    objectName: "applicationNotes"
                                     visible: Boolean(root.applicationData.id)
+                                    enabled: !AppBridge.shutdownRequested
                                     Layout.fillWidth: true
                                     Layout.preferredHeight: 72
                                     fontPixelSize: root.detailBodyFontSize
-                                    text: root.applicationData.notes || ""
                                     placeholderText: "Ajouter une note de suivi…"
-                                    onTextChanged: if (activeFocus) applicationNotesSaveTimer.restart()
+                                    onTextChanged: root.editNote(text)
+                                    onActiveFocusChanged: if (!activeFocus) root.flushNotes()
+                                }
+                                RowLayout {
+                                    visible: Boolean(root.notesApplicationId)
+                                    Layout.fillWidth: true
+                                    Text {
+                                        objectName: "applicationNotesSaveState"
+                                        Layout.fillWidth: true
+                                        text: root.activeNoteDraft.error ? "Échec de l’enregistrement ; note conservée."
+                                            : root.activeNoteDraft.revision > root.activeNoteDraft.savedRevision ? "Enregistrement…" : "Enregistré"
+                                        color: root.activeNoteDraft.error ? Theme.warning : Theme.inkFaint
+                                        font.pixelSize: root.detailSmallFontSize
+                                        wrapMode: Text.WordWrap
+                                    }
+                                    AppButton {
+                                        objectName: "applicationNotesRetry"
+                                        visible: Boolean(root.activeNoteDraft.error)
+                                        text: "Réessayer"
+                                        quiet: true
+                                        onClicked: { root.flushNotes(); AppBridge.retryNotesSave() }
+                                    }
                                 }
                                 Item { Layout.preferredHeight: 1 }
                             }
@@ -1196,6 +1309,14 @@ Item {
                         ColumnLayout {
                             Layout.fillWidth: true
                             spacing: 6
+                            Text {
+                                visible: root.selectedJobBusy
+                                Layout.fillWidth: true
+                                text: "Cette offre est en cours de traitement. Les actions incompatibles attendent sa fin."
+                                color: Theme.warning
+                                font.pixelSize: root.detailSmallFontSize
+                                wrapMode: Text.WordWrap
+                            }
                             RowLayout {
                                 visible: AppBridge.currentJob.status === "archived"
                                 Layout.fillWidth: true
@@ -1208,7 +1329,7 @@ Item {
                                     fontPixelSize: root.detailButtonFontSize
                                     refined: true
                                     implicitHeight: 34
-                                    enabled: !AppBridge.busy
+                                    enabled: !AppBridge.shutdownRequested
                                     onClicked: AppBridge.rescueJob(AppBridge.currentJob.id)
                                     ToolTip.visible: hovered
                                     ToolTip.text: "Analyse l’offre puis génère le CV et la lettre. Un doublon reprend son dossier principal."
@@ -1241,7 +1362,7 @@ Item {
                                     fontPixelSize: root.detailButtonFontSize
                                     refined: true
                                     iconSize: 13
-                                    enabled: !AppBridge.busy
+                                    enabled: !AppBridge.shutdownRequested
                                     implicitHeight: root.detailActionButtonHeight
                                     onClicked: AppBridge.regenerateApplication(AppBridge.currentJob.id)
                                     ToolTip.visible: hovered
@@ -1258,7 +1379,7 @@ Item {
                                     fontPixelSize: root.detailButtonFontSize
                                     refined: true
                                     iconSize: 13
-                                    enabled: !AppBridge.busy
+                                    enabled: !AppBridge.shutdownRequested && !root.selectedJobBusy
                                     implicitHeight: root.detailActionButtonHeight
                                     onClicked: AppBridge.markJobSent(AppBridge.currentJob.id)
                                 }
@@ -1273,6 +1394,8 @@ Item {
                                     refined: true
                                     iconSize: 13
                                     implicitHeight: root.detailActionButtonHeight
+                                    objectName: "offerArchiveApplicationAction"
+                                    enabled: !AppBridge.shutdownRequested && !root.selectedJobBusy
                                     onClicked: AppBridge.archiveApplication(Number(root.applicationData.id))
                                 }
                                 AppButton {
@@ -1307,7 +1430,7 @@ Item {
                                     fontPixelSize: root.detailButtonFontSize
                                     refined: true
                                     implicitHeight: 34
-                                    enabled: !AppBridge.busy && AppBridge.currentJob.status !== "duplicate_review"
+                                    enabled: !AppBridge.shutdownRequested && AppBridge.currentJob.status !== "duplicate_review"
                                     onClicked: {
                                         if (AppBridge.currentJob.status === "duplicate_review") return
                                         if (AppBridge.currentJob.related_application_id) AppBridge.openApplication(AppBridge.currentJob.related_application_id)
@@ -1379,12 +1502,14 @@ Item {
                                     visible: !Boolean(root.applicationData.id)
                                         && AppBridge.currentJob.status !== "archived"
                                         && AppBridge.currentJob.status !== "duplicate_review"
-                                    text: Boolean(AppBridge.currentJob.shortlisted) ? "Retirer" : "Ajouter"
-                                    iconSource: Boolean(AppBridge.currentJob.shortlisted) ? Theme.icon("x") : Theme.icon("plus")
+                                    text: Boolean(AppBridge.currentJob.shortlisted) || Boolean(AppBridge.currentJob.shortlist_pending) ? "Retirer" : "Ajouter"
+                                    iconSource: Boolean(AppBridge.currentJob.shortlisted) || Boolean(AppBridge.currentJob.shortlist_pending) ? Theme.icon("x") : Theme.icon("plus")
                                     fontPixelSize: root.detailButtonFontSize
                                     refined: true
                                     implicitHeight: 32
-                                    onClicked: AppBridge.setJobShortlisted(AppBridge.currentJob.id, !Boolean(AppBridge.currentJob.shortlisted))
+                                    objectName: "offerShortlistAction"
+                                    enabled: !AppBridge.shutdownRequested && (!root.selectedJobBusy || Boolean(AppBridge.currentJob.shortlist_pending))
+                                    onClicked: AppBridge.setJobShortlisted(AppBridge.currentJob.id, !(Boolean(AppBridge.currentJob.shortlisted) || Boolean(AppBridge.currentJob.shortlist_pending)))
                                 }
                                 AppButton {
                                     visible: !Boolean(root.applicationData.id)
@@ -1396,6 +1521,8 @@ Item {
                                     fontPixelSize: root.detailButtonFontSize
                                     refined: true
                                     implicitHeight: 32
+                                    objectName: "offerArchiveJobAction"
+                                    enabled: !AppBridge.shutdownRequested && !root.selectedJobBusy
                                     onClicked: AppBridge.archiveJob(AppBridge.currentJob.id)
                                 }
                                 Item { Layout.fillWidth: true }
@@ -1429,7 +1556,8 @@ Item {
                                             refined: true
                                             quiet: true
                                             iconSize: 11
-                                            enabled: root.canGoPrevious && !AppBridge.busy
+                                            enabled: root.canGoPrevious && !AppBridge.shutdownRequested
+                                            objectName: "offerPreviousAction"
                                             Accessible.name: "Offre précédente"
                                             onClicked: root.moveSelection(-1)
                                         }
@@ -1453,7 +1581,8 @@ Item {
                                             refined: true
                                             quiet: true
                                             iconSize: 11
-                                            enabled: root.canGoNext && !AppBridge.busy
+                                            enabled: root.canGoNext && !AppBridge.shutdownRequested
+                                            objectName: "offerNextAction"
                                             Accessible.name: "Offre suivante"
                                             onClicked: root.moveSelection(1)
                                         }

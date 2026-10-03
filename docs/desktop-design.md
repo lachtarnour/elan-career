@@ -24,12 +24,34 @@ vert pour l’envoi, ambre pour l’archivage et les avertissements.
 
 Les tokens partagés sont dans [`Theme.qml`](../smartapply/desktop/qml/components/Theme.qml).
 
+## Traitements et suivi
+
+Une seule opération longue s’exécute à la fois ; les demandes suivantes attendent
+leur tour. Les actions courtes passent par une file indépendante. Une offre et ses
+alias sont protégés pendant leur traitement, avec un motif explicite en cas de
+conflit. La navigation, les notes et les actions sur les autres offres restent disponibles.
+L’ajout manuel enregistre d’abord l’offre, puis programme sa candidature. Une shortlist
+non analysée reste une intention annulable jusqu’au succès de l’analyse.
+
+Les changements enregistrés regroupent les actualisations sur 200 ms ; la progression
+ne recharge pas les listes. Chaque vue conserve une seule lecture active et la dernière
+demande suivante. Les listes conservent leur limite, leur sélection et leur défilement.
+Les diagnostics des fournisseurs sont conservés cinq minutes et renouvelés sur demande
+ou après modification de configuration.
+
+Les notes restent des brouillons par candidature jusqu’à confirmation de sauvegarde.
+Elles sont enregistrées après 500 ms, à la perte de focus, au changement d’offre et avant
+fermeture. La fermeture attend les sauvegardes et le nettoyage des tâches sans bloquer
+la fenêtre ; une sauvegarde échouée peut être réessayée. La maintenance historique est
+versionnée et reprise au prochain lancement après interruption. Pendant cette vérification,
+seules les opérations dépendant de la validation des doublons attendent.
+
 ## Vérification reproductible
 
 Depuis la racine du dépôt :
 
 ```sh
-.venv/bin/pytest tests/test_desktop_services.py tests/test_desktop_notifications.py tests/test_source_diagnostics_refresh.py -q
+.venv/bin/pytest tests/test_desktop_services.py tests/test_desktop_notifications.py tests/test_source_diagnostics_refresh.py tests/test_desktop_task_lifecycle.py tests/test_desktop_qml_responsiveness.py -q
 ```
 
 Les tests Qt chargent réellement QML avec des services inertes et des données fictives.

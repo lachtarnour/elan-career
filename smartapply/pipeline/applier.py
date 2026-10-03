@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
+from smartapply.concurrency import job_operation
 from smartapply.config import get_settings
 from smartapply.cv import CvAdapter, CvValidator
 from smartapply.cv.motivation_validator import MotivationLetterValidator
 from smartapply.cv.role_family import classify
-from smartapply.database.models import JobStatus
+from smartapply.database import session_scope, write_session_scope
+from smartapply.database.models import Application, Job, JobStatus
 from smartapply.llm import LLMProvider
 from smartapply.pipeline.application_renderer import ApplicationDocumentRenderer
 from smartapply.pipeline.apply.cv_writer import CvWriterMixin, _document_company_label
 from smartapply.pipeline.apply.persistence import ApplicationPersistenceMixin
 from smartapply.pipeline.output_paths import AtomicApplicationOutput
 from smartapply.pipeline.reports import ApplyReport
+from smartapply.pipeline.snapshots import PublicationSnapshot, check_cancelled
 from smartapply.profile import Profile
 
 
@@ -29,7 +33,9 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
         adapter: CvAdapter,
         validator: CvValidator,
         renderer: ApplicationDocumentRenderer,
+        stop_requested: Callable[[], bool] | None = None,
     ):
+        self.stop_requested = stop_requested
         self.profile = profile
         self.llm = llm
         self.adapter = adapter
@@ -51,22 +57,27 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
         artifact_dir: Path | None = None,
     ) -> ApplyReport:
         """Generate the CV and motivation letter for one analyzed offer."""
-        report = ApplyReport(job_id=job_id, application_id=None)
-        created_reservation = self._reserve_application_id(
-            report,
-            force_regenerate=force_regenerate,
-        )
-        try:
-            return self._do_apply(
-                report=report,
-                form_url=form_url,
-                refresh_cache=force_regenerate,
-                artifact_dir=artifact_dir,
+        check_cancelled(self.stop_requested)
+        with job_operation(
+            [job_id], operation="régénération" if force_regenerate else "génération"
+        ):
+            report = ApplyReport(job_id=job_id, application_id=None)
+            created_reservation = self._reserve_application_id(
+                report,
+                force_regenerate=force_regenerate,
             )
-        except Exception:
-            if created_reservation:
-                self._release_application_reservation(report)
-            raise
+            try:
+                check_cancelled(self.stop_requested)
+                return self._do_apply(
+                    report=report,
+                    form_url=form_url,
+                    refresh_cache=force_regenerate,
+                    artifact_dir=artifact_dir,
+                )
+            except Exception:
+                if created_reservation:
+                    self._release_application_reservation(report)
+                raise
 
     # ============================================================
     # Unified apply path
@@ -82,6 +93,11 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
     ) -> ApplyReport:
         job_id = report.job_id
         job, analysis = self._load_job_analysis(job_id)
+        with session_scope() as session:
+            application = session.get(Application, report.application_id)
+            snapshot = PublicationSnapshot.capture(job, application)
+            snapshot.validate(session.get(Job, job_id), application)
+        check_cancelled(self.stop_requested)
         offer_language = analysis.offer_language or "fr"
         document_company = _document_company_label(
             job.company,
@@ -97,6 +113,7 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
             report=report,
             refresh_cache=refresh_cache,
         )
+        check_cancelled(self.stop_requested)
         self._validate_letter(letter, adapted, analysis, report)
         self._validate_cv_offer_alignment(adapted, analysis, job.title, report)
         resolved_form_url = form_url or job.application_url
@@ -119,19 +136,27 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
                 output_dir=artifacts.staging_dir,
             )
 
-            artifacts.publish(report)
+            check_cancelled(self.stop_requested)
             # Availability and validation are independent: keep every diagnostic
             # and review decision, but never withhold a rendered dossier because
             # its text needs checking. Invalid edits remain rejected by the reviewer.
             status = JobStatus.READY_FOR_FORM_SUBMISSION
             report.status = status
-            self._persist_application(
-                report=report,
-                adapted=adapted,
-                letter=letter,
-                form_url=resolved_form_url,
-                status=status,
-            )
+            with write_session_scope() as session:
+                snapshot.validate(
+                    session.get(Job, job_id), session.get(Application, report.application_id)
+                )
+                # From this point cancellation waits for the atomic section.
+                artifacts.publish(report)
+                self._persist_application(
+                    report=report,
+                    adapted=adapted,
+                    letter=letter,
+                    form_url=resolved_form_url,
+                    status=status,
+                    session=session,
+                )
+
         except Exception:
             artifacts.rollback()
             raise
