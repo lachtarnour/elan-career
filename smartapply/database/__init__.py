@@ -30,6 +30,7 @@ from smartapply.database.session import (
     init_db,
     reset_engine_cache,
     session_scope,
+    write_session_scope,
 )
 
 __all__ = [
@@ -60,4 +61,5 @@ __all__ = [
     "init_db",
     "reset_engine_cache",
     "session_scope",
+    "write_session_scope",
 ]

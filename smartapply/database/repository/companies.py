@@ -11,7 +11,7 @@ from sqlalchemy import case, func, inspect, select
 from sqlalchemy.exc import IntegrityError
 
 from smartapply.database.models import Company
-from smartapply.database.session import get_engine, session_scope
+from smartapply.database.session import get_engine, session_scope, write_session_scope
 
 PRIORITY_LABELS = {
     0: "Non définie",
@@ -154,7 +154,7 @@ def list_companies() -> list[dict[str, Any]]:
 
 
 def set_company_checked(company_id: int, checked: bool) -> None:
-    with session_scope() as session:
+    with write_session_scope() as session:
         company = session.get(Company, company_id)
         if company is None:
             raise ValueError("Cette entreprise n’existe plus.")
@@ -178,7 +178,7 @@ def add_company(values: dict[str, Any]) -> int:
         for field in ("category", "company_type", "english_level", "selectivity", "ranking_reason")
     }
     try:
-        with session_scope() as session:
+        with write_session_scope() as session:
             key = company_name_key(name)
             if session.scalar(select(Company.id).where(Company.name_key == key)) is not None:
                 raise ValueError("Cette entreprise figure déjà dans la liste.")

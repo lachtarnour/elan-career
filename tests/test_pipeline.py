@@ -611,7 +611,7 @@ def test_analysis_failure_is_returned_in_report(monkeypatch: pytest.MonkeyPatch)
         location="Paris",
     )
 
-    def fail_analysis(*, job_id: int) -> None:
+    def fail_analysis(*, job_id: int, allow_existing: bool = False) -> None:  # noqa: ARG001
         raise RuntimeError(f"provider unavailable for {job_id}")
 
     monkeypatch.setattr(pipeline._processor, "_analyze_one", fail_analysis)

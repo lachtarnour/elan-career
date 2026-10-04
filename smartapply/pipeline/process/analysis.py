@@ -7,7 +7,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from sqlalchemy import or_
 
-from smartapply.database import session_scope
+from smartapply.concurrency import job_operation
+from smartapply.database import session_scope, write_session_scope
 from smartapply.database.models import Job, JobDuplicateStatus, JobStatus
 from smartapply.database.repository import (
     mark_analyzed,
@@ -19,11 +20,13 @@ from smartapply.llm.prompts import job_analysis as analysis_prompts
 from smartapply.llm.prompts import job_fit as fit_prompts
 from smartapply.logging_setup import get_logger
 from smartapply.offers import build_analyzer_input
+from smartapply.pipeline.errors import StaleTaskResultError, TaskCancelledError
 from smartapply.pipeline.process.audit import (
     _should_replace_job_company,
     _should_replace_job_location,
 )
 from smartapply.pipeline.reports import AnalyzeReport
+from smartapply.pipeline.snapshots import check_cancelled, job_is_active, job_snapshot_key
 
 logger = get_logger(__name__)
 
@@ -81,18 +84,32 @@ class AnalysisMixin:
         """
         if not shortlisted_jobs:
             return 0, []
+        if len(shortlisted_jobs) == 1:
+            # A service may already own this offer for analyse -> generation.
+            # Keep that nested workflow on the reservation's owning thread.
+            job = shortlisted_jobs[0]
+            try:
+                return int(self._analyze_one(job_id=job.id, allow_existing=False)), []
+            except TaskCancelledError:
+                return 0, []
+            except Exception as exc:
+                logger.error("Analysis failed for job %s: %s", job.id, exc)
+                return 0, [{"job_id": int(job.id), "title": job.title,
+                            "company": job.company, "message": str(exc)}]
         workers = min(self.settings.llm_max_concurrent, len(shortlisted_jobs))
         analyzed = 0
         errors: list[dict[str, object]] = []
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(self._analyze_one, job_id=job.id): job for job in shortlisted_jobs
+                pool.submit(self._analyze_one, job_id=job.id, allow_existing=False): job for job in shortlisted_jobs
             }
             for future in as_completed(futures):
                 job = futures[future]
                 try:
-                    future.result()
-                    analyzed += 1
+                    if future.result():
+                        analyzed += 1
+                except TaskCancelledError:
+                    continue
                 except Exception as e:
                     logger.error("Analysis failed for job %s: %s", job.id, e)
                     errors.append(
@@ -136,59 +153,69 @@ class AnalysisMixin:
             analyzed=analyzed,
             skipped_missing=len(set(unique_ids) - found_ids),
             errors=errors,
+            cancelled=bool(getattr(self, "stop_requested", None) and self.stop_requested()),
         )
 
     # -------------------- internals --------------------
 
-    def _analyze_one(self, *, job_id: int) -> None:
-        with session_scope() as s:
-            job = s.get(Job, job_id)
-            if job is None:
-                return
-            analyzer_input = build_analyzer_input(job)
+    def _analyze_one(self, *, job_id: int, allow_existing: bool = True) -> bool:
+        stop_requested = getattr(self, "stop_requested", None)
+        check_cancelled(stop_requested)
+        with job_operation([job_id], operation="analyse"):
+            check_cancelled(stop_requested)
+            with session_scope() as session:
+                job = session.get(Job, job_id)
+                if (job is None or not job_is_active(job)
+                        or (job.analyzed_at is not None and not allow_existing)):
+                    return False
+                snapshot = job_snapshot_key(job)
+                analyzer_input = build_analyzer_input(job)
             user_prompt = analysis_prompts.build_user_prompt_from_input(
                 analyzer_input=analyzer_input,
             )
+            check_cancelled(stop_requested)
             offer = self.llm.complete_json(
                 system=analysis_prompts.build_system_prompt(),
                 user=user_prompt,
                 schema=OfferAnalysis,
                 model=self.llm.cheap_model,
                 purpose="job_offer_analysis",
-                job_id=job.id,
+                job_id=job_id,
             )
+            check_cancelled(stop_requested)
+            # A changed offer must not consume a second paid call.
+            with session_scope() as session:
+                current = session.get(Job, job_id)
+                if current is None or job_snapshot_key(current) != snapshot:
+                    raise StaleTaskResultError()
             offer = _ground_offer_excerpts(offer, analyzer_input.offer_body)
             fit = self.llm.complete_json(
                 system=fit_prompts.build_system_prompt(),
-                user=fit_prompts.build_user_prompt(
-                    profile=self.profile,
-                    offer_analysis=offer,
-                ),
+                user=fit_prompts.build_user_prompt(profile=self.profile, offer_analysis=offer),
                 schema=JobFitAssessment,
                 model=self.llm.cheap_model,
                 purpose="job_fit_assessment",
-                job_id=job.id,
+                job_id=job_id,
             )
+            check_cancelled(stop_requested)
             analysis = _assemble_analysis(offer, fit)
-            set_analysis(
-                s,
-                job.id,
-                fit_score=analysis.fit_score,
-                role_type=analysis.role_type,
-                seniority=analysis.seniority,
-                domain=analysis.domain,
-                main_tasks=analysis.main_tasks,
-                required_skills=analysis.required_skills,
-                nice_to_have=analysis.nice_to_have,
-                match_reasons=analysis.match_reasons,
-                risks=analysis.risks,
-                cv_keywords_to_include=analysis.cv_keywords_to_include,
-                raw_response=analysis.model_dump(),
-                model_used=self.llm.cheap_model,
-            )
-            if _should_replace_job_company(job.company, analysis.extracted_company_name):
-                job.company = analysis.extracted_company_name.strip()
-            if _should_replace_job_location(job.location, analysis.extracted_location):
-                job.location = analysis.extracted_location.strip()
-            mark_analyzed(s, job.id)
-            update_status(s, job.id, JobStatus.ANALYZED)
+            with write_session_scope() as session:
+                job = session.get(Job, job_id)
+                if job is None or not job_is_active(job) or job_snapshot_key(job) != snapshot:
+                    raise StaleTaskResultError()
+                set_analysis(
+                    session, job_id,
+                    fit_score=analysis.fit_score, role_type=analysis.role_type,
+                    seniority=analysis.seniority, domain=analysis.domain,
+                    main_tasks=analysis.main_tasks, required_skills=analysis.required_skills,
+                    nice_to_have=analysis.nice_to_have, match_reasons=analysis.match_reasons,
+                    risks=analysis.risks, cv_keywords_to_include=analysis.cv_keywords_to_include,
+                    raw_response=analysis.model_dump(), model_used=self.llm.cheap_model,
+                )
+                if _should_replace_job_company(job.company, analysis.extracted_company_name):
+                    job.company = analysis.extracted_company_name.strip()
+                if _should_replace_job_location(job.location, analysis.extracted_location):
+                    job.location = analysis.extracted_location.strip()
+                mark_analyzed(session, job_id)
+                update_status(session, job_id, JobStatus.ANALYZED)
+            return True

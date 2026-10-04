@@ -51,6 +51,10 @@ class TaskWorker(QRunnable):
         finally:
             self.signals.finished.emit()
 
+    @property
+    def cancel_requested(self) -> bool:
+        return self._cancel_requested.is_set()
+
     def cancel(self) -> None:
         """Request cooperative cancellation of a cancellable task."""
         self._cancel_requested.set()

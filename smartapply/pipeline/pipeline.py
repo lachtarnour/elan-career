@@ -34,6 +34,7 @@ from smartapply.pipeline.reports import (
     ProcessReport,
     RankingReport,
 )
+from smartapply.pipeline.snapshots import CancellableProvider
 from smartapply.profile import get_profile
 from smartapply.ranking import JobScorer, get_embeddings_provider
 from smartapply.utils.contracts import (
@@ -88,9 +89,13 @@ class Pipeline:
         profile=None,
         llm=None,
         embeddings=None,
+        stop_requested: Callable[[], bool] | None = None,
     ):
+        self.stop_requested = stop_requested
         self.profile = profile or get_profile()
         self.llm = llm or get_llm_provider()
+        if stop_requested is not None:
+            self.llm = CancellableProvider(self.llm, stop_requested)
         self.embeddings = embeddings or get_embeddings_provider()
         self.settings = get_source_settings()
 
@@ -110,6 +115,7 @@ class Pipeline:
             job_filter=self.filter,
             scorer=self.scorer,
             llm=self.llm,
+            stop_requested=stop_requested,
         )
         self._applier = Applier(
             profile=self.profile,
@@ -117,6 +123,7 @@ class Pipeline:
             adapter=self.adapter,
             validator=self.validator,
             renderer=self.renderer,
+            stop_requested=stop_requested,
         )
 
     # =================================================================

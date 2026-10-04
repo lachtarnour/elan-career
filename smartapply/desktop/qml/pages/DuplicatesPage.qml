@@ -23,6 +23,9 @@ Item {
     }
     property var selectedOffer: AppBridge.currentJob || ({})
     property var candidate: selectedOffer.duplicate_candidate || ({})
+    readonly property bool selectedPairBusy: (AppBridge.busyJobIds || []).indexOf(Number(selectedId)) >= 0
+        || (AppBridge.busyJobIds || []).indexOf(Number(candidate.id || 0)) >= 0
+    property int displayedJobId: 0
     property bool hasSelection: Boolean(selectedOffer.id) && Boolean(candidate.id)
 
     function confidenceText(value) {
@@ -65,7 +68,10 @@ Item {
     Connections {
         target: AppBridge
         function onCurrentJobChanged() {
-            compareScroll.contentY = 0
+            if (root.displayedJobId !== root.selectedId) {
+                root.displayedJobId = root.selectedId
+                compareScroll.contentY = 0
+            }
         }
     }
 
@@ -119,7 +125,7 @@ Item {
             AppButton {
                 text: "Actualiser"
                 iconSource: Theme.icon("refresh")
-                enabled: !AppBridge.busy && !AppBridge.jobsLoading
+                enabled: !AppBridge.shutdownRequested && !AppBridge.jobsLoading
                 onClicked: AppBridge.loadJobs("", "duplicate_review", "duplicate_confidence", false)
             }
         }
@@ -440,24 +446,33 @@ Item {
                                 anchors.fill: parent
                                 anchors.margins: 14
                                 spacing: 9
+                                Text {
+                                    visible: root.selectedPairBusy
+                                    Layout.fillWidth: true
+                                    text: "Une offre de cette paire est en cours de traitement. Décision disponible à sa fin."
+                                    color: Theme.warning
+                                    wrapMode: Text.WordWrap
+                                }
                                 RowLayout {
                                     Layout.fillWidth: true
                                     spacing: 9
                                     AppButton {
                                         Layout.fillWidth: true
+                                        objectName: "duplicateConfirmAction"
                                         text: "Même offre"
                                         iconSource: Theme.icon("check")
                                         kind: "primary"
                                         implicitHeight: 42
-                                        enabled: !AppBridge.busy && !AppBridge.jobDetailLoading && !AppBridge.jobsLoading
+                                        enabled: !AppBridge.shutdownRequested && !root.selectedPairBusy && !AppBridge.jobDetailLoading && !AppBridge.jobsLoading
                                         onClicked: AppBridge.resolveDuplicate(root.selectedId, true)
                                     }
                                     AppButton {
                                         Layout.fillWidth: true
+                                        objectName: "duplicateDistinctAction"
                                         text: "Offres différentes"
                                         iconSource: Theme.icon("files")
                                         implicitHeight: 42
-                                        enabled: !AppBridge.busy && !AppBridge.jobDetailLoading && !AppBridge.jobsLoading
+                                        enabled: !AppBridge.shutdownRequested && !root.selectedPairBusy && !AppBridge.jobDetailLoading && !AppBridge.jobsLoading
                                         onClicked: AppBridge.resolveDuplicate(root.selectedId, false)
                                     }
                                 }

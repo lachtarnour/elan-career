@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from sqlalchemy import or_, select
+from sqlalchemy.orm import selectinload
 
-from smartapply.database import session_scope
+from smartapply.database import session_scope, write_session_scope
 from smartapply.database.models import (
     Application,
     Job,
@@ -13,12 +14,12 @@ from smartapply.database.models import (
     ShortlistOrigin,
 )
 from smartapply.database.repository import (
-    list_pending_processing,
     mark_ranked,
     set_score,
     set_shortlisted,
 )
 from smartapply.pipeline.reports import RankingReport
+from smartapply.pipeline.snapshots import check_cancelled, job_is_active, job_snapshot_key
 
 
 class RankingMixin:
@@ -38,46 +39,73 @@ class RankingMixin:
         mode the method only returns the highest-scoring pending offers for
         analysis; it does not mark them as ready for document generation.
         """
-        with session_scope() as s:
-            active_jobs = list(list_pending_processing(s))
-            rankable_jobs = [job for job in active_jobs if job.ranked_at is None]
-            pending = list(rankable_jobs)
+        stop_requested = getattr(self, "stop_requested", None)
+        check_cancelled(stop_requested)
+        with session_scope() as session:
+            active_jobs = list(session.scalars(
+                select(Job).where(
+                    Job.archived_at.is_(None), Job.analyzed_at.is_(None),
+                    or_(Job.duplicate_review_status.is_(None),
+                        Job.duplicate_review_status != JobDuplicateStatus.PENDING),
+                ).options(selectinload(Job.score), selectinload(Job.analysis))
+            ))
+            pending = [job for job in active_jobs if job.ranked_at is None]
             if job_ids is not None:
                 selected_ids = set(job_ids)
                 pending = [job for job in pending if job.id in selected_ids]
-            duplicate_ids: set[int] = set()
-            ranked: list[tuple[Job, object]] = []
-            if pending:
-                override_ids = set(local_filter_override_ids or [])
-                duplicate_ids = self._mark_duplicates(s, active_jobs)
-                unique_jobs = [j for j in pending if j.id not in duplicate_ids]
+            snapshots = {int(job.id): job_snapshot_key(job) for job in pending}
+            duplicate_ids = self._mark_duplicates(session, active_jobs)
+            session.expunge_all()
 
-                to_filter = [j for j in unique_jobs if j.filtered_at is None]
-                already_kept = [j for j in unique_jobs if j.filtered_at is not None]
-                newly_kept = self._apply_local_filter(
-                    s,
-                    to_filter,
-                    override_ids=override_ids,
-                )
-                ranked = self.scorer.rank(already_kept + newly_kept)
-                self._persist_scores(s, ranked)
-
+        override_ids = set(local_filter_override_ids or [])
+        filter_results = {
+            int(job.id): self.filter.evaluate(job)
+            for job in pending if job.id not in duplicate_ids and job.filtered_at is None
+        }
+        kept = [job for job in pending if job.id not in duplicate_ids and (
+            job.filtered_at is not None or filter_results[job.id].kept or job.id in override_ids
+        )]
+        check_cancelled(stop_requested)
+        ranked = self.scorer.rank(kept) if kept else []
+        check_cancelled(stop_requested)
+        with write_session_scope() as session:
+            current_by_id = {int(job.id): job for job in session.scalars(
+                select(Job).where(Job.id.in_(snapshots))
+                .options(selectinload(Job.score), selectinload(Job.analysis))
+            )}
+            valid_ids = {
+                job_id for job_id, job in current_by_id.items()
+                if job_is_active(job) and job_snapshot_key(job) == snapshots[job_id]
+            }
+            for job_id, result in filter_results.items():
+                if job_id in valid_ids:
+                    self._persist_filter_result(
+                        session, current_by_id[job_id], result,
+                        force_keep=job_id in override_ids, update_pipeline_status=True,
+                    )
+            session.flush()
+            for job_id in valid_ids & filter_results.keys():
+                session.expire(current_by_id[job_id], ["score"])
+            self._persist_scores(session, [
+                (current_by_id[job.id], components) for job, components in ranked
+                if job.id in valid_ids
+            ])
             ranked_candidates = self._ranked_shortlist_candidates(
-                s,
-                unanalyzed_only=not persist_shortlist,
+                session, unanalyzed_only=not persist_shortlist,
             )
+            if job_ids is not None and not persist_shortlist:
+                requested_ids = set(job_ids)
+                ranked_candidates = [job for job in ranked_candidates if job.id in requested_ids]
             selection_candidates = (
-                self._ranked_shortlist_candidates(s, analyzed_only=True)
-                if persist_shortlist
-                else ranked_candidates
+                self._ranked_shortlist_candidates(session, analyzed_only=True)
+                if persist_shortlist else ranked_candidates
             )
             selection_limit = min(
-                top_k_ranked or self.settings.top_k_ranked,
-                len(selection_candidates),
+                top_k_ranked or self.settings.top_k_ranked, len(selection_candidates),
             )
             if persist_shortlist:
                 selected = self._mixed_score_shortlist(selection_candidates, selection_limit)
-                selected = self._replace_automatic_shortlist(s, selected)
+                selected = self._replace_automatic_shortlist(session, selected)
             else:
                 selected = selection_candidates[:selection_limit]
             ranked_ids = [int(job.id) for job in ranked_candidates]

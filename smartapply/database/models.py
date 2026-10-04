@@ -15,6 +15,8 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    event,
+    inspect,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -101,6 +103,7 @@ class Job(Base):
     remote_policy: Mapped[str | None] = mapped_column(String(50), nullable=True)
     description: Mapped[str] = mapped_column(Text)
     cleaned_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    display_metadata: Mapped[Any | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     application_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     apply_options: Mapped[Any | None] = mapped_column(JSON, nullable=True)
     source: Mapped[str] = mapped_column(String(50), index=True)
@@ -247,7 +250,7 @@ class LLMCache(Base):
     response: Mapped[str] = mapped_column(Text)
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
 
 
 class LLMUsage(Base):
@@ -292,3 +295,21 @@ class JobEmbedding(Base):
     model: Mapped[str] = mapped_column(String(100))
     vector: Mapped[Any] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+@event.listens_for(Job, "before_insert")
+def _insert_display_metadata(_mapper, _connection, job: Job) -> None:
+    from smartapply.database.display_metadata import build_display_metadata
+
+    job.display_metadata = build_display_metadata(job.description, job.cleaned_description)
+
+
+@event.listens_for(Job, "before_update")
+def _update_display_metadata(_mapper, _connection, job: Job) -> None:
+    if any(
+        inspect(job).attrs[name].history.has_changes()
+        for name in ("description", "cleaned_description")
+    ):
+        from smartapply.database.display_metadata import build_display_metadata
+
+        job.display_metadata = build_display_metadata(job.description, job.cleaned_description)

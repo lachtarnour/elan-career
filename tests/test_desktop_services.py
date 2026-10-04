@@ -85,7 +85,7 @@ def test_bridge_passes_normalized_top_k_to_analysis() -> None:
     assert captured["top_k"] == 1
 
 
-def test_selected_analysis_is_scoped_and_does_not_persist_a_shortlist(monkeypatch) -> None:
+def test_selected_analysis_is_scoped_and_does_not_persist_a_shortlist(isolated_db, monkeypatch) -> None:
     calls: list[tuple[str, object]] = []
 
     class FakePipeline:
@@ -118,6 +118,7 @@ def test_selected_analysis_is_scoped_and_does_not_persist_a_shortlist(monkeypatc
         "analyzed": 2,
         "skipped_missing": 0,
         "errors": [],
+        "cancelled": False,
     }
 
 
@@ -174,7 +175,7 @@ def test_job_rows_include_experience_and_application_state(isolated_db) -> None:
     assert rows[0].status == JobStatus.ANALYZED
     assert rows[0].analyzed is False
     assert rows[0].can_generate is False
-    assert rows[0].can_send is True
+    assert rows[0].can_send is False
 
     detail = DesktopService().get_job(job_id)
     assert detail is not None
@@ -349,6 +350,7 @@ def test_mark_job_sent_updates_linked_application_and_offer(isolated_db) -> None
     job_id = _job(external_id="manual:user-sent")
     with session_scope() as session:
         application = create_or_get_application(session, job_id)
+        application.cv_pdf_path = "/published/cv.pdf"
         application_id = application.id
 
     assert DesktopService().mark_job_sent(job_id) is True
@@ -561,7 +563,7 @@ def test_rescue_reports_analysis_failure_and_continues_batch(
         assert failed.analyzed_at is None
 
 
-def test_bridge_runs_single_rescue_in_background_and_opens_result() -> None:
+def test_bridge_runs_single_rescue_in_background_and_keeps_navigation() -> None:
     bridge = DesktopBridge.__new__(DesktopBridge)
     QObject.__init__(bridge)
     bridge.service = SimpleNamespace(rescue_job=lambda job_id: None)
@@ -585,7 +587,7 @@ def test_bridge_runs_single_rescue_in_background_and_opens_result() -> None:
             "warnings": [{"job_id": 42, "message": "PDF indisponible"}],
         }
     )
-    assert opened == [123]
+    assert opened == []
     assert toasts[0][2] == "warning"
     assert "1 dossier avec des points à vérifier" in toasts[0][1]
     assert "Détails dans le volet du dossier" in toasts[0][1]
@@ -633,7 +635,11 @@ def test_manual_top_selection_analyzes_unanalyzed_offer_first(isolated_db, monke
 
     monkeypatch.setattr("smartapply.pipeline.Pipeline", FakePipeline)
 
-    assert DesktopService().set_job_shortlisted(job_id, selected=True) is True
+    service = DesktopService()
+    assert service.set_job_shortlisted(job_id, selected=True) is False
+    assert analyzed_calls == []
+    assert service.shortlist_requires_analysis(job_id) is True
+    assert service.analyze_and_shortlist([job_id])["shortlisted"] == 1
     detail = DesktopService().get_job(job_id)
     assert detail is not None
     assert analyzed_calls == [[job_id]]
@@ -904,19 +910,15 @@ def test_generate_applications_returns_document_warnings(
     ]
 
 
-def test_manual_generation_returns_document_warnings(monkeypatch) -> None:
+def test_manual_generation_returns_document_warnings(isolated_db, monkeypatch) -> None:
     from smartapply.pipeline import ApplyReport
 
     class FakePipeline:
-        def ingest_text(self, *args, **kwargs):  # noqa: ARG002
-            return SimpleNamespace(job_ids=[42])
-
         def analyze_jobs(self, job_ids):
-            assert job_ids == [42]
+            assert len(job_ids) == 1
             return SimpleNamespace(analyzed=1, already_analyzed=0)
 
         def apply_to(self, job_id, *, form_url):
-            assert job_id == 42
             assert form_url == "https://example.test/apply"
             return ApplyReport(
                 job_id=job_id,
@@ -1078,7 +1080,7 @@ def test_regenerate_application_reuses_ready_dossier_and_persisted_folder(
     ]
 
 
-def test_bridge_opens_existing_application_instead_of_reporting_creation() -> None:
+def test_bridge_reports_existing_application_without_changing_navigation() -> None:
     bridge = DesktopBridge.__new__(DesktopBridge)
     QObject.__init__(bridge)
     bridge._refresh_workflow = lambda: None
@@ -1090,7 +1092,7 @@ def test_bridge_opens_existing_application_instead_of_reporting_creation() -> No
 
     bridge._generation_done({"job_id": 705, "application_id": 127, "existing": True})
 
-    assert opened == [127]
+    assert opened == []
     assert notifications[0][0] == "Candidature existante"
     assert notifications[0][2] == "neutral"
 
@@ -1214,6 +1216,9 @@ def test_search_propagates_cooperative_cancellation(
     from smartapply.pipeline.ingest import IngestCollection, IngestReport
 
     class FakePipeline:
+        def __init__(self, *, stop_requested=None):
+            self.stop_requested = stop_requested
+
         def collect_source(self, source, *args, stop_requested=None, **kwargs):  # noqa: ARG002
             return IngestCollection(
                 source=source,

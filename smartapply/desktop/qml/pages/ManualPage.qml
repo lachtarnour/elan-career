@@ -98,7 +98,7 @@ Item {
                         text: "Créer la candidature"
                         iconSource: Theme.icon("sparkle")
                         kind: "primary"
-                        enabled: !AppBridge.busy && root.formValid
+                        enabled: !AppBridge.shutdownRequested && root.formValid
                         onClicked: AppBridge.createManualApplication(titleField.text, companyField.text, locationField.text, descriptionField.text, urlField.text)
                     }
                 }

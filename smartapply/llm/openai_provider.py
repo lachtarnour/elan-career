@@ -10,7 +10,7 @@ from pydantic import BaseModel, ValidationError
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from smartapply.config import get_settings
-from smartapply.database import session_scope
+from smartapply.database import write_session_scope
 from smartapply.database.repository import (
     cache_get,
     cache_set,
@@ -130,7 +130,7 @@ class OpenAIProvider(LLMProvider):
         cached_token_counts: tuple[int, int] | None = None
         if use_cache:
             try:
-                with session_scope() as s:
+                with write_session_scope(notify=False) as s:
                     purge_expired_cache(
                         s,
                         ttl_days=self._settings.llm_cache_ttl_days,
@@ -164,7 +164,7 @@ class OpenAIProvider(LLMProvider):
             # Telemetry must never turn a valid zero-cost cache hit into a paid
             # provider call, so record it independently and always return it.
             try:
-                with session_scope() as s:
+                with write_session_scope(notify=False) as s:
                     record_usage(
                         s,
                         purpose=purpose,
@@ -251,7 +251,7 @@ class OpenAIProvider(LLMProvider):
         )
         if use_cache:
             try:
-                with session_scope() as s:
+                with write_session_scope(notify=False) as s:
                     cache_set(
                         s,
                         cache_key=cache_key,
@@ -288,7 +288,7 @@ class OpenAIProvider(LLMProvider):
         job_id: int | None,
     ) -> None:
         try:
-            with session_scope() as s:
+            with write_session_scope(notify=False) as s:
                 record_usage(
                     s,
                     purpose=purpose,

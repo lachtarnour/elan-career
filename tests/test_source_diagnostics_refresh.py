@@ -32,16 +32,23 @@ def bridge(monkeypatch):
         shortlist_top_k=lambda: 5,
         source_label=lambda key: key,
         diagnostics=lambda **kwargs: snapshot("checking"),
+        startup_maintenance_needed=lambda: False,
+        source_diagnostics_stale=lambda: False,
+        invalidate_diagnostics_cache=lambda: None,
     )
     for method in ("refreshDashboard", "refreshShortlist", "refreshProfile"):
         monkeypatch.setattr(DesktopBridge, method, lambda self: None)
-    monkeypatch.setattr(
-        "smartapply.desktop.bridge.QThreadPool.globalInstance",
-        lambda: SimpleNamespace(start=queued.append),
-    )
+    original = DesktopBridge.refreshDiagnosticsIfStale
+    monkeypatch.setattr(DesktopBridge, "refreshDiagnosticsIfStale", lambda self: None)
     instance = DesktopBridge(service)
+    instance._read_pool = SimpleNamespace(start=queued.append)
+    # Restore the real cached navigation method after avoiding initial real workers.
+    instance.refreshDiagnosticsIfStale = original.__get__(instance)
+    instance.refreshDiagnostics()
     yield instance, service, queued
-    instance._source_refresh_timer.stop()
+    instance._workflow_refresh_timer.stop()
+    instance._unsubscribe_resources()
+    instance._unsubscribe_database()
     instance.deleteLater()
     app.processEvents()
 
@@ -53,16 +60,18 @@ def finish(bridge, queued, state):
     assert not bridge.diagnosticsChecking
 
 
-def test_periodic_check_recovers_without_overlapping_or_temporarily_disabling(bridge):
+def test_cached_navigation_and_explicit_check_do_not_overlap(bridge):
     instance, service, queued = bridge
-    assert instance._source_refresh_timer.isActive()
-    assert instance._source_refresh_timer.interval() == 60_000
+    assert not hasattr(instance, "_source_refresh_timer")
     instance.refreshDiagnostics()
     assert len(queued) == 1
     finish(instance, queued, "unavailable")
     assert not instance.diagnostics["source_ready"]["linkedin"]
 
-    instance._source_refresh_timer.timeout.emit()
+    instance.refreshDiagnosticsIfStale()
+    assert queued == []
+    service.source_diagnostics_stale = lambda: True
+    instance.refreshDiagnosticsIfStale()
     assert instance.diagnosticsChecking
     finish(instance, queued, "available")
     assert instance.diagnostics["source_ready"]["linkedin"]
@@ -79,10 +88,10 @@ def test_removed_credentials_clear_previous_availability_immediately(bridge):
     finish(instance, queued, "available")
     service.diagnostics = lambda **kwargs: snapshot("unconfigured", configured=False)
     instance.refreshDiagnostics()
-    assert not instance.diagnostics["source_ready"]["linkedin"]
-    assert instance.diagnostics["source_health"]["linkedin"]["state"] == "unconfigured"
     queued.pop().run()
     assert not instance.diagnosticsChecking
+    assert not instance.diagnostics["source_ready"]["linkedin"]
+    assert instance.diagnostics["source_health"]["linkedin"]["state"] == "unconfigured"
 
 
 def test_failed_check_has_consistent_state_and_can_recover(bridge):
@@ -102,7 +111,7 @@ def test_failed_check_has_consistent_state_and_can_recover(bridge):
 
 
 def test_search_qml_preserves_selection_and_refreshes_on_navigation():
-    script = r'''
+    script = r"""
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -124,10 +133,11 @@ bridge._active_worker = bridge._diagnostics_worker = None
 bridge._analysis_top_k = bridge._shortlist_top_k = 5
 bridge._start_read = lambda *args, **kwargs: None
 calls = []
-bridge._thread_pool = SimpleNamespace(start=calls.append)
+bridge._thread_pool = bridge._read_pool = SimpleNamespace(start=calls.append)
 bridge._workers = set()
 bridge.service = SimpleNamespace(
     job_statuses=lambda: [], list_jobs=lambda: [], source_label=lambda key: key,
+    source_diagnostics_stale=lambda: False, invalidate_diagnostics_cache=lambda: None,
     diagnostics=lambda **kwargs: {"source_health": {
         "linkedin": {"configured": True, "ready": False, "state": "checking"}
     }},
@@ -175,10 +185,11 @@ app.processEvents()
 assert len(calls) == 1
 assert not button.property("enabled")
 assert bridge.diagnostics["source_ready"]["linkedin"]
+bridge._shutdown_ready = True
 page.deleteLater(); window.close(); engine.deleteLater()
 app.sendPostedEvents(None, QEvent.DeferredDelete)
 app.processEvents()
-'''
+"""
     qml = Path(__file__).resolve().parent.parent / "smartapply/desktop/qml"
     result = subprocess.run(
         [sys.executable, "-c", script, str(qml)],

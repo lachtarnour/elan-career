@@ -7,10 +7,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from smartapply.database import session_scope
-from smartapply.database.models import JobDuplicateStatus, JobStatus
+from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
+
+from smartapply.concurrency import job_operation
+from smartapply.database import session_scope, write_session_scope
+from smartapply.database.models import Job, JobDuplicateStatus, JobStatus
 from smartapply.database.repository import (
-    get_job_by_external_id,
     get_known_external_ids,
     list_known_jobs,
     upsert_job,
@@ -37,6 +40,7 @@ from smartapply.pipeline.ingest import (
     split_or_query,
 )
 from smartapply.pipeline.ingest.dedupe import _native_offer_key
+from smartapply.pipeline.snapshots import application_snapshot_key, job_snapshot_key
 from smartapply.scrapers import ManualScraper, get_scraper
 from smartapply.scrapers.apify_recovery import (
     ApifyRecoveryJournal,
@@ -221,154 +225,158 @@ class Ingestor:
         skipped_existing = 0
         duplicate_review_ids: list[int] = []
         aliases_created = 0
-        with session_scope() as s:
-            known_jobs = list(list_known_jobs(s))
-            dedup_reference_jobs: list[Any] = list(known_jobs)
-            known_native_ids = set(_KnownJobIndex.from_jobs(known_jobs).native_offer_ids)
-            for raw in raws:
-                probable: DuplicateCandidate | None = None
-                existing = get_job_by_external_id(s, raw.external_id)
-                existing_status = existing.status if existing is not None else None
+        with session_scope() as session:
+            known_jobs = list(session.scalars(
+                select(Job).options(selectinload(Job.application))
+            ))
+            session.expunge_all()
+        known_max = max((int(job.id) for job in known_jobs), default=0)
+        for raw in raws:
+            # Matching may be expensive. It always runs on detached snapshots,
+            # never while an SQLite transaction or the writer lock is held.
+            while True:
+                known_by_external = {job.external_id: job for job in known_jobs}
+                existing = known_by_external.get(raw.external_id)
                 native_key = _native_offer_key(raw.source, raw.source_data)
-                if existing is None and native_key is not None and native_key in known_native_ids:
-                    # Legacy France Travail rows may have a different external hash.
-                    # The source's offer ID already identifies the persisted job.
+                if existing is None and native_key is not None and native_key in (
+                    _KnownJobIndex.from_jobs(known_jobs).native_offer_ids
+                ):
                     skipped_existing += 1
-                    continue
-                if native_key is not None:
-                    known_native_ids.add(native_key)
-                if existing is not None and existing.canonical_job_id is not None:
-                    # An already confirmed alias is source history, not a
-                    # second candidate. Refresh its source payload in place
-                    # and leave the canonical job/application untouched.
-                    upsert_job(
-                        s,
-                        external_id=existing.external_id,
-                        title=raw.title,
-                        company=raw.company,
-                        location=raw.location,
-                        contract_type=raw.contract_type,
-                        remote_policy=raw.remote_policy,
-                        description=raw.description,
-                        cleaned_description=clean_description(raw.description),
-                        application_url=raw.application_url,
-                        apply_options=raw.apply_options,
-                        source=raw.source,
-                        source_data=raw.source_data,
-                        published_date=raw.published_date,
-                    )
-                    skipped_existing += 1
-                    continue
+                    break
+                probable = None
+                alias_target = None
                 if existing is None:
-                    matching_existing = _matching_known_job(raw, known_jobs)
-                    if matching_existing is not None and source == "manual":
-                        existing = matching_existing
-                        existing_status = existing.status
+                    manual_match = _matching_known_job(raw, known_jobs) if source == "manual" else None
+                    if manual_match is not None:
+                        existing = manual_match
                     else:
-                        exact_url_job = _matching_exact_offer_url(raw, known_jobs)
-                        if exact_url_job is not None and source == "manual":
-                            probable = DuplicateCandidate(
-                                job=exact_url_job,
-                                title_score=100.0,
-                                description_score=100.0,
-                                confidence=1.0,
-                                match_type="exact_url",
-                            )
-                        elif exact_url_job is not None:
-                            root = _canonical_job(exact_url_job, known_jobs)
-                            alias = upsert_job(
-                                s,
-                                external_id=raw.external_id,
-                                title=raw.title,
-                                company=raw.company,
-                                location=raw.location,
-                                contract_type=raw.contract_type,
-                                remote_policy=raw.remote_policy,
+                        exact = _matching_exact_offer_url(raw, known_jobs)
+                        if exact is not None:
+                            if source == "manual":
+                                probable = DuplicateCandidate(
+                                    job=exact, title_score=100.0, description_score=100.0,
+                                    confidence=1.0, match_type="exact_url",
+                                )
+                            else:
+                                alias_target = _canonical_job(exact, known_jobs)
+                if existing is None and probable is None and alias_target is None:
+                    probable = self._find_probable_duplicate(raw, known_jobs)
+                candidate = _canonical_job(probable.job, known_jobs) if probable else None
+                references = [job for job in (existing, alias_target, candidate) if job is not None]
+                components = linked_duplicate_components(known_jobs)
+                dependencies = {
+                    int(member.id) for job in references
+                    for member in components.get(id(job), (job,))
+                }
+                dependencies.update(int(job.id) for job in references)
+                snapshots = {int(job.id): _ingest_snapshot_key(job) for job in known_jobs
+                             if int(job.id) in dependencies}
+                refreshed = []
+                refresh_scope = set()
+                retry = False
+                with (job_operation(dependencies, operation="enregistrement d’offre"),
+                      write_session_scope() as session):
+                    current_max = int(session.scalar(select(func.max(Job.id))) or 0)
+                    if current_max > known_max:
+                        # A manual addition during fetch can be the same offer.
+                        # Refresh it and recompute identity outside this scope.
+                        refreshed = list(session.scalars(
+                            select(Job).where(Job.id > known_max)
+                            .options(selectinload(Job.application))
+                        ))
+                        session.expunge_all()
+                        retry = True
+                    else:
+                        current_refs = list(session.scalars(
+                            select(Job).where(Job.id.in_(dependencies))
+                            .options(selectinload(Job.application))
+                        ))
+                        current_by_id = {int(job.id): job for job in current_refs}
+                        if (set(current_by_id) != dependencies or any(
+                            _ingest_snapshot_key(job) != snapshots[int(job.id)]
+                            for job in current_refs
+                        )):
+                            refreshed = current_refs
+                            refresh_scope = dependencies
+                            session.expunge_all()
+                            retry = True
+                        else:
+                            current = current_by_id.get(int(existing.id)) if existing else None
+                            # Tracking history and published dossiers are never
+                            # reopened by adding the same offer manually.
+                            if current is not None and current.canonical_job_id is None and (
+                                _ingest_history_is_protected(current)
+                                or (source != "manual" and (
+                                    current.status != JobStatus.SCRAPED
+                                    or current.filtered_at is not None
+                                    or current.ranked_at is not None
+                                    or current.analyzed_at is not None
+                                ))
+                            ):
+                                skipped_processed += 1
+                                break
+                            old_status = current.status if current is not None else None
+                            job = upsert_job(
+                                session,
+                                external_id=(current.external_id if current is not None
+                                             and source == "manual" else raw.external_id),
+                                title=raw.title, company=raw.company, location=raw.location,
+                                contract_type=raw.contract_type, remote_policy=raw.remote_policy,
                                 description=raw.description,
                                 cleaned_description=clean_description(raw.description),
-                                application_url=raw.application_url,
-                                apply_options=raw.apply_options,
-                                source=raw.source,
-                                source_data=raw.source_data,
+                                application_url=raw.application_url, apply_options=raw.apply_options,
+                                source=raw.source, source_data=raw.source_data,
                                 published_date=raw.published_date,
                             )
-                            alias.canonical_job_id = root.id
-                            alias.possible_duplicate_of_id = None
-                            alias.duplicate_review_status = JobDuplicateStatus.CONFIRMED
-                            alias.duplicate_match_type = "exact_url"
-                            alias.duplicate_confidence = 1.0
-                            alias.archived_at = alias.archived_at or datetime.now(timezone.utc)
-                            alias.status = JobStatus.ARCHIVED
-                            aliases_created += 1
-                            skipped_existing += 1
-                            known_jobs.append(alias)
-                            dedup_reference_jobs.append(alias)
-                            continue
-                # Cross-source fuzzy duplicates must be rejected before the
-                # upsert. A probable match is persisted for human review;
-                # it must not silently become a second candidate.
-                probable = (
-                    probable
-                    if existing is None and probable is not None
-                    else self._find_probable_duplicate(raw, dedup_reference_jobs)
-                    if existing is None
-                    else None
-                )
-                job = upsert_job(
-                    s,
-                    external_id=(
-                        existing.external_id if existing and source == "manual" else raw.external_id
-                    ),
-                    title=raw.title,
-                    company=raw.company,
-                    location=raw.location,
-                    contract_type=raw.contract_type,
-                    remote_policy=raw.remote_policy,
-                    description=raw.description,
-                    cleaned_description=clean_description(raw.description),
-                    application_url=raw.application_url,
-                    apply_options=raw.apply_options,
-                    source=raw.source,
-                    source_data=raw.source_data,
-                    published_date=raw.published_date,
-                )
-                if probable is not None:
-                    candidate = _canonical_job(probable.job, known_jobs)
-                    job.possible_duplicate_of_id = candidate.id
-                    job.canonical_job_id = None
-                    job.duplicate_review_status = JobDuplicateStatus.PENDING
-                    job.duplicate_match_type = probable.match_type
-                    job.duplicate_confidence = probable.confidence
-                    job.filtered_at = None
-                    job.ranked_at = None
-                    job.analyzed_at = None
-                    job.shortlisted_at = None
-                    job.shortlist_origin = None
-                    job.archived_at = None
-                    job.status = JobStatus.SCRAPED
-                if job.duplicate_review_status == JobDuplicateStatus.PENDING:
-                    # Retries reuse the row without recomputing the match.
-                    # Keep reporting its unresolved review so callers stop
-                    # before analysis, which excludes pending duplicates.
-                    duplicate_review_ids.append(int(job.id))
-                if source == "manual" and existing_status is not None:
-                    # Manual one-shot submissions are explicit user intent:
-                    # reuse the existing row, but analyze the freshly pasted
-                    # content again before regenerating documents.
-                    job.archived_at = None
-                    job.analyzed_at = None
-                    job.shortlisted_at = None
-                    job.status = JobStatus.SCRAPED
-                if existing_status is None:
-                    inserted += 1
-                    job_ids.append(job.id)
-                elif existing_status == JobStatus.SCRAPED:
-                    updated_pending += 1
-                    job_ids.append(job.id)
-                elif source == "manual":
-                    job_ids.append(job.id)
-                if existing_status is None:
-                    dedup_reference_jobs.append(job)
+                            if current is not None and current.canonical_job_id is not None:
+                                skipped_existing += 1
+                            elif alias_target is not None:
+                                job.canonical_job_id = int(alias_target.id)
+                                job.possible_duplicate_of_id = None
+                                job.duplicate_review_status = JobDuplicateStatus.CONFIRMED
+                                job.duplicate_match_type = "exact_url"
+                                job.duplicate_confidence = 1.0
+                                job.archived_at = job.archived_at or datetime.now(timezone.utc)
+                                job.status = JobStatus.ARCHIVED
+                                aliases_created += 1
+                                skipped_existing += 1
+                            else:
+                                if candidate is not None:
+                                    job.possible_duplicate_of_id = int(candidate.id)
+                                    job.canonical_job_id = None
+                                    job.duplicate_review_status = JobDuplicateStatus.PENDING
+                                    job.duplicate_match_type = probable.match_type
+                                    job.duplicate_confidence = probable.confidence
+                                    job.filtered_at = job.ranked_at = job.analyzed_at = None
+                                    job.shortlisted_at = job.shortlist_origin = None
+                                    job.archived_at = None
+                                    job.status = JobStatus.SCRAPED
+                                if source == "manual" and old_status is not None:
+                                    job.filtered_at = job.ranked_at = job.analyzed_at = None
+                                    job.shortlisted_at = job.shortlist_origin = None
+                                    job.archived_at = None
+                                    job.status = JobStatus.SCRAPED
+                                if job.duplicate_review_status == JobDuplicateStatus.PENDING:
+                                    duplicate_review_ids.append(int(job.id))
+                                if old_status is None:
+                                    inserted += 1
+                                    job_ids.append(int(job.id))
+                                elif old_status == JobStatus.SCRAPED:
+                                    updated_pending += 1
+                                    job_ids.append(int(job.id))
+                                elif source == "manual":
+                                    job_ids.append(int(job.id))
+                            session.flush()
+                            _ = job.application
+                            session.expunge_all()
+                            refreshed = [job]
+                refreshed_ids = {int(job.id) for job in refreshed} | refresh_scope
+                known_jobs = [job for job in known_jobs if int(job.id) not in refreshed_ids]
+                known_jobs.extend(refreshed)
+                known_max = max((int(job.id) for job in known_jobs), default=0)
+                if not retry:
+                    break
+
         return IngestReport(
             source=source,
             fetched=len(raws),
@@ -405,6 +413,27 @@ __all__ = [
     "expand_query_for_source",
     "split_or_query",
 ]
+
+
+def _ingest_snapshot_key(job: Job) -> tuple[str, str | None]:
+    return job_snapshot_key(job), (
+        application_snapshot_key(job.application) if job.application is not None else None
+    )
+
+
+def _ingest_history_is_protected(job: Job) -> bool:
+    application = job.application
+    return bool(
+        job.archived_at is not None
+        or job.status in {JobStatus.ARCHIVED, JobStatus.SENT, JobStatus.INTERVIEW, JobStatus.REJECTED}
+        or (application is not None and (
+            application.form_submitted_at is not None
+            or application.status in {JobStatus.SENT, JobStatus.INTERVIEW,
+                                      JobStatus.REJECTED, JobStatus.ARCHIVED}
+            or application.status != JobStatus.ANALYZED
+            or application.cv_json or application.cv_docx_path or application.cv_pdf_path
+        ))
+    )
 
 
 def _matching_known_job(raw: RawJob, known_jobs) -> object | None:  # noqa: ANN001
