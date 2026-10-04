@@ -18,8 +18,8 @@ Item {
     readonly property int documentReviewPointCount: documentDiagnostics.filter(function(item) {
         return !root.isReviewInformation(String(item))
     }).length
-    property string sortKey: "score"
-    property bool sortAscending: false
+    property string sortKey: "filter_disposition"
+    property bool sortAscending: true
     property string filterStatus: "scraped"
     property string requestedFilter: "scraped"
     property var selectedJobs: ({})
@@ -32,7 +32,15 @@ Item {
     readonly property int experienceWidth: Math.round(52 + 12 * tableScale)
     readonly property int scoreWidth: Math.round(42 + 6 * tableScale)
     readonly property int llmScoreWidth: scoreWidth
-    readonly property real textColumnsWidth: Math.max(0, tableContentWidth - selectWidth - experienceWidth - scoreWidth - llmScoreWidth - columnGap * 6)
+    readonly property int publishedDateWidth: Math.round(76 + 12 * tableScale)
+    readonly property bool isNewOffersFilter: filterStatus === "scraped"
+    // Nouvelle shows the source publication date beside the local-filter
+    // disposition. Unknown publication dates remain explicit instead of
+    // falling back to the import date.
+    readonly property int filterDispositionWidth: scoreWidth + llmScoreWidth + columnGap
+    readonly property int rightColumnsWidth: isNewOffersFilter ? publishedDateWidth + columnGap + filterDispositionWidth : scoreWidth + llmScoreWidth + columnGap
+    readonly property int visibleColumnGapCount: isNewOffersFilter ? 5 : 6
+    readonly property real textColumnsWidth: Math.max(0, tableContentWidth - selectWidth - experienceWidth - rightColumnsWidth - columnGap * visibleColumnGapCount)
     readonly property int companyWidth: Math.round(textColumnsWidth * 0.26)
     readonly property int locationWidth: Math.round(textColumnsWidth * 0.30)
     readonly property int tableRowHeight: Math.round(68 + 4 * tableScale)
@@ -106,7 +114,12 @@ Item {
     function titleX() { return companyX() + companyWidth + columnGap }
     function scoreX(contentWidth) { return contentWidth - scoreWidth }
     function llmScoreX(contentWidth) { return scoreX(contentWidth) - columnGap - llmScoreWidth }
-    function locationX(contentWidth) { return llmScoreX(contentWidth) - columnGap - locationWidth }
+    function filterDispositionX(contentWidth) { return contentWidth - filterDispositionWidth }
+    function publishedDateX(contentWidth) { return filterDispositionX(contentWidth) - columnGap - publishedDateWidth }
+    function locationX(contentWidth) {
+        var rightColumnX = isNewOffersFilter ? publishedDateX(contentWidth) : llmScoreX(contentWidth)
+        return rightColumnX - columnGap - locationWidth
+    }
     function experienceX(contentWidth) { return locationX(contentWidth) - columnGap - experienceWidth }
     function titleWidthFor(contentWidth) { return Math.max(0, experienceX(contentWidth) - columnGap - titleX()) }
     function adjustDetailTextZoom(delta) {
@@ -211,9 +224,14 @@ Item {
         if (sortKey === key) sortAscending = !sortAscending
         else {
             sortKey = key
-            sortAscending = key === "score" ? false : true
+            sortAscending = key === "score" || key === "published_date" ? false : true
         }
         AppBridge.loadJobs(searchField.text, statusFilter.currentValue || "", sortKey, sortAscending)
+    }
+
+    function useDefaultSortForStatus(status) {
+        sortKey = status === "scraped" ? "filter_disposition" : "score"
+        sortAscending = status === "scraped"
     }
 
     function applyRequestedFilter() {
@@ -221,6 +239,7 @@ Item {
         var index = statusFilter.indexOfValue(requestedFilter)
         if (index < 0) return
         filterStatus = requestedFilter
+        useDefaultSortForStatus(requestedFilter)
         statusFilter.currentIndex = index
     }
 
@@ -294,6 +313,7 @@ Item {
                         currentIndex: Math.max(0, indexOfValue(root.filterStatus))
                         onActivated: {
                             root.filterStatus = currentValue
+                            root.useDefaultSortForStatus(currentValue)
                             root.filterChanged(currentValue)
                             root.clearSelection()
                             AppBridge.loadJobs(searchField.text, currentValue, root.sortKey, root.sortAscending)
@@ -382,7 +402,10 @@ Item {
                     Item { Layout.fillWidth: true }
                     AppButton {
                         id: generationAction
-                        visible: (AppBridge.shortlist.ready_to_generate || 0) > 0
+                        visible: !root.isNewOffersFilter && (AppBridge.shortlist.ready_to_generate || 0) > 0
+                        Layout.minimumWidth: visible ? implicitWidth : 0
+                        Layout.preferredWidth: visible ? implicitWidth : 0
+                        Layout.maximumWidth: visible ? implicitWidth : 0
                         text: "Générer (" + AppBridge.shortlist.ready_to_generate + ")"
                         iconSource: Theme.icon("sparkle")
                         kind: "primary"
@@ -396,9 +419,10 @@ Item {
                     RowLayout {
                         id: shortlistControls
                         objectName: "offerShortlistControls"
-                        Layout.minimumWidth: 192
-                        Layout.preferredWidth: 192
-                        Layout.maximumWidth: 192
+                        visible: !root.isNewOffersFilter
+                        Layout.minimumWidth: root.isNewOffersFilter ? 0 : 192
+                        Layout.preferredWidth: root.isNewOffersFilter ? 0 : 192
+                        Layout.maximumWidth: root.isNewOffersFilter ? 0 : 192
                         spacing: 6
                         AppSpinBox {
                             id: topK
@@ -478,7 +502,7 @@ Item {
                         onClicked: root.clearSelection()
                     }
                     AppButton {
-                        visible: root.topLabelIds.length > 0
+                        visible: !root.isNewOffersFilter && root.topLabelIds.length > 0
                         text: "Ajouter (" + root.topLabelIds.length + ")"
                         iconSource: Theme.icon("plus")
                         refined: true
@@ -487,6 +511,18 @@ Item {
                         implicitHeight: 30
                         enabled: root.topLabelIds.length > 0 && !AppBridge.busy
                         onClicked: AppBridge.labelJobsAsTop(root.topLabelIds)
+                    }
+                    AppButton {
+                        visible: root.isNewOffersFilter && root.selectedCount > 0
+                        text: "Analyser (" + root.selectedCount + ")"
+                        iconSource: Theme.icon("sparkle")
+                        kind: "primary"
+                        refined: true
+                        iconSize: 13
+                        fontPixelSize: 11
+                        implicitHeight: 30
+                        enabled: !AppBridge.busy
+                        onClicked: AppBridge.analyzeSelectedJobs(root.selectedIds)
                     }
                     AppButton {
                         visible: root.rescueIds.length > 0
@@ -554,8 +590,10 @@ Item {
                                 SortHeader { objectName: "offerTitleHeader"; x: root.titleX(); width: root.titleWidthFor(parent.width); anchors.verticalCenter: parent.verticalCenter; title: "Poste"; sortKey: "title"; active: root.sortKey === sortKey; ascending: root.sortAscending; onSortRequested: function(key) { root.sortBy(key) } }
                                 SortHeader { x: root.experienceX(parent.width); width: root.experienceWidth; anchors.verticalCenter: parent.verticalCenter; title: "Exp."; sortKey: "experience"; active: root.sortKey === sortKey; ascending: root.sortAscending; onSortRequested: function(key) { root.sortBy(key) } }
                                 SortHeader { x: root.locationX(parent.width); width: root.locationWidth; anchors.verticalCenter: parent.verticalCenter; title: "Lieu"; sortKey: "location"; active: root.sortKey === sortKey; ascending: root.sortAscending; onSortRequested: function(key) { root.sortBy(key) } }
-                                SortHeader { x: root.llmScoreX(parent.width); width: root.llmScoreWidth; anchors.verticalCenter: parent.verticalCenter; title: "IA"; sortKey: "llm_score"; active: root.sortKey === sortKey; ascending: root.sortAscending; centered: true; onSortRequested: function(key) { root.sortBy(key) } }
-                                SortHeader { objectName: "offerMatchHeader"; x: root.scoreX(parent.width); width: root.scoreWidth; anchors.verticalCenter: parent.verticalCenter; title: "Match"; sortKey: "score"; active: root.sortKey === sortKey; ascending: root.sortAscending; centered: true; onSortRequested: function(key) { root.sortBy(key) } }
+                                SortHeader { visible: !root.isNewOffersFilter; x: root.llmScoreX(parent.width); width: root.llmScoreWidth; anchors.verticalCenter: parent.verticalCenter; title: "IA"; sortKey: "llm_score"; active: root.sortKey === sortKey; ascending: root.sortAscending; centered: true; onSortRequested: function(key) { root.sortBy(key) } }
+                                SortHeader { objectName: "offerMatchHeader"; visible: !root.isNewOffersFilter; x: root.scoreX(parent.width); width: root.scoreWidth; anchors.verticalCenter: parent.verticalCenter; title: "Match"; sortKey: "score"; active: root.sortKey === sortKey; ascending: root.sortAscending; centered: true; onSortRequested: function(key) { root.sortBy(key) } }
+                                SortHeader { objectName: "offerPublishedDateHeader"; visible: root.isNewOffersFilter; x: root.publishedDateX(parent.width); width: root.publishedDateWidth; anchors.verticalCenter: parent.verticalCenter; title: "Date"; sortKey: "published_date"; active: root.sortKey === sortKey; ascending: root.sortAscending; centered: true; onSortRequested: function(key) { root.sortBy(key) } }
+                                SortHeader { objectName: "offerFilterHeader"; visible: root.isNewOffersFilter; x: root.filterDispositionX(parent.width); width: root.filterDispositionWidth; anchors.verticalCenter: parent.verticalCenter; title: "Filtre"; sortKey: "filter_disposition"; active: root.sortKey === sortKey; ascending: root.sortAscending; centered: true; onSortRequested: function(key) { root.sortBy(key) } }
                             }
                         }
                         Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: "#2C2836" }
@@ -637,6 +675,7 @@ Item {
                                         Text { objectName: "offerLocation-" + modelData.id; x: root.locationX(parent.width); width: root.locationWidth; anchors.verticalCenter: parent.verticalCenter; text: modelData.location || "—"; color: Theme.inkMuted; font.pixelSize: root.tableTextSize - 1; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight; lineHeight: 1.2 }
                                         Text {
                                             objectName: "offerIa-" + modelData.id
+                                            visible: !root.isNewOffersFilter
                                             x: root.llmScoreX(parent.width)
                                             width: root.llmScoreWidth
                                             anchors.verticalCenter: parent.verticalCenter
@@ -648,12 +687,36 @@ Item {
                                         }
                                         Text {
                                             objectName: "offerMatch-" + modelData.id
+                                            visible: !root.isNewOffersFilter
                                             x: root.scoreX(parent.width)
                                             width: root.scoreWidth
                                             anchors.verticalCenter: parent.verticalCenter
                                             horizontalAlignment: Text.AlignHCenter
                                             text: modelData.score_text || "—"
                                             color: modelData.score === null || modelData.score === undefined ? Theme.inkFaint : Theme.inkSoft
+                                            font.pixelSize: root.tableTextSize - 1
+                                            font.weight: Font.DemiBold
+                                        }
+                                        Text {
+                                            objectName: "offerPublishedDate-" + modelData.id
+                                            visible: root.isNewOffersFilter
+                                            x: root.publishedDateX(parent.width)
+                                            width: root.publishedDateWidth
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            horizontalAlignment: Text.AlignHCenter
+                                            text: modelData.published_date || "—"
+                                            color: modelData.published_date && modelData.published_date !== "—" ? Theme.inkMuted : Theme.inkFaint
+                                            font.pixelSize: root.tableTextSize - 1
+                                        }
+                                        Text {
+                                            objectName: "offerFilter-" + modelData.id
+                                            visible: root.isNewOffersFilter
+                                            x: root.filterDispositionX(parent.width)
+                                            width: root.filterDispositionWidth
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            horizontalAlignment: Text.AlignHCenter
+                                            text: modelData.filter_disposition_label || "—"
+                                            color: modelData.filter_disposition === "uncertain" ? Theme.warning : modelData.filter_disposition === "relevant" ? Theme.success : Theme.inkFaint
                                             font.pixelSize: root.tableTextSize - 1
                                             font.weight: Font.DemiBold
                                         }

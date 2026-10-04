@@ -36,10 +36,18 @@ l'activer. Le minimum de trois n'autorise ni l'assouplissement de cette règle n
 la sélection de projets désactivés. Si le catalogue ne permet pas trois choix
 admissibles, la génération s'arrête en signalant la limite.
 
+Le même appel choisit de zéro à deux certificats pertinents parmi les
+identifiants de `certificates.json`. Une liste vide signifie qu'aucun certificat
+n'améliore cette candidature. Le code refuse les identifiants inconnus, les
+doublons et plus de deux choix, puis utilise exactement la même sélection et le
+même ordre dans les exports HTML/PDF et DOCX. Aucun appel LLM supplémentaire
+n'est ajouté. Les anciens snapshots, créés avant cette sélection, restent
+compatibles et continuent d'afficher les certificats historiques.
+
 Le modèle juge la pertinence et la complémentarité. Le code contrôle les
-identifiants, doublons, catégories, minimum et maximum de trois, présence des justifications et
-existence des extraits cités. Ce dernier contrôle ne prouve pas la pertinence
-sémantique d'une justification.
+identifiants, doublons, catégories, minimum et maximum de trois projets, la limite
+de certificats, la présence des justifications et l'existence des extraits cités.
+Ce dernier contrôle ne prouve pas la pertinence sémantique d'une justification.
 
 La recherche de l'extrait applique la même normalisation typographique à la
 citation et aux sources : Unicode, casse, espaces et retours à la ligne,

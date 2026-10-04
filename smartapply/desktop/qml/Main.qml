@@ -76,7 +76,12 @@ ApplicationWindow {
         if (page === "duplicates") AppBridge.loadJobs("", "duplicate_review", "duplicate_confidence", false)
         if (page === "jobs") {
             var status = routeStatus(route) || jobsFilterStatus
-            AppBridge.loadJobs("", status, "score", false)
+            AppBridge.loadJobs(
+                "",
+                status,
+                status === "scraped" ? "filter_disposition" : "score",
+                status === "scraped"
+            )
         }
         if (page === "profile") AppBridge.refreshProfile()
         if (page === "settings" || page === "search") AppBridge.refreshDiagnostics()
@@ -512,12 +517,14 @@ ApplicationWindow {
 
     Rectangle {
         id: busyPill
+        objectName: "busyTaskNotification"
         z: 50
         visible: opacity > 0
         opacity: AppBridge.busy ? 1 : 0
-        anchors.top: parent.top
-        anchors.topMargin: 20
-        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.right: parent.right
+        anchors.rightMargin: 28
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 24
         width: Math.min(430, Math.max(220, busyRow.implicitWidth + 34))
         height: 44
         radius: 15

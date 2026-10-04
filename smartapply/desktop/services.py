@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import joinedload, load_only
 
@@ -47,6 +47,7 @@ from smartapply.desktop.source_health import (
     check_source_health,
     pending_source_health,
 )
+from smartapply.filtering.types import FilterDisposition
 from smartapply.jobsearch.archive_reasons import archive_reason_labels
 from smartapply.jobsearch.status import (
     OFFER_FILTER_STATUSES,
@@ -169,6 +170,7 @@ class JobRow:
     status: str
     status_label: str
     filter_disposition: str
+    published_date: str
     score: float | None
     llm_score: float | None
     contract: str
@@ -448,7 +450,22 @@ class DesktopService:
         sort_key: str = "score",
         sort_ascending: bool = False,
         limit: int = 500,
+        only_relevant_duplicates: bool = False,
     ) -> list[JobRow]:
+        if status == JobStatus.DUPLICATE_REVIEW:
+            # Also catch reviews imported manually or left pending by an
+            # earlier version. Finish local filtering before displaying them.
+            with session_scope() as session:
+                pairs = session.execute(
+                    select(Job.id, Job.possible_duplicate_of_id).where(
+                        Job.duplicate_review_status == JobDuplicateStatus.PENDING
+                    )
+                ).all()
+            review_ids = {int(value) for pair in pairs for value in pair if value is not None}
+            if review_ids:
+                from smartapply.pipeline import Pipeline
+
+                Pipeline().filter_pending(job_ids=sorted(review_ids))
         # Old routes/bookmarks using the review-only state open Prête too.
         if status == JobStatus.QUALITY_REJECTED:
             status = JobStatus.READY_FOR_FORM_SUBMISSION
@@ -472,6 +489,7 @@ class DesktopService:
                     Job.description,
                     Job.cleaned_description,
                     Job.source,
+                    Job.published_date,
                     Job.scraped_at,
                     Job.status,
                     Job.archived_at,
@@ -495,7 +513,7 @@ class DesktopService:
             # pending rows below. A pair with one active offer still needs a
             # human decision so that the active version is not lost.
             stmt = stmt.where(Job.duplicate_review_status == JobDuplicateStatus.PENDING)
-        else:
+        elif status != JobStatus.ARCHIVED:
             # Probable duplicates stay out of every normal queue until the
             # user explicitly decides whether the offers are identical.
             stmt = stmt.where(
@@ -565,10 +583,27 @@ class DesktopService:
                 )
             )
         sort_columns = {
+            "duplicate_confidence": Job.duplicate_confidence,
             "score": JobScore.final_score,
             "llm_score": JobAnalysis.fit_score,
+            # Keep the actionable local-filter class ahead of uncertain offers
+            # when the Nouvelle table is sorted ascending.
+            "filter_disposition": case(
+                (
+                    func.json_extract(JobScore.components, "$.filter_disposition")
+                    == "relevant",
+                    0,
+                ),
+                (
+                    func.json_extract(JobScore.components, "$.filter_disposition")
+                    == "uncertain",
+                    1,
+                ),
+                else_=2,
+            ),
             "company": Job.company,
             "title": Job.title,
+            "published_date": Job.published_date,
             # Experience is displayed from the same seniority signal when it
             # is available; exact numeric extraction remains a derived text
             # value and is not suitable for a portable SQL expression.
@@ -579,7 +614,9 @@ class DesktopService:
         }
         sort_column = sort_columns.get(sort_key, JobScore.final_score)
         ordering = sort_column.asc() if sort_ascending else sort_column.desc()
-        stmt = stmt.order_by(ordering.nulls_last(), Job.id.asc()).limit(limit)
+        stmt = stmt.order_by(ordering.nulls_last(), Job.id.asc())
+        if status != JobStatus.DUPLICATE_REVIEW:
+            stmt = stmt.limit(limit)
         with session_scope() as session:
             jobs = session.execute(stmt).scalars().all()
             if status == JobStatus.DUPLICATE_REVIEW:
@@ -587,7 +624,11 @@ class DesktopService:
                     job
                     for job in jobs
                     if not self._duplicate_pair_is_fully_archived(session, job)
-                ]
+                    and (
+                        not only_relevant_duplicates
+                        or self._duplicate_pair_is_relevant(session, job)
+                    )
+                ][:limit]
             grouped_ids = application_ids_for_confirmed_groups(session, [job.id for job in jobs])
             return [
                 self._job_row(job, related_application_id=grouped_ids.get(job.id))
@@ -604,11 +645,26 @@ class DesktopService:
         """
         if job.possible_duplicate_of_id is None:
             return False
-        candidate = session.get(Job, int(job.possible_duplicate_of_id))
+        candidate = canonical_job(session, int(job.possible_duplicate_of_id))
         if candidate is None:
             return False
         return all(
             bool(offer.archived_at or offer.status == JobStatus.ARCHIVED)
+            for offer in (job, candidate)
+        )
+
+    @staticmethod
+    def _duplicate_pair_is_relevant(session, job: Job) -> bool:
+        """Keep a review pair only when both local-filter results are relevant."""
+        if job.possible_duplicate_of_id is None:
+            return False
+        candidate = canonical_job(session, int(job.possible_duplicate_of_id))
+        if candidate is None:
+            return False
+        return all(
+            offer.score is not None
+            and (offer.score.components or {}).get("filter_disposition")
+            == FilterDisposition.RELEVANT.value
             for offer in (job, candidate)
         )
 
@@ -747,10 +803,10 @@ class DesktopService:
         analyzed = job.analyzed_at is not None
         duplicate_review_status = job.duplicate_review_status or JobDuplicateStatus.NONE
         duplicate_review_pending = duplicate_review_status == JobDuplicateStatus.PENDING
-        if duplicate_review_pending:
-            display_status = JobStatus.DUPLICATE_REVIEW
-        elif archived:
+        if archived:
             display_status = JobStatus.ARCHIVED
+        elif duplicate_review_pending:
+            display_status = JobStatus.DUPLICATE_REVIEW
         elif application is not None:
             # Application tracking remains the canonical display state once
             # a dossier exists. The analyzed filter itself excludes these
@@ -773,6 +829,7 @@ class DesktopService:
             status=display_status,
             status_label=DesktopService._desktop_status_label(display_status),
             filter_disposition=filter_disposition,
+            published_date=_date_text(job.published_date),
             score=(job.score.final_score if job.score else None),
             llm_score=llm_score,
             contract=job.contract_type or "",
@@ -811,10 +868,11 @@ class DesktopService:
             or job.possible_duplicate_of_id is None
         ):
             return None
-        candidate = session.get(Job, int(job.possible_duplicate_of_id))
+        candidate = canonical_job(session, int(job.possible_duplicate_of_id))
         if candidate is None:
             return None
-        application = application_for_duplicate_group(session, candidate.id)
+        application_id = application_ids_for_confirmed_groups(session, [candidate.id]).get(candidate.id)
+        application = session.get(Application, application_id) if application_id is not None else None
         return DuplicateReviewDetail(
             id=int(candidate.id),
             company=candidate.company,
@@ -1154,12 +1212,41 @@ class DesktopService:
         result.cancelled = result.cancelled or bool(stop_requested and stop_requested())
         return result
 
-    def process_pending(self, *, top_k: int, progress=None) -> dict[str, Any]:
+    def process_pending(
+        self,
+        *,
+        top_k: int,
+        job_ids: list[int] | None = None,
+        progress=None,
+    ) -> dict[str, Any]:
         from smartapply.pipeline import Pipeline
 
         if progress:
             progress("Classement et analyse des offres…")
-        return asdict(Pipeline().process_pending(top_k_analyze=top_k))
+        return asdict(Pipeline().process_pending(top_k_analyze=top_k, job_ids=job_ids))
+
+    def analyze_selected_jobs(
+        self,
+        job_ids: list[int],
+        *,
+        progress=None,
+    ) -> dict[str, Any]:
+        """Rank and analyze exactly the offers selected in the Nouvelle view."""
+        from smartapply.pipeline import Pipeline
+
+        ids = list(dict.fromkeys(int(job_id) for job_id in job_ids if int(job_id) > 0))
+        if not ids:
+            return {"requested": 0, "already_analyzed": 0, "analyzed": 0, "errors": []}
+        if progress:
+            progress("Classement et analyse des offres sélectionnées…")
+        pipeline = Pipeline()
+        # The ranking is limited to these IDs and does not create a shortlist.
+        pipeline.rank_pending(
+            top_k_ranked=len(ids),
+            job_ids=ids,
+            persist_shortlist=False,
+        )
+        return asdict(pipeline.analyze_jobs(ids))
 
     def update_shortlist(self, *, top_k: int, progress=None) -> dict[str, Any]:
         """Apply Top-K directly from persisted scores without rebuilding Pipeline."""
@@ -1574,8 +1661,6 @@ class DesktopService:
                     ):
                         report["skipped"] += 1
                         continue
-                    if job.duplicate_review_status == JobDuplicateStatus.PENDING:
-                        raise ValueError("Vérifiez d’abord le doublon de cette offre.")
                     # A confirmed source alias shares its dossier with the
                     # canonical offer. Resume that dossier without splitting
                     # the group or creating a second application.
@@ -1583,8 +1668,31 @@ class DesktopService:
                     if target is None:
                         raise ValueError("Offre principale introuvable.")
                     canonical_id = int(target.id)
-                    if pending_duplicate_for_group(session, canonical_id) is not None:
-                        raise ValueError("Vérifiez d’abord le doublon de cette offre.")
+                    pending = (
+                        target if target.duplicate_review_status == JobDuplicateStatus.PENDING
+                        else pending_duplicate_for_group(session, canonical_id)
+                    )
+                    if pending is not None:
+                        # Restore availability first so the hidden pair becomes
+                        # reviewable again. Do not infer an identity decision or
+                        # generate documents while that decision is pending.
+                        if canonical_id in handled:
+                            report["skipped"] += 1
+                            continue
+                        handled.add(canonical_id)
+                        rescue_archived_job(
+                            session, canonical_id,
+                            justification="Désarchivée pour vérification du doublon",
+                        )
+                        report["rescued"] += 1
+                        report["job_ids"].append(canonical_id)
+                        report.setdefault("duplicate_review_ids", []).append(int(pending.id))
+                        report["warnings"].append({
+                            "job_id": canonical_id,
+                            "category": "duplicate_review",
+                            "message": "Offre désarchivée. Vérifiez la paire dans Doublons avant de préparer la candidature.",
+                        })
+                        continue
                     application = application_for_duplicate_group(session, target.id)
                     if application is not None:
                         target = application.job

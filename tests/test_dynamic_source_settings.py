@@ -37,6 +37,7 @@ def test_source_reload_updates_credentials_and_options_without_mutating_runtime(
     original_data = original.model_dump()
     source_env.write_text(
         "APIFY_TOKEN=new-token\nLINKEDIN_MAX_RESULTS=80\n"
+        "LINKEDIN_MAX_CONCURRENT_RUNS=4\nLINKEDIN_HTTP_TIMEOUT=20\n"
         "DATABASE_URL=sqlite:///must-not-switch.db\nPROFILE_DIR=/must-not-switch\n"
         "OPENAI_MODEL_SMART=must-not-switch\nOPENAI_MAX_COMPLETION_TOKENS=invalid\n",
         encoding="utf-8",
@@ -47,6 +48,9 @@ def test_source_reload_updates_credentials_and_options_without_mutating_runtime(
     assert fresh is not original
     assert fresh.apify_token == "new-token"
     assert fresh.linkedin_max_results == 80
+    assert fresh.linkedin_max_concurrent_runs == 4
+    assert get_scraper("linkedin").max_concurrent_runs == 3
+    assert fresh.linkedin_http_timeout == 20
     for field in (
         "database_url",
         "profile_dir",

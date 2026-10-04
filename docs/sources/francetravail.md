@@ -68,6 +68,14 @@ ou d'autorisation arrêtent les requêtes restantes sans supprimer les offres re
 | `RawJob.published_date` | `dateCreation`. |
 | `source_data` | Payload offre brut, enrichi avec `_smartapply_experience`. |
 
+### Identité durable d'une offre
+
+`source_data.id` est l'identité canonique France Travail. La collecte et la
+persistance la comparent en plus de `external_id`, afin qu'un ancien hash ou une
+URL de candidature modifiée ne crée ni seconde offre ni second dossier. Cette
+règle reste limitée à la source `francetravail` : le même texte provenant d'une
+autre source suit le parcours normal de rapprochement.
+
 ## Stratégie filtre
 
 Adapter : `build_francetravail_filter_facts`.

@@ -20,9 +20,8 @@ class IngestReport:
     skipped_existing_during_collect: int = 0
     skipped_existing_during_persist: int = 0
     # Raw offers whose external_id was already in the DB and were dropped
-    # during the round-robin *before* counting against ``max_results``.
-    # This is the metric that surfaces "the scraper paginated past known
-    # offers to look for genuinely new ones".
+    # after collection. LinkedIn and France Travail keep these rows inside
+    # their per-query raw-result limit; this is not a count of replacement rows.
     skipped_known_during_collect: int = 0
     # True when the collector stopped because it hit the raw-fetch safety
     # cap instead of either reaching ``max_results`` new offers or exhausting
@@ -40,6 +39,8 @@ class IngestReport:
     duplicate_review_ids: list[int] = field(default_factory=list)
     # Certain URL matches are retained as archived source aliases.
     aliases_created: int = 0
+    # Actor datasets safely handled by this report. Kept for operational audit.
+    completed_source_run_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,8 @@ class IngestCollection:
     hit_raw_seen_cap: bool = False
     cancelled: bool = False
     warnings: list[str] = field(default_factory=list)
+    completed_source_run_ids: list[str] = field(default_factory=list)
+    source_run_journal_path: str | None = None
 
 
 # How many raw offers a single non-strict source run is allowed to *examine*
@@ -73,3 +76,4 @@ class _CollectResult:
     hit_raw_seen_cap: bool
     cancelled: bool = False
     warnings: list[str] = field(default_factory=list)
+    completed_source_run_ids: list[str] = field(default_factory=list)

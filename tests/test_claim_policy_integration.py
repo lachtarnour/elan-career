@@ -106,7 +106,10 @@ def _generate(
         llm=MockLLMProvider(
             {
                 "cv_adaptation": CVSelection.model_validate(
-                    response.model_dump(exclude={"professional_summary"})
+                    {
+                        **response.model_dump(exclude={"professional_summary"}),
+                        "selected_certificate_ids": response.selected_certificate_ids or [],
+                    }
                 ),
                 "application_texts": ApplicationTexts(
                     professional_summary=response.professional_summary,

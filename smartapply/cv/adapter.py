@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from smartapply.cv.assembly import assemble_cv
+from smartapply.cv.certificate_selection import certificate_policy_errors
 from smartapply.cv.project_selection import (
     MIN_PROJECTS,
     selectable_project_capacity,
@@ -84,21 +85,34 @@ class CvAdapter:
                 job_id=job_id,
                 refresh_cache=refresh_cache or attempt > 0,
             )
-            errors = validate_project_selection(
+            project_errors = validate_project_selection(
                 personalization, self.profile, analysis, job_description=job_description
             )
+            certificate_errors = certificate_policy_errors(
+                personalization.selected_certificate_ids, self.profile
+            )
+            errors = [*project_errors, *certificate_errors]
             if not errors:
                 break
             if attempt == 1:
-                raise LLMError("Project selection could not be finalized: " + "; ".join(errors))
-            prompt += (
-                "\n\nThe previous personalization violated project selection rules:\n- "
-                + "\n- ".join(errors)
-                + "\nRegenerate the complete CV selection, without a summary, "
-                "using exactly three unique eligible projects and grounded reasons. "
-                "Prefer direct matches, then the strongest primary projects with "
-                "honest transferable relevance. Never invent a direct specialty match."
-            )
+                label = "CV selection" if certificate_errors else "Project selection"
+                raise LLMError(f"{label} could not be finalized: " + "; ".join(errors))
+            if certificate_errors:
+                prompt += (
+                    "\n\nThe previous CV selection violated these rules:\n- "
+                    + "\n- ".join(errors)
+                    + "\nRegenerate the complete CV selection, without a summary, "
+                    "using exactly three eligible projects and zero to two relevant certificates."
+                )
+            else:
+                prompt += (
+                    "\n\nThe previous personalization violated project selection rules:\n- "
+                    + "\n- ".join(errors)
+                    + "\nRegenerate the complete CV selection, without a summary, "
+                    "using exactly three unique eligible projects and grounded reasons. "
+                    "Prefer direct matches, then the strongest primary projects with "
+                    "honest transferable relevance. Never invent a direct specialty match."
+                )
         adapted = assemble_cv(personalization, self.profile)
         adapted = self._ensure_supported_offer_skills(adapted, analysis)
         adapted = self._apply_role_family_contract(adapted, analysis, job_title)

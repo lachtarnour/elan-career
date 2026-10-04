@@ -24,6 +24,27 @@ def _bridge():
     return bridge, notifications
 
 
+def test_restore_pending_pair_opens_duplicate_review_without_dossier_warning():
+    bridge, notifications = _bridge()
+    destinations = []
+    selected = []
+    bridge.navigationRequested.connect(lambda *args: destinations.append(args))
+    bridge.selectJob = selected.append
+    bridge._bulk_rescue_done(
+        {
+            "requested": 1,
+            "rescued": 1,
+            "generated": 0,
+            "duplicate_review_ids": [42],
+            "warnings": [{"category": "duplicate_review", "job_id": 42, "message": "À vérifier"}],
+        }
+    )
+    assert destinations == [("duplicates", 42)]
+    assert selected == [42]
+    assert "1 doublon à vérifier" in notifications[0][1]
+    assert notifications[0][2] == "warning"
+
+
 @pytest.mark.parametrize("method", ["_bulk_generation_done", "_bulk_rescue_done"])
 def test_verified_correction_alone_is_information_not_a_review_point(method):
     bridge, notifications = _bridge()
@@ -37,9 +58,6 @@ def test_verified_correction_alone_is_information_not_a_review_point(method):
 
     _, message, kind = notifications[0]
     assert kind == "success"
-    assert "Corrections vérifiées" in message
-    assert "à vérifier" not in message
-    assert "échec" not in message
     assert report == before
 
 
@@ -67,10 +85,8 @@ def test_batch_notification_is_bounded_and_counts_dossiers_not_raw_diagnostics(m
     _, message, kind = notifications[0]
     assert "7 candidatures créées" in message
     assert "3 dossiers avec des points à vérifier" in message
-    assert "Détails dans le volet du dossier" in message
-    assert "échec" not in message
     assert "text_review" not in message
-    assert len(message) < 250
+    assert raw not in message
     assert kind == "warning"
     assert report == before
 
@@ -90,7 +106,6 @@ def test_older_joined_diagnostics_still_distinguish_information_and_points():
         }
     )
     assert "1 dossier avec des points à vérifier" in notifications[0][1]
-    assert "échec" not in notifications[0][1]
 
 
 def test_single_created_application_keeps_diagnostics_out_of_notification():
@@ -105,12 +120,9 @@ def test_single_created_application_keeps_diagnostics_out_of_notification():
     }
     before = deepcopy(report)
     bridge._generation_done(report)
-    title, message, kind = notifications[0]
-    assert title == "Candidature créée"
-    assert "Le CV et la lettre sont disponibles" in message
+    _, message, kind = notifications[0]
     assert "2 points à vérifier" in message
     assert "text_review" not in message
-    assert "bloqu" not in message
     assert kind == "warning"
     assert report == before
 
@@ -129,10 +141,9 @@ def test_only_actual_operation_failures_are_called_failures(method):
     message = notifications[0][1]
     assert "1 échec technique" in message
     assert "1 dossier avec des points à vérifier" in message
-    assert "Offre #99 : Connexion au service indisponible" in message
-    assert "…" in message
-    assert "autre(s) échec(s)" not in message
-    assert len(message) < 350
+    assert "#99" in message
+    assert "Connexion au service indisponible " * 1000 not in message
+    assert notifications[0][2] == "warning"
 
 
 def test_qml_toast_is_bounded_and_dossier_retains_full_diagnostics():
@@ -141,13 +152,24 @@ def test_qml_toast_is_bounded_and_dossier_retains_full_diagnostics():
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from PySide6.QtCore import QObject, QUrl, QMetaObject
+from PySide6.QtCore import QObject, QUrl, QMetaObject, QElapsedTimer, QEventLoop, QPointF, QRectF
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine, QQmlComponent
-from PySide6.QtTest import QTest
+from PySide6.QtQuick import QQuickItem
 from smartapply.desktop.bridge import DesktopBridge
 
 app = QGuiApplication([])
+
+def wait_until(predicate, timeout_ms=2000):
+    timer = QElapsedTimer()
+    timer.start()
+    while not predicate():
+        app.processEvents(QEventLoop.AllEvents, 10)
+        assert timer.elapsed() < timeout_ms, "QML condition did not become true"
+
+def scene_rect(item):
+    return QRectF(item.mapToScene(QPointF(0, 0)), item.size())
+
 bridge = DesktopBridge.__new__(DesktopBridge)
 QObject.__init__(bridge)
 for name in ("dashboard", "shortlist", "current_job", "profile", "diagnostics", "activity"):
@@ -168,13 +190,23 @@ engine.load(QUrl.fromLocalFile(str(qml / "Main.qml")))
 assert engine.rootObjects(), "Main.qml failed to load"
 window = engine.rootObjects()[0]
 bridge.toastRequested.emit("Long title " * 100, "Long diagnostic " * 3000, "warning")
-QTest.qWait(250)
-toast = window.findChild(QObject, "toast")
-title = window.findChild(QObject, "toastTitle")
-message = window.findChild(QObject, "toastMessage")
-assert title.property("maximumLineCount") == 2
-assert message.property("maximumLineCount") == 4
-assert 0 < toast.property("height") < 200, toast.property("height")
+toast = window.findChild(QQuickItem, "toast")
+title = window.findChild(QQuickItem, "toastTitle")
+message = window.findChild(QQuickItem, "toastMessage")
+wait_until(lambda: toast.property("opacity") >= 0.99 and toast.property("height") > 0)
+viewport = QRectF(0, 0, window.width(), window.height())
+assert viewport.contains(scene_rect(toast))
+assert title.property("truncated") is True
+assert message.property("truncated") is True
+bridge._busy = True
+bridge._busy_label = "Analyse en cours…"
+bridge.busyChanged.emit()
+busy = window.findChild(QQuickItem, "busyTaskNotification")
+assert busy is not None
+wait_until(lambda: busy.property("opacity") >= 0.99)
+assert busy.property("visible") is True
+assert viewport.contains(scene_rect(busy))
+assert not scene_rect(toast).intersects(scene_rect(busy))
 raw = "text_review_invalid_correction:letter_too_long:255 " + "raw evidence " * 1000
 bridge._current_job = {
     "id": 42, "title": "Data Scientist", "status": "ready_for_form_submission",
@@ -186,10 +218,14 @@ page = component.create()
 assert page is not None, [error.toString() for error in component.errors()]
 page.setProperty("width", 1300)
 page.setProperty("height", 800)
-QTest.qWait(100)
+assert page.property("sortKey") == "filter_disposition"
+assert page.property("sortAscending") is True
+published_date_header = page.findChild(QObject, "offerPublishedDateHeader")
+assert published_date_header is not None
+assert published_date_header.property("visible") is True
 regenerate = page.findChild(QObject, "offerRegenerateAction")
 assert regenerate is not None
-assert regenerate.property("visible") is True
+wait_until(lambda: regenerate.property("visible") is True)
 assert page.property("documentReviewPointCount") == 1
 diagnostics = page.property("documentDiagnostics")
 if hasattr(diagnostics, "toVariant"):

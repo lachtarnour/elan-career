@@ -44,6 +44,11 @@ token.json
 /samples/
 /output/
 /tmp/
+/test-results/
+/artifacts/
+/tools/
+/.backups/
+/test.ipynb
 /daily scrapper/
 /smartapply/profile/data/
 # Legacy locations for private company lists and ranking research.
@@ -57,8 +62,7 @@ token.json
 *.sqlite3-*
 *.log
 
-# ---- Local demo production and obsolete captures ----
-/tools/demo/
+# ---- Obsolete captures ----
 /docs/screenshots/applications.png
 
 # ---- Editors ----

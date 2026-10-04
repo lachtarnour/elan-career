@@ -34,7 +34,11 @@ class ScraperError(RuntimeError):
     """Base exception for scrapers."""
 
 
-class ScraperConfigError(ScraperError):
+class ScraperStopError(ScraperError):
+    """A source error after which no additional remote requests are safe."""
+
+
+class ScraperConfigError(ScraperStopError):
     """Raised when a scraper is misconfigured (missing API key, etc.)."""
 
 
@@ -42,4 +46,5 @@ __all__ = [
     "Scraper",
     "ScraperConfigError",
     "ScraperError",
+    "ScraperStopError",
 ]

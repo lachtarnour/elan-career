@@ -206,6 +206,9 @@ class CVSelection(BaseModel):
             "evidence and complementary value. Never select disabled projects or invent fit."
         )
     )
+    selected_certificate_ids: list[str] = Field(
+        description="Zero to two unique profile certificate IDs, in CV display order. Select only certificates relevant to the offer."
+    )
     project_selection_reasons: list[ProjectSelectionReason] = Field(
         default_factory=list,
         description="Exactly one internal justification per selected project",
@@ -236,6 +239,9 @@ class CVSelection(BaseModel):
 
 class CVPersonalization(CVSelection):
     """Complete personalization retained for existing snapshots and legacy drafts."""
+
+    # None marks a snapshot created before certificate selection existed.
+    selected_certificate_ids: list[str] | None = None
 
     professional_summary: str = Field(
         description=(

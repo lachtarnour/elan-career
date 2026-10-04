@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from sqlalchemy import select
+
 from smartapply.database import session_scope
 from smartapply.database.models import Job, JobStatus
 from smartapply.database.repository import (
-    list_pending_processing,
     mark_archived,
     mark_filtered,
     set_score,
@@ -89,7 +90,18 @@ class LocalFilterMixin:
         instead of re-filtering or seeing nothing pending.
         """
         with session_scope() as s:
-            active_jobs = list(list_pending_processing(s))
+            # Review blocks ranking/AI, but must not block deterministic
+            # rejection: both sides need a filter result before comparison.
+            active_jobs = list(
+                s.scalars(
+                    select(Job).where(
+                        Job.archived_at.is_(None),
+                        Job.status != JobStatus.ARCHIVED,
+                        Job.canonical_job_id.is_(None),
+                        Job.analyzed_at.is_(None),
+                    )
+                )
+            )
             pending = [j for j in active_jobs if j.filtered_at is None]
             if job_ids is not None:
                 selected_ids = set(job_ids)

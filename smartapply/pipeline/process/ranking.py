@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from smartapply.database import session_scope
-from smartapply.database.models import Application, Job, JobScore, ShortlistOrigin
+from smartapply.database.models import (
+    Application,
+    Job,
+    JobDuplicateStatus,
+    JobScore,
+    ShortlistOrigin,
+)
 from smartapply.database.repository import (
     list_pending_processing,
     mark_ranked,
@@ -127,6 +133,10 @@ class RankingMixin:
             raise ValueError("unanalyzed_only and analyzed_only are mutually exclusive")
         conditions = [
             Job.archived_at.is_(None),
+            or_(
+                Job.duplicate_review_status.is_(None),
+                Job.duplicate_review_status != JobDuplicateStatus.PENDING,
+            ),
             Job.filtered_at.is_not(None),
             JobScore.final_score.is_not(None),
             Application.id.is_(None),

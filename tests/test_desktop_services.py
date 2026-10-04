@@ -24,6 +24,7 @@ from smartapply.desktop.bridge import DesktopBridge
 from smartapply.desktop.services import DesktopService
 from smartapply.desktop.source_health import SourceHealth
 from smartapply.jobsearch.workflow import APPLICATION_STATUSES
+from smartapply.pipeline.reports import AnalyzeReport
 
 
 def _job(*, external_id: str, description: str = "Description") -> int:
@@ -82,6 +83,42 @@ def test_bridge_passes_normalized_top_k_to_analysis() -> None:
 
     assert bridge.analysisTopK == 1
     assert captured["top_k"] == 1
+
+
+def test_selected_analysis_is_scoped_and_does_not_persist_a_shortlist(monkeypatch) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class FakePipeline:
+        def rank_pending(self, **kwargs):
+            calls.append(("rank", kwargs))
+
+        def analyze_jobs(self, job_ids):
+            calls.append(("analyze", list(job_ids)))
+            return AnalyzeReport(
+                requested=len(job_ids),
+                already_analyzed=0,
+                analyzed=len(job_ids),
+                skipped_missing=0,
+            )
+
+    monkeypatch.setattr("smartapply.pipeline.Pipeline", FakePipeline)
+
+    report = DesktopService().analyze_selected_jobs([8, 3, 8, 0])
+
+    assert calls == [
+        (
+            "rank",
+            {"top_k_ranked": 2, "job_ids": [8, 3], "persist_shortlist": False},
+        ),
+        ("analyze", [8, 3]),
+    ]
+    assert report == {
+        "requested": 2,
+        "already_analyzed": 0,
+        "analyzed": 2,
+        "skipped_missing": 0,
+        "errors": [],
+    }
 
 
 def test_profile_directory_is_created_at_the_active_location(
@@ -144,6 +181,29 @@ def test_job_rows_include_experience_and_application_state(isolated_db) -> None:
     assert detail.application is not None
     assert detail.application.id == application_id
     assert detail.application.job_id == job_id
+
+
+def test_new_offer_rows_expose_and_sort_by_publication_date(isolated_db) -> None:
+    older_id = _job(external_id="manual:older-publication")
+    newer_id = _job(external_id="manual:newer-publication")
+    with session_scope() as session:
+        older = session.get(Job, older_id)
+        newer = session.get(Job, newer_id)
+        assert older is not None
+        assert newer is not None
+        older.published_date = datetime(2026, 9, 28, 8, 0, tzinfo=timezone.utc)
+        newer.published_date = datetime(2026, 10, 1, 14, 30, tzinfo=timezone.utc)
+        mark_filtered(session, older_id)
+        mark_filtered(session, newer_id)
+
+    rows = DesktopService().list_jobs(
+        status=JobStatus.SCRAPED,
+        sort_key="published_date",
+        sort_ascending=False,
+    )
+
+    assert [row.id for row in rows] == [newer_id, older_id]
+    assert [row.published_date for row in rows] == ["01/10/2026", "28/09/2026"]
 
 
 def test_dashboard_counts_confirmed_duplicate_submissions_once(isolated_db) -> None:

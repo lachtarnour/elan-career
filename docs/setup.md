@@ -66,7 +66,18 @@ make build
 open dist/Elan.app
 ```
 
+Quit Élan before running `make build`. The build stops with the active process ID
+if `dist/Elan.app` is still open. PyInstaller loads Python modules lazily from its
+embedded compressed archive; replacing that archive while the process is running
+can otherwise make a later action fail with a zlib `incorrect header check`.
+
 The first build provisions the runtime under `~/Library/Application Support/Elan`, copying the project configuration, profile, and database when available. Later builds preserve existing runtime data. When launching the packaged app, use its runtime configuration; the development environment overrides above are intended for source runs.
+
+The build generates the `.icns` icon from the bundled SVG and runs the packaged
+executable with a temporary `ELAN_HOME`, mock providers, the public mock profile,
+and a temporary SQLite database. This smoke test never opens or modifies the
+active user database. PyInstaller also uses a temporary configuration directory,
+so a protected global cache cannot block the build.
 
 Source credentials and collection options are reread from the active configuration
 for each connection check and new search. Open **Réglages → Configuration** to
@@ -205,7 +216,7 @@ The CV content comes from your profile. Presentation is configured separately fo
 Experience descriptions are static: every experience and bullet from `experiences.json`
 is inserted verbatim, in profile order, for both CV-only and CV-plus-letter generation.
 The LLM receives these facts as read-only context; its response schema has no experience
-field. It personalizes the headline, summary, skills selection and project selection,
+field. It personalizes the headline, summary, skills, project and certificate selections,
 and writes the letter when requested. Generated-text length limits do not shorten
 approved experience descriptions. To change an experience, edit the source profile
 explicitly and generate a new CV; existing documents and history are retained.
@@ -214,7 +225,9 @@ Application generation reuses the stored offer analysis and uses three sequentia
 LLM stages. The existing Skills and project reconstruction rules remain in place:
 
 1. Generate the CV personalization with the configured smart model, apply the
-   reconstruction rules, and validate the assembled CV.
+   reconstruction rules, and validate the assembled CV. The same call chooses
+   zero to two relevant certificates; HTML/PDF and DOCX use only that finalized
+   selection. See [project and certificate selection](project-selection.md).
 2. Write a motivation-first letter with the smart model: explain why the
    candidate wants to join this organization and work on this role's priorities.
    The stored analysis's `company_context` and `offer_interest_points` appear in
@@ -223,6 +236,10 @@ LLM stages. The existing Skills and project reconstruction rules remain in place
    personal history. Missing company details lead to a focus on the stated
    mission, not invented culture, reputation or values. No new analysis call is
    needed, including when these fields are empty in an older analysis.
+   Recruiter or source labels are not substituted for the hiring company: when
+   the analysis cannot confirm that entity, documents use `Entreprise non
+   communiquée` (or `Company not disclosed`) instead of guessing from the
+   imported row.
    The finalized CV, declared Skills catalogue and experience/selected-project
    facts are references. Relevant projects or experiences personalize motivation
    when useful, with no separate quota on example count or detail beyond the
@@ -348,6 +365,6 @@ make check
 .venv/bin/elan --help
 ```
 
-The test suite uses fictional fixtures and a temporary runtime, with no private profile or API credentials required. Tokenizer tests may download a public vocabulary on their first run.
+The test suite uses fictional fixtures and a temporary runtime, with no private profile or API credentials required. Install the desktop dependencies to run the Qt interface tests.
 
 See [Contributing](../CONTRIBUTING.md) for the project structure and development workflow, the [visual verification guide](desktop-design.md) for UI checks, and the [source documentation](sources/README.md) for connectors.

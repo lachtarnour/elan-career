@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from smartapply.database import session_scope
@@ -14,8 +15,14 @@ from smartapply.database.repository import (
     list_known_jobs,
     upsert_job,
 )
-from smartapply.dedup import Deduplicator, DuplicateCandidate
+from smartapply.dedup import (
+    Deduplicator,
+    DuplicateCandidate,
+    offers_within_duplicate_group_time_window,
+)
+from smartapply.dedup.deduplicator import linked_duplicate_components
 from smartapply.logging_setup import get_logger
+from smartapply.offer_identity import is_direct_offer_url
 from smartapply.offers import ManualOfferInput, RawJob
 from smartapply.parsing import clean_description
 from smartapply.pipeline.ingest import (
@@ -29,7 +36,12 @@ from smartapply.pipeline.ingest import (
     expand_query_for_source,
     split_or_query,
 )
+from smartapply.pipeline.ingest.dedupe import _native_offer_key
 from smartapply.scrapers import ManualScraper, get_scraper
+from smartapply.scrapers.apify_recovery import (
+    ApifyRecoveryJournal,
+    ApifyRecoveryJournalError,
+)
 
 logger = get_logger(__name__)
 
@@ -130,11 +142,18 @@ class Ingestor:
             hit_raw_seen_cap=collect_result.hit_raw_seen_cap,
             cancelled=collect_result.cancelled,
             warnings=[*collect_result.warnings, *source_warnings],
+            completed_source_run_ids=collect_result.completed_source_run_ids,
+            source_run_journal_path=(
+                str(scraper.recovery_journal.path)
+                if source.strip().lower() == "linkedin"
+                and getattr(scraper, "recovery_journal", None) is not None
+                else None
+            ),
         )
 
     def persist_collection(self, collection: IngestCollection) -> IngestReport:
         """Persist one completed collection; callers may serialize this step."""
-        return self._persist(
+        report = self._persist(
             collection.source,
             collection.raw_jobs,
             search_audit=collection.search_audit,
@@ -143,7 +162,20 @@ class Ingestor:
             hit_raw_seen_cap=collection.hit_raw_seen_cap,
             cancelled=collection.cancelled,
             warnings=collection.warnings,
+            completed_source_run_ids=collection.completed_source_run_ids,
         )
+        if collection.completed_source_run_ids and collection.source_run_journal_path:
+            try:
+                ApifyRecoveryJournal(Path(collection.source_run_journal_path)).remove_many(
+                    collection.completed_source_run_ids
+                )
+            except ApifyRecoveryJournalError as exc:
+                report.warnings.append(
+                    "Les offres LinkedIn ont été enregistrées, mais le journal de "
+                    "récupération Apify n’a pas pu être finalisé. Le prochain passage "
+                    f"pourra relire les mêmes datasets : {exc}"
+                )
+        return report
 
     def from_url(self, url: str) -> IngestReport:
         return self._persist("manual", [ManualScraper().from_url(url)])
@@ -180,6 +212,7 @@ class Ingestor:
         hit_raw_seen_cap: bool = False,
         cancelled: bool = False,
         warnings: list[str] | None = None,
+        completed_source_run_ids: list[str] | None = None,
     ) -> IngestReport:
         job_ids: list[int] = []
         inserted = 0
@@ -191,9 +224,19 @@ class Ingestor:
         with session_scope() as s:
             known_jobs = list(list_known_jobs(s))
             dedup_reference_jobs: list[Any] = list(known_jobs)
+            known_native_ids = set(_KnownJobIndex.from_jobs(known_jobs).native_offer_ids)
             for raw in raws:
+                probable: DuplicateCandidate | None = None
                 existing = get_job_by_external_id(s, raw.external_id)
                 existing_status = existing.status if existing is not None else None
+                native_key = _native_offer_key(raw.source, raw.source_data)
+                if existing is None and native_key is not None and native_key in known_native_ids:
+                    # Legacy France Travail rows may have a different external hash.
+                    # The source's offer ID already identifies the persisted job.
+                    skipped_existing += 1
+                    continue
+                if native_key is not None:
+                    known_native_ids.add(native_key)
                 if existing is not None and existing.canonical_job_id is not None:
                     # An already confirmed alias is source history, not a
                     # second candidate. Refresh its source payload in place
@@ -221,9 +264,17 @@ class Ingestor:
                     if matching_existing is not None and source == "manual":
                         existing = matching_existing
                         existing_status = existing.status
-                    elif source != "manual":
+                    else:
                         exact_url_job = _matching_exact_offer_url(raw, known_jobs)
-                        if exact_url_job is not None:
+                        if exact_url_job is not None and source == "manual":
+                            probable = DuplicateCandidate(
+                                job=exact_url_job,
+                                title_score=100.0,
+                                description_score=100.0,
+                                confidence=1.0,
+                                match_type="exact_url",
+                            )
+                        elif exact_url_job is not None:
                             root = _canonical_job(exact_url_job, known_jobs)
                             alias = upsert_job(
                                 s,
@@ -257,7 +308,9 @@ class Ingestor:
                 # upsert. A probable match is persisted for human review;
                 # it must not silently become a second candidate.
                 probable = (
-                    self._find_probable_duplicate(raw, dedup_reference_jobs)
+                    probable
+                    if existing is None and probable is not None
+                    else self._find_probable_duplicate(raw, dedup_reference_jobs)
                     if existing is None
                     else None
                 )
@@ -333,6 +386,7 @@ class Ingestor:
             aliases_created=aliases_created,
             search_audit=search_audit or [],
             warnings=warnings or [],
+            completed_source_run_ids=completed_source_run_ids or [],
         )
 
     @staticmethod
@@ -368,14 +422,23 @@ def _matching_known_job(raw: RawJob, known_jobs) -> object | None:  # noqa: ANN0
     raw_url = _normalize_application_url(raw.application_url)
     if not raw_url:
         return None
-    for job in known_jobs:
+    components = linked_duplicate_components(known_jobs)
+    matches = [
+        job
+        for job in known_jobs
         if (
             raw_url == _normalize_application_url(job.application_url)
             and _same_offer_label(raw.company, job.company)
             and _same_offer_label(raw.title, job.title)
-        ):
-            return job
-    return None
+            and offers_within_duplicate_group_time_window(
+                raw,
+                job,
+                known_jobs,
+                components=components,
+            )
+        )
+    ]
+    return min(matches, key=_job_identity_priority) if matches else None
 
 
 def _same_offer_label(left: str | None, right: str | None) -> bool:
@@ -387,24 +450,24 @@ def _matching_exact_offer_url(raw: RawJob, known_jobs: list[Any]) -> object | No
     raw_url = _normalize_application_url(raw.application_url)
     if not raw_url or not _is_direct_offer_url(raw.application_url):
         return None
+    components = linked_duplicate_components(known_jobs)
     matches = [
         job
         for job in known_jobs
         if raw_url == _normalize_application_url(getattr(job, "application_url", None))
+        and offers_within_duplicate_group_time_window(
+            raw,
+            job,
+            known_jobs,
+            components=components,
+        )
     ]
     return min(matches, key=_job_identity_priority) if matches else None
 
 
 def _is_direct_offer_url(url: str | None) -> bool:
-    value = (url or "").strip().lower()
-    if not value:
-        return False
-    from urllib.parse import urlsplit
-
-    path = urlsplit(value if "://" in value else f"https://{value}").path.rstrip("/")
-    if "/offres/recherche/detail/" in path:
-        return True
-    return any(marker in path for marker in ("/jobs/", "/job/", "/vacancies/", "/vacancy/", "/offers/"))
+    """Compatibility wrapper around the shared direct-offer classifier."""
+    return is_direct_offer_url(url)
 
 
 def _canonical_job(job: Any, known_jobs: list[Any]) -> Any:

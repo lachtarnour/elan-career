@@ -52,6 +52,7 @@ def _payload(schema: type[CVSelection]) -> dict:
     data = _personalization()
     if schema is CVSelection:
         data.pop("professional_summary")
+        data["selected_certificate_ids"] = []
     if schema is ApplicationDraft:
         data.update(
             motivation_letter_subject="Application — Data Scientist",
@@ -108,6 +109,7 @@ def test_llm_schemas_neither_request_nor_accept_experiences(schema) -> None:
 class _RecordingProvider(MockLLMProvider):
     def __init__(self, *, summary: str | None = None):
         personalization = _personalization()
+        personalization["selected_certificate_ids"] = []
         if summary is not None:
             personalization["professional_summary"] = summary
         super().__init__(
@@ -339,10 +341,17 @@ def test_final_cv_snapshot_loads_legacy_storage_and_preserves_new_audit() -> Non
     legacy_payload.pop("project_selection_reasons")
     cv = AdaptedCV.model_validate(legacy_payload)
     assert cv.project_selection_reasons == []
-    assert cv.model_dump() == {**legacy_payload, "project_selection_reasons": []}
+    assert cv.model_dump() == {
+        **legacy_payload,
+        "project_selection_reasons": [],
+        "selected_certificate_ids": None,
+    }
     draft = ApplicationDraft(**_payload(ApplicationDraft))
     assembled = assemble_cv(draft, profile)
-    assert assembled.model_dump(exclude={"project_selection_reasons"}) == legacy_payload
+    assert (
+        assembled.model_dump(exclude={"project_selection_reasons", "selected_certificate_ids"})
+        == legacy_payload
+    )
     assert assembled.project_selection_reasons == draft.project_selection_reasons
     assert AdaptedCV.model_validate_json(assembled.model_dump_json()) == assembled
     assert "motivation_letter_body" not in assembled.model_dump()

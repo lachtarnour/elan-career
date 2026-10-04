@@ -16,6 +16,7 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from smartapply.cv.certificate_selection import selected_certificates
 from smartapply.cv.education import education_entries_for_english
 from smartapply.cv.links import render_bullet_html
 from smartapply.cv.skill_profile import infer_skill_profile_id
@@ -184,7 +185,7 @@ class HtmlApplicationRenderer:
             skill_categories=skill_categories,
             projects=selected_projects,
             languages=list(self.profile.languages),
-            certificates=list(self.profile.certificates),
+            certificates=selected_certificates(self.profile, adapted.selected_certificate_ids),
             contact_line=self._contact_line(),
             contact_items=self._contact_items(),
             layout_class=layout_class,

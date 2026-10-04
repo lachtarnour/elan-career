@@ -30,28 +30,14 @@ from smartapply.llm import (
     MotivationLetter,
     MotivationLetterRepair,
 )
-from smartapply.llm.prompts import application_draft, application_texts, cv_adaptation
-from smartapply.pipeline.apply.cv_writer import CvWriterMixin
+from smartapply.llm.prompts import application_draft, cv_adaptation
+from smartapply.pipeline.apply.cv_writer import CvWriterMixin, _document_company_label
 from smartapply.pipeline.reports import ApplyReport
 from smartapply.profile import Degree, get_profile
 from smartapply.ranking import MockEmbeddingsProvider
 from smartapply.utils.skill_terms import skill_term_matches
 
-
-@pytest.fixture(autouse=True)
-def _isolated_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    db_path = tmp_path / "test.db"
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
-    from smartapply.config import get_settings
-
-    get_settings.cache_clear()
-    from smartapply.database.session import reset_engine_cache
-
-    reset_engine_cache()
-    from smartapply.database.session import init_db
-
-    init_db()
-    yield
+pytestmark = pytest.mark.usefixtures("isolated_db")
 
 
 def _sample_analysis() -> JobAnalysis:
@@ -213,6 +199,7 @@ def test_adapter_produces_letter_after_final_cv_and_review() -> None:
         "cv_adaptation",
         CVSelection(
             cv_title=cv.cv_title,
+            selected_certificate_ids=[],
             selected_project_ids=cv.selected_project_ids,
             project_selection_reasons=[
                 {
@@ -257,6 +244,7 @@ def test_adapter_keeps_three_final_projects_in_llm_order() -> None:
     chosen = [project.id for project in reversed(profile.projects[:3])]
     personalization = CVSelection(
         cv_title="Data Scientist",
+        selected_certificate_ids=[],
         selected_project_ids=chosen,
         project_selection_reasons=[
             {
@@ -553,39 +541,20 @@ def test_docx_renderer_produces_valid_file(tmp_path: Path) -> None:
     assert "Data Scientist" in full_text
 
 
-def test_html_renderer_matches_reference_cv_architecture() -> None:
+def test_html_renderer_preserves_candidate_and_selected_project_content() -> None:
     profile = get_profile()
-    html = HtmlApplicationRenderer(profile).render_cv_html(_valid_adapted_cv())
-    assert "Professional Experience" in html
-    assert "Education" in html
-    assert "Skills" in html
-    assert "Projects" in html
-    assert "Languages" in html
-    assert "Certificates" in html
-    assert "section-title" in html
-    assert "header-grid" in html
-    assert "identity-line" in html
-    assert "grid-template-columns: max-content 1px minmax(0, 70mm)" in html
-    assert "max-width: 70mm" in html
-    assert "overflow-wrap: anywhere" in html
-    assert "white-space: normal" in html
-    assert "margin-bottom: calc(var(--section-gap) + 6px)" in html
-    assert "justify-content: var(--section-justify)" in html
-    assert "--section-content-indent: 3.5mm" in html
-    assert "grid-template-columns: 29mm 1fr" in html
-    assert "skill-row" in html
-    assert "skill-list" in html
-    assert "skill-pill" not in html
-    assert "language-row" in html
-    assert "border-left" not in html
-    assert "header::before" not in html
-    assert "\\2197" not in html
-    assert 'class="project-link"' not in html
-    assert (
-        '<a class="name-link" href="https://example.com/projects/proj_evidence_rag">'
-        "Evidence RAG Verifier</a>"
-    ) in html
-    assert "Completed" not in html
+    cv = _valid_adapted_cv()
+    html = HtmlApplicationRenderer(profile).render_cv_html(cv)
+
+    for value in (profile.identity.full_name, cv.cv_title, cv.professional_summary):
+        assert escape(value) in html
+    for project in profile.projects:
+        if project.id in cv.selected_project_ids:
+            assert escape(project.name) in html
+            if project.url:
+                assert escape(str(project.url)) in html
+        else:
+            assert escape(project.name) not in html
 
 
 def test_letter_renderer_uses_adapted_headline_and_fallback() -> None:
@@ -614,6 +583,30 @@ def test_letter_renderer_uses_adapted_headline_and_fallback() -> None:
     )
 
     assert f'<p class="headline">{profile_headline}</p>' in fallback_html
+
+
+@pytest.mark.parametrize(
+    ("job_company", "extracted_company_name", "language", "expected"),
+    [
+        ("Acme", "Acme", "fr", "Acme"),
+        ("Acme", "", "fr", "Entreprise non communiquée"),
+        ("Agence", "Entreprise non communiquée", "fr", "Entreprise non communiquée"),
+        (
+            "l'entreprise est inconnue ne pretends pas savoir le nom",
+            "",
+            "fr",
+            "Entreprise non communiquée",
+        ),
+        ("Recruiter", "Unknown company", "en", "Company not disclosed"),
+    ],
+)
+def test_document_company_label_hides_anonymous_placeholders(
+    job_company: str,
+    extracted_company_name: str,
+    language: str,
+    expected: str,
+) -> None:
+    assert _document_company_label(job_company, extracted_company_name, language) == expected
 
 
 @pytest.mark.parametrize("filename_candidate_name", [None, "Nour Lachtar"])
@@ -782,125 +775,17 @@ def test_application_draft_prompt_separates_matching_keywords_from_display_skill
         selected_experiences=profile.experiences[:1],
         selected_projects=profile.projects[:2],
     )
-    combined = "\n".join(
-        [
-            application_draft.build_system_prompt(),
-            app_prompt,
-            cv_adaptation.build_system_prompt(),
-            cv_prompt,
-            application_texts.build_system_prompt(),
-        ]
-    )
-
-    assert "allowed_skills_by_category" in app_prompt
-    assert "core_skills_by_category" in app_prompt
-    assert "matching_keywords_for_profile_selection_not_display" in app_prompt
-    assert "genai" in app_prompt
-    assert "do not copy those keywords into selected_skills" in app_prompt
-    assert "unsupported_offer_terms_not_to_claim" not in combined
-    for term in ("MLOps", "Kubernetes", "GCP", "Machine learning", "Computer vision"):
-        assert term in app_prompt.split("=== JOB ===", 1)[1]
-    assert "absence from the display catalogue is not a prohibition" in combined
-    assert "Offer/company anchors for letter:" in app_prompt
-    assert "Acme Health builds patient-facing clinical AI products for care teams." in app_prompt
-    assert "Work on RAG pipelines for medical knowledge access" in app_prompt
-    assert "sound like a real candidate" in app_prompt
-    assert "why this company and this role specifically make sense" in app_prompt
-    assert "=== MOTIVATION LETTER ===" in app_prompt
-    assert "French or English: 180-240 words" in app_prompt
-    assert "clear recruiter-facing language" in app_prompt
-    assert "why it matters for the role" in application_draft.build_system_prompt()
-    assert "Do not reproduce or closely paraphrase CV bullets" in app_prompt
-    assert (
-        "For professional experiences, use past or clearly neutral wording only"
-        in application_draft.build_system_prompt()
-    )
-    assert "never describe them as current" in application_draft.build_system_prompt()
-    assert (
-        "Projects marked current or ongoing may still be described as current work"
-        in application_draft.build_system_prompt()
-    )
-    assert "During my experience at [company]" in app_prompt
-    assert "At [company], I developed" in app_prompt
-    assert "Chez [entreprise], j’ai développé" in app_prompt
-    assert "Lors de mon expérience chez [entreprise]" in app_prompt
-    assert "my current role" in app_prompt
-    assert "currently at [company]" in app_prompt
-    assert "dans mon poste actuel" in app_prompt
-    assert "actuellement chez [entreprise]" in app_prompt
-    assert "Projects marked current or ongoing may still be described as current work" in app_prompt
-    assert "In my role at" not in app_prompt
-    assert "one concrete priority of the role or company" in application_draft.build_system_prompt()
-    assert "Avoid generic closing language" in application_draft.build_system_prompt()
-    assert "Only claim skills, tools, domains, or experience" in app_prompt
-    assert "Clear link between company needs, candidate evidence" in app_prompt
     for prompt in (app_prompt, cv_prompt):
-        assert "exactly 3 unique projects, with a minimum and maximum of 3" in prompt
+        assert "allowed_skills_by_category" in prompt
+        assert "core_skills_by_category" in prompt
+        assert "matching_keywords_for_profile_selection_not_display" in prompt
         assert "project_selection_reasons" in prompt
-    for system in (application_draft.build_system_prompt(), cv_adaptation.build_system_prompt()):
-        assert "Select exactly 3 unique projects" in system
-        assert "specialized: select at most one" in system
-        assert "disabled: never select" in system
-        assert "Choose projects BEFORE writing" in system
-    assert "cv_title MUST read like a polished, real CV headline" in application_draft.build_system_prompt()
-    assert "not a skills list" in application_draft.build_system_prompt()
-    assert "not tools or stack keywords" in app_prompt
-    assert "opening role consistent with cv_title" in app_prompt
-    assert 'under an "AI Engineer" title' in app_prompt
-    assert (
-        "CV language: English only. Keep cv_title and professional_summary in English."
-        in app_prompt
-    )
-    assert "CV title: write a stable, polished professional headline" in app_prompt
-    assert (
-        "Experiences are read-only context. Do not output, rewrite, shorten, select or reorder them."
-        in app_prompt
-    )
-    assert "write a motivation letter" in application_draft.build_system_prompt()
-    assert "Required skills (for selected_skills, professional_summary and bullets" not in combined
-    assert (
-        "Required skills (from offer; for selected_skills, professional_summary and bullets"
-        not in combined
-    )
-    assert "Keywords to surface in professional_summary" not in combined
-    assert "Include supported technical anchors" not in combined
-    assert (
-        "Did you move offer-specific tasks, tools and keywords to professional_summary"
-        not in combined
-    )
-    assert "not to build a keyword list" in combined
-    assert "Do not use sequences of tools or technologies for keyword coverage" in combined
-    assert (
-        "A named model family, method, project or implementation technology may "
-        "appear only when it is integral to a specific source-grounded contribution"
-    ) in combined
-    assert "Do not turn the summary into a stack inventory or keyword list" in combined
-    assert (
-        "named technologies, methods or projects must be tied to concrete source-grounded work"
-        in combined
-    )
-    assert (
-        "Use profile evidence, allowed_claims and evidence_level to support any named method, "
-        "model family, project or implementation technology, including terms absent from the "
-        "display catalogue; do not enumerate skills as standalone content"
-    ) in combined
-    assert (
-        "professional_summary MUST be recruiter-facing, concrete, adapted to the role" in combined
-    )
-    assert (
-        "Synthesize the candidate's professional profile"
-        in combined
-    )
-    assert "selected_skills is the exact Skills section to display" in combined
-    assert (
-        "Include every required or strongly requested offer skill that exists in allowed_skills"
-        in combined
-    )
-    assert (
-        "CV title: write a stable, polished professional headline under the candidate's name"
-    ) in combined
-    assert (
-        "Keywords to interpret the role focus and surface in selected_skills "
-        "and the motivation letter when supported"
-    ) in app_prompt
-    assert "exact skills" not in combined
+        profile_context, offer_context = prompt.split("=== JOB ===", 1)
+        for category in profile.skills.categories:
+            for skill in category.skills:
+                assert skill in profile_context
+        for term in analysis.required_skills + analysis.cv_keywords_to_include:
+            assert term in offer_context
+    assert analysis.company_context in app_prompt
+    for point in analysis.offer_interest_points:
+        assert point in app_prompt

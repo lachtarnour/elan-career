@@ -6,6 +6,7 @@ Real HTTP calls are forbidden in tests. Everything goes through mocks of
 
 from __future__ import annotations
 
+from threading import Event
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -19,6 +20,7 @@ from smartapply.scrapers import (
     ManualScraper,
     ScraperConfigError,
     ScraperError,
+    ScraperStopError,
     SerpApiGoogleJobsScraper,
     available_scrapers,
 )
@@ -26,13 +28,48 @@ from smartapply.scrapers import (
 # ============================ Helpers ============================
 
 
-def _mock_response(payload: dict[str, Any], status_code: int = 200) -> MagicMock:
+def _mock_response(payload: Any, status_code: int = 200) -> MagicMock:
     response = MagicMock()
     response.status_code = status_code
     response.json.return_value = payload
     response.text = ""
     response.raise_for_status = MagicMock()
     return response
+
+
+def _mock_apify_success(mocker, *datasets: list[dict[str, Any]]):
+    """Mock independent successful async Actor runs and their datasets."""
+
+    dataset_by_id: dict[str, list[dict[str, Any]]] = {}
+
+    def start_run(*args, **kwargs):
+        index = len(dataset_by_id)
+        dataset_id = f"dataset-{index}"
+        dataset_by_id[dataset_id] = datasets[index]
+        return _mock_response(
+            {
+                "data": {
+                    "id": f"run-{index}",
+                    "defaultDatasetId": dataset_id,
+                    "status": "SUCCEEDED",
+                }
+            },
+            status_code=201,
+        )
+
+    def get_result(url, **kwargs):
+        dataset_id = url.rsplit("/", 2)[-2]
+        return _mock_response(dataset_by_id[dataset_id])
+
+    post_mock = mocker.patch(
+        "smartapply.scrapers.linkedin.requests.post",
+        side_effect=start_run,
+    )
+    get_mock = mocker.patch(
+        "smartapply.scrapers.linkedin.requests.get",
+        side_effect=get_result,
+    )
+    return post_mock, get_mock
 
 
 # ============================ make_external_id ============================
@@ -256,33 +293,810 @@ def test_linkedin_apify_uses_configured_default_max_results(mocker, monkeypatch)
 
     monkeypatch.setenv("LINKEDIN_MAX_RESULTS", "3")
     get_settings.cache_clear()
-    post_mock = mocker.patch(
-        "smartapply.scrapers.linkedin.requests.post",
-        return_value=_mock_response([]),
-    )
+    post_mock, _ = _mock_apify_success(mocker, [])
 
     s = LinkedInJobsScraper(token="fake-apify-token")
-    list(s.search("Data Scientist", max_results=None))
+    list(s.search("Data Scientist", max_results=None, experience_level=[]))
 
     assert post_mock.call_args.kwargs["json"]["limit"] == 3
     get_settings.cache_clear()
 
 
-def test_linkedin_apify_uses_configured_timeout(mocker, monkeypatch) -> None:
+def test_linkedin_apify_has_no_run_deadline_and_uses_http_timeout(mocker, monkeypatch) -> None:
     from smartapply.config import get_settings
 
-    monkeypatch.setenv("LINKEDIN_TIMEOUT", "17")
+    monkeypatch.setenv("LINKEDIN_HTTP_TIMEOUT", "17")
     get_settings.cache_clear()
+    post_mock, _ = _mock_apify_success(mocker, [])
+
+    scraper = LinkedInJobsScraper(token="fake-apify-token")
+    list(scraper.search("Data Scientist", max_results=1, experience_level=[]))
+
+    assert post_mock.call_args.kwargs["timeout"] == 17
+    assert post_mock.call_args.kwargs["params"] == {
+        "restartOnError": "false",
+        "maxItems": 1,
+    }
+    assert "timeout" not in post_mock.call_args.kwargs["params"]
+    get_settings.cache_clear()
+
+
+def test_linkedin_apify_tracks_async_run_then_reads_dataset(mocker) -> None:
+    payload = [
+        {
+            "id": "job-1",
+            "title": "Data Scientist",
+            "companyName": "Acme",
+            "experienceLevel": "Associate",
+            "description": "Build ML systems.",
+        }
+    ]
     post_mock = mocker.patch(
         "smartapply.scrapers.linkedin.requests.post",
+        return_value=_mock_response(
+            {
+                "data": {
+                    "id": "run-123",
+                    "defaultDatasetId": "dataset-123",
+                    "status": "READY",
+                }
+            },
+            status_code=201,
+        ),
+    )
+    get_mock = mocker.patch(
+        "smartapply.scrapers.linkedin.requests.get",
+        side_effect=[
+            _mock_response(
+                {
+                    "data": {
+                        "id": "run-123",
+                        "defaultDatasetId": "dataset-123",
+                        "status": "RUNNING",
+                    }
+                }
+            ),
+            _mock_response(
+                {
+                    "data": {
+                        "id": "run-123",
+                        "defaultDatasetId": "dataset-123",
+                        "status": "SUCCEEDED",
+                    }
+                }
+            ),
+            _mock_response(payload),
+        ],
+    )
+
+    jobs = list(
+        LinkedInJobsScraper(token="fake", poll_wait_seconds=5).search(
+            "Data Scientist", max_results=1
+        )
+    )
+
+    assert len(jobs) == 1
+    assert jobs[0].source_data["id"] == "job-1"
+    assert post_mock.call_count == 1
+    assert post_mock.call_args.args[0].endswith("/actors/valig~linkedin-jobs-scraper/runs")
+    assert get_mock.call_args_list[0].args[0].endswith("/actor-runs/run-123")
+    assert get_mock.call_args_list[0].kwargs["params"] == {"waitForFinish": 5}
+    assert get_mock.call_args_list[1].args[0].endswith("/actor-runs/run-123")
+    assert get_mock.call_args_list[2].args[0].endswith("/datasets/dataset-123/items")
+
+
+def test_linkedin_retries_only_safe_reads_for_known_run(mocker, tmp_path) -> None:
+    post_mock = mocker.patch(
+        "smartapply.scrapers.linkedin.requests.post",
+        return_value=_mock_response(
+            {
+                "data": {
+                    "id": "run-known",
+                    "defaultDatasetId": "dataset-known",
+                    "status": "RUNNING",
+                }
+            },
+            status_code=201,
+        ),
+    )
+    get_mock = mocker.patch(
+        "smartapply.scrapers.linkedin.requests.get",
+        side_effect=[
+            requests.ReadTimeout("temporary status read failure"),
+            _mock_response(
+                {
+                    "data": {
+                        "id": "run-known",
+                        "defaultDatasetId": "dataset-known",
+                        "status": "SUCCEEDED",
+                    }
+                }
+            ),
+            _mock_response([]),
+        ],
+    )
+    scraper = LinkedInJobsScraper(
+        token="fake",
+        poll_wait_seconds=1,
+        recovery_path=tmp_path / "apify-runs.json",
+    )
+    mocker.patch.object(scraper, "_retry_pause")
+
+    assert list(scraper.search("Data Scientist", max_results=1, experience_level=[])) == []
+    assert post_mock.call_count == 1
+    assert get_mock.call_count == 3
+    assert get_mock.call_args_list[0].args[0] == get_mock.call_args_list[1].args[0]
+
+
+def test_linkedin_cancellation_interrupts_status_retry_and_aborts_run(mocker, tmp_path) -> None:
+    stop = Event()
+
+    def post(url, **kwargs):
+        if url.endswith("/abort"):
+            return _mock_response(
+                {"data": {"id": "run-retry", "status": "ABORTED"}},
+                status_code=200,
+            )
+        return _mock_response(
+            {
+                "data": {
+                    "id": "run-retry",
+                    "defaultDatasetId": "dataset-retry",
+                    "status": "RUNNING",
+                }
+            },
+            status_code=201,
+        )
+
+    def get(url, **kwargs):
+        if "/actor-runs/" in url:
+            stop.set()
+            raise requests.ReadTimeout("temporary status outage")
+        return _mock_response([])
+
+    post_mock = mocker.patch("smartapply.scrapers.linkedin.requests.post", side_effect=post)
+    get_mock = mocker.patch("smartapply.scrapers.linkedin.requests.get", side_effect=get)
+
+    jobs = list(
+        LinkedInJobsScraper(
+            token="fake",
+            poll_wait_seconds=15,
+            recovery_path=tmp_path / "apify-runs.json",
+        ).search(
+            "ML Engineer",
+            max_results=1,
+            experience_level=[],
+            stop_requested=stop.is_set,
+        )
+    )
+
+    assert jobs == []
+    assert post_mock.call_count == 2
+    assert post_mock.call_args_list[1].args[0].endswith("/actor-runs/run-retry/abort")
+    assert get_mock.call_count == 2
+
+
+def test_linkedin_tracking_failure_yields_known_partial_dataset(mocker, tmp_path) -> None:
+    stop = Event()
+
+    def post(url, **kwargs):
+        if url.endswith("/abort"):
+            raise requests.ConnectionError("abort unavailable")
+        return _mock_response(
+            {
+                "data": {
+                    "id": "run-partial-recovery",
+                    "defaultDatasetId": "dataset-partial-recovery",
+                    "status": "RUNNING",
+                }
+            },
+            status_code=201,
+        )
+
+    status_reads = 0
+
+    def get(url, **kwargs):
+        nonlocal status_reads
+        if "/actor-runs/" in url:
+            status_reads += 1
+            stop.set()
+            raise requests.ReadTimeout(f"status outage {status_reads}")
+        return _mock_response(
+            [
+                {
+                    "id": "recovered-partial",
+                    "title": "ML Engineer",
+                    "companyName": "Acme",
+                    "experienceLevel": "Associate",
+                    "description": "Build ML systems.",
+                }
+            ]
+        )
+
+    post_mock = mocker.patch("smartapply.scrapers.linkedin.requests.post", side_effect=post)
+    get_mock = mocker.patch("smartapply.scrapers.linkedin.requests.get", side_effect=get)
+    iterator = LinkedInJobsScraper(
+        token="fake",
+        poll_wait_seconds=15,
+        recovery_path=tmp_path / "apify-runs.json",
+    ).search("ML Engineer", max_results=1, experience_level=[], stop_requested=stop.is_set)
+
+    assert next(iterator).source_data["id"] == "recovered-partial"
+    with pytest.raises(ScraperError, match="run-partial-recovery.*inaccessible"):
+        next(iterator)
+
+    assert post_mock.call_count == 2
+    assert sum(call.args[0].endswith("/abort") for call in post_mock.call_args_list) == 1
+    assert get_mock.call_count == 3
+    assert get_mock.call_args_list[-1].args[0].endswith("/datasets/dataset-partial-recovery/items")
+
+
+def test_linkedin_failed_abort_has_bounded_status_follow_up(mocker, tmp_path) -> None:
+    stop = Event()
+
+    def post(url, **kwargs):
+        if url.endswith("/abort"):
+            raise requests.ConnectionError("abort unavailable")
+        return _mock_response(
+            {
+                "data": {
+                    "id": "run-cancel-bounded",
+                    "defaultDatasetId": "dataset-cancel-bounded",
+                    "status": "RUNNING",
+                }
+            },
+            status_code=201,
+        )
+
+    def get(url, **kwargs):
+        if "/actor-runs/" in url:
+            stop.set()
+            return _mock_response(
+                {
+                    "data": {
+                        "id": "run-cancel-bounded",
+                        "defaultDatasetId": "dataset-cancel-bounded",
+                        "status": "RUNNING",
+                    }
+                }
+            )
+        return _mock_response([])
+
+    post_mock = mocker.patch("smartapply.scrapers.linkedin.requests.post", side_effect=post)
+    get_mock = mocker.patch("smartapply.scrapers.linkedin.requests.get", side_effect=get)
+    scraper = LinkedInJobsScraper(
+        token="fake",
+        poll_wait_seconds=1,
+        read_max_attempts=2,
+        recovery_path=tmp_path / "apify-runs.json",
+    )
+
+    with pytest.raises(ScraperStopError, match="annulation.*pas pu être confirmée"):
+        list(
+            scraper.search(
+                "Cancel bounded",
+                max_results=1,
+                experience_level=[],
+                stop_requested=stop.is_set,
+            )
+        )
+
+    assert post_mock.call_count == 2
+    assert sum(call.args[0].endswith("/abort") for call in post_mock.call_args_list) == 1
+    assert sum("/actor-runs/" in call.args[0] for call in get_mock.call_args_list) == 3
+    assert get_mock.call_args_list[-1].args[0].endswith("/datasets/dataset-cancel-bounded/items")
+    pending = scraper.recovery_journal.list_pending()
+    assert len(pending) == 1
+    assert pending[0].failure_phase == "cancellation"
+
+
+def test_linkedin_fatal_status_error_does_not_abort_known_run(mocker, tmp_path) -> None:
+    def post(url, **kwargs):
+        if url.endswith("/abort"):
+            return _mock_response(
+                {"data": {"id": "run-auth", "status": "ABORTED"}},
+                status_code=200,
+            )
+        return _mock_response(
+            {
+                "data": {
+                    "id": "run-auth",
+                    "defaultDatasetId": "dataset-auth",
+                    "status": "RUNNING",
+                }
+            },
+            status_code=201,
+        )
+
+    post_mock = mocker.patch("smartapply.scrapers.linkedin.requests.post", side_effect=post)
+    mocker.patch(
+        "smartapply.scrapers.linkedin.requests.get",
+        return_value=_mock_response({"error": {"message": "invalid token"}}, 401),
+    )
+    scraper = LinkedInJobsScraper(
+        token="fake",
+        recovery_path=tmp_path / "apify-runs.json",
+    )
+
+    with pytest.raises(ScraperConfigError, match="HTTP 401"):
+        list(scraper.search("ML Engineer", max_results=1, experience_level=[]))
+
+    assert post_mock.call_count == 1
+    assert not post_mock.call_args.args[0].endswith("/abort")
+    pending = scraper.recovery_journal.list_pending()
+    assert [(item.run_id, item.dataset_id) for item in pending] == [("run-auth", "dataset-auth")]
+
+
+def test_linkedin_status_failures_are_bounded_and_resume_without_new_post(mocker, tmp_path) -> None:
+    journal_path = tmp_path / "apify-runs.json"
+    post_mock = mocker.patch(
+        "smartapply.scrapers.linkedin.requests.post",
+        return_value=_mock_response(
+            {
+                "data": {
+                    "id": "run-status-recovery",
+                    "defaultDatasetId": "dataset-status-recovery",
+                    "status": "RUNNING",
+                }
+            },
+            status_code=201,
+        ),
+    )
+
+    def unavailable_reads(url, **kwargs):
+        if "/actor-runs/" in url:
+            raise requests.ReadTimeout("status unavailable")
+        return _mock_response([])
+
+    get_mock = mocker.patch(
+        "smartapply.scrapers.linkedin.requests.get",
+        side_effect=unavailable_reads,
+    )
+    first = LinkedInJobsScraper(
+        token="fake",
+        poll_wait_seconds=1,
+        read_max_attempts=2,
+        recovery_path=journal_path,
+    )
+    mocker.patch.object(first, "_retry_pause")
+
+    with pytest.raises(ScraperStopError, match="run-status-recovery.*récupération"):
+        list(first.search("Status recovery", max_results=1, experience_level=[]))
+
+    pending = first.recovery_journal.list_pending()
+    assert post_mock.call_count == 1
+    assert all(not call.args[0].endswith("/abort") for call in post_mock.call_args_list)
+    assert sum("/actor-runs/" in call.args[0] for call in get_mock.call_args_list) == 2
+    assert len(pending) == 1
+    assert pending[0].run_id == "run-status-recovery"
+    assert pending[0].dataset_id == "dataset-status-recovery"
+    assert pending[0].query == "Status recovery"
+    assert pending[0].state == "recovery_required"
+    assert pending[0].failure_phase == "status"
+
+    get_mock.reset_mock()
+    get_mock.side_effect = [
+        _mock_response(
+            {
+                "data": {
+                    "id": "run-status-recovery",
+                    "defaultDatasetId": "dataset-status-recovery",
+                    "status": "SUCCEEDED",
+                }
+            }
+        ),
+        _mock_response([]),
+    ]
+    resumed = LinkedInJobsScraper(token="fake", recovery_path=journal_path)
+
+    assert list(resumed.search("Status recovery", max_results=1, experience_level=[])) == []
+    assert post_mock.call_count == 1
+    assert get_mock.call_args_list[0].args[0].endswith("/actor-runs/run-status-recovery")
+    assert get_mock.call_args_list[1].args[0].endswith("/datasets/dataset-status-recovery/items")
+    assert resumed.last_completed_run_ids == ["run-status-recovery"]
+    assert resumed.recovery_journal.list_pending()[0].state == "dataset_ready"
+    resumed.mark_runs_persisted(resumed.last_completed_run_ids)
+    assert resumed.recovery_journal.list_pending() == []
+
+
+def test_linkedin_dataset_failures_are_bounded_and_resume_same_dataset(mocker, tmp_path) -> None:
+    journal_path = tmp_path / "apify-runs.json"
+    post_mock = mocker.patch(
+        "smartapply.scrapers.linkedin.requests.post",
+        return_value=_mock_response(
+            {
+                "data": {
+                    "id": "run-dataset-recovery",
+                    "defaultDatasetId": "dataset-dataset-recovery",
+                    "status": "SUCCEEDED",
+                }
+            },
+            status_code=201,
+        ),
+    )
+    get_mock = mocker.patch(
+        "smartapply.scrapers.linkedin.requests.get",
+        side_effect=requests.ConnectionError("dataset unavailable"),
+    )
+    first = LinkedInJobsScraper(
+        token="fake",
+        poll_wait_seconds=1,
+        read_max_attempts=2,
+        recovery_path=journal_path,
+    )
+    mocker.patch.object(first, "_retry_pause")
+
+    with pytest.raises(ScraperStopError, match="dataset-dataset-recovery.*récupération"):
+        list(first.search("Dataset recovery", max_results=1, experience_level=[]))
+
+    pending = first.recovery_journal.list_pending()
+    assert post_mock.call_count == 1
+    assert all(not call.args[0].endswith("/abort") for call in post_mock.call_args_list)
+    assert get_mock.call_count == 2
+    assert len(pending) == 1
+    assert pending[0].run_id == "run-dataset-recovery"
+    assert pending[0].dataset_id == "dataset-dataset-recovery"
+    assert pending[0].state == "recovery_required"
+    assert pending[0].failure_phase == "dataset"
+
+    get_mock.reset_mock()
+    get_mock.side_effect = None
+    get_mock.return_value = _mock_response([])
+    resumed = LinkedInJobsScraper(token="fake", recovery_path=journal_path)
+
+    assert list(resumed.search("Dataset recovery", max_results=1, experience_level=[])) == []
+    assert post_mock.call_count == 1
+    assert get_mock.call_count == 1
+    assert get_mock.call_args.args[0].endswith("/datasets/dataset-dataset-recovery/items")
+    assert resumed.last_completed_run_ids == ["run-dataset-recovery"]
+    assert resumed.recovery_journal.list_pending()[0].state == "dataset_ready"
+    resumed.mark_runs_persisted(resumed.last_completed_run_ids)
+    assert resumed.recovery_journal.list_pending() == []
+
+
+@pytest.mark.parametrize("invalid_kind", ["json", "shape"])
+def test_linkedin_invalid_dataset_reads_are_bounded_and_recorded(
+    mocker,
+    tmp_path,
+    invalid_kind,
+) -> None:
+    post_mock = mocker.patch(
+        "smartapply.scrapers.linkedin.requests.post",
+        return_value=_mock_response(
+            {
+                "data": {
+                    "id": "run-invalid-dataset",
+                    "defaultDatasetId": "dataset-invalid",
+                    "status": "SUCCEEDED",
+                }
+            },
+            status_code=201,
+        ),
+    )
+    invalid_response = _mock_response({"items": []})
+    if invalid_kind == "json":
+        invalid_response.json.side_effect = ValueError("truncated response")
+    get_mock = mocker.patch(
+        "smartapply.scrapers.linkedin.requests.get",
+        return_value=invalid_response,
+    )
+    scraper = LinkedInJobsScraper(
+        token="fake",
+        read_max_attempts=2,
+        recovery_path=tmp_path / "apify-runs.json",
+    )
+    mocker.patch.object(scraper, "_retry_pause")
+
+    with pytest.raises(ScraperStopError, match="dataset-invalid.*récupération"):
+        list(scraper.search("Invalid dataset", max_results=1, experience_level=[]))
+
+    assert post_mock.call_count == 1
+    assert get_mock.call_count == 2
+    pending = scraper.recovery_journal.list_pending()
+    assert [(item.run_id, item.failure_phase) for item in pending] == [
+        ("run-invalid-dataset", "dataset")
+    ]
+
+
+def test_linkedin_successful_status_read_resets_consecutive_failure_count(mocker, tmp_path) -> None:
+    post_mock = mocker.patch(
+        "smartapply.scrapers.linkedin.requests.post",
+        return_value=_mock_response(
+            {
+                "data": {
+                    "id": "run-reset",
+                    "defaultDatasetId": "dataset-reset",
+                    "status": "RUNNING",
+                }
+            },
+            status_code=201,
+        ),
+    )
+    get_mock = mocker.patch(
+        "smartapply.scrapers.linkedin.requests.get",
+        side_effect=[
+            requests.ReadTimeout("first transient failure"),
+            _mock_response(
+                {
+                    "data": {
+                        "id": "run-reset",
+                        "defaultDatasetId": "dataset-reset",
+                        "status": "RUNNING",
+                    }
+                }
+            ),
+            requests.ReadTimeout("second transient failure"),
+            _mock_response(
+                {
+                    "data": {
+                        "id": "run-reset",
+                        "defaultDatasetId": "dataset-reset",
+                        "status": "SUCCEEDED",
+                    }
+                }
+            ),
+            _mock_response([]),
+        ],
+    )
+    scraper = LinkedInJobsScraper(
+        token="fake",
+        poll_wait_seconds=1,
+        read_max_attempts=2,
+        recovery_path=tmp_path / "apify-runs.json",
+    )
+    mocker.patch.object(scraper, "_retry_pause")
+
+    assert list(scraper.search("Reset reads", max_results=1, experience_level=[])) == []
+    assert post_mock.call_count == 1
+    assert get_mock.call_count == 5
+    assert scraper.last_completed_run_ids == ["run-reset"]
+    scraper.mark_runs_persisted(scraper.last_completed_run_ids)
+    assert scraper.recovery_journal.list_pending() == []
+
+
+@pytest.mark.parametrize("phase", ["status", "dataset"])
+@pytest.mark.parametrize(
+    "budget, expected_timeouts",
+    [
+        (180, [30, 30, 30, 30, 15]),
+        (35, [30]),
+    ],
+)
+def test_linkedin_read_deadline_is_checked_before_get_and_reduces_last_timeout(
+    mocker,
+    tmp_path,
+    phase,
+    budget,
+    expected_timeouts,
+) -> None:
+    clock = [0.0]
+    timeouts = []
+
+    def timed_out(url, **kwargs):
+        timeout = kwargs["timeout"]
+        timeouts.append(timeout)
+        clock[0] += timeout
+        raise requests.ReadTimeout("known-run simulated failure")
+
+    mocker.patch("smartapply.scrapers.linkedin.time.monotonic", side_effect=lambda: clock[0])
+    mocker.patch(
+        "smartapply.scrapers.linkedin.time.sleep",
+        side_effect=lambda delay: clock.__setitem__(0, clock[0] + delay),
+    )
+    mocker.patch("smartapply.scrapers.linkedin.requests.get", side_effect=timed_out)
+    scraper = LinkedInJobsScraper(
+        token="fake",
+        read_failure_budget_seconds=budget,
+        recovery_path=tmp_path / "runs.json",
+    )
+    with pytest.raises(ScraperStopError):
+        if phase == "dataset":
+            scraper._fetch_dataset_items(
+                dataset_id="dataset",
+                run_id="run",
+                stop_requested=None,
+            )
+        else:
+            scraper._wait_for_run(
+                {"id": "run", "status": "RUNNING"},
+                run_id="run",
+                dataset_id="dataset",
+                stop_requested=None,
+            )
+    assert timeouts == pytest.approx(expected_timeouts)
+    assert clock[0] == pytest.approx(budget)
+
+
+def test_linkedin_long_poll_wait_stays_below_http_allowance(mocker, tmp_path) -> None:
+    get = mocker.patch(
+        "smartapply.scrapers.linkedin.requests.get",
+        return_value=_mock_response({"data": {"status": "RUNNING"}}),
+    )
+    scraper = LinkedInJobsScraper(token="fake", recovery_path=tmp_path / "runs.json")
+
+    scraper._get_run("run", wait_seconds=60, timeout=5)
+
+    assert get.call_args.kwargs["params"]["waitForFinish"] == 4
+    assert get.call_args.kwargs["timeout"] == 5
+
+
+@pytest.mark.parametrize("status", ["FAILED", "TIMED-OUT", "ABORTED"])
+def test_linkedin_terminal_run_failure_is_actionable(mocker, tmp_path, status) -> None:
+    mocker.patch(
+        "smartapply.scrapers.linkedin.requests.post",
+        return_value=_mock_response(
+            {
+                "data": {
+                    "id": "run-failed",
+                    "defaultDatasetId": "dataset-failed",
+                    "status": status,
+                    "statusMessage": "Actor stopped",
+                }
+            },
+            status_code=201,
+        ),
+    )
+    get_mock = mocker.patch(
+        "smartapply.scrapers.linkedin.requests.get",
         return_value=_mock_response([]),
     )
 
-    scraper = LinkedInJobsScraper(token="fake-apify-token")
-    list(scraper.search("Data Scientist", max_results=1))
+    with pytest.raises(ScraperError, match=f"run Apify run-failed.*{status}"):
+        list(
+            LinkedInJobsScraper(
+                token="fake",
+                recovery_path=tmp_path / "apify-runs.json",
+            ).search("Data Scientist", max_results=1)
+        )
 
-    assert post_mock.call_args.kwargs["timeout"] == 17
-    get_settings.cache_clear()
+    assert get_mock.call_count == 1
+    assert get_mock.call_args.args[0].endswith("/datasets/dataset-failed/items")
+
+
+def test_linkedin_terminal_quota_failure_is_fatal_for_later_cohorts(
+    mocker,
+    tmp_path,
+) -> None:
+    mocker.patch(
+        "smartapply.scrapers.linkedin.requests.post",
+        return_value=_mock_response(
+            {
+                "data": {
+                    "id": "run-quota",
+                    "defaultDatasetId": "dataset-quota",
+                    "status": "FAILED",
+                    "statusMessage": "Account usage quota exceeded",
+                }
+            },
+            status_code=201,
+        ),
+    )
+    mocker.patch(
+        "smartapply.scrapers.linkedin.requests.get",
+        return_value=_mock_response([]),
+    )
+
+    with pytest.raises(ScraperStopError, match="quota exceeded"):
+        list(
+            LinkedInJobsScraper(
+                token="fake",
+                recovery_path=tmp_path / "apify-runs.json",
+            ).search("Data Scientist", max_results=1, experience_level=[])
+        )
+
+
+def test_linkedin_terminal_failure_yields_partial_dataset_before_warning(mocker, tmp_path) -> None:
+    mocker.patch(
+        "smartapply.scrapers.linkedin.requests.post",
+        return_value=_mock_response(
+            {
+                "data": {
+                    "id": "run-partial",
+                    "defaultDatasetId": "dataset-partial",
+                    "status": "FAILED",
+                    "statusMessage": "Actor stopped after one item",
+                }
+            },
+            status_code=201,
+        ),
+    )
+    mocker.patch(
+        "smartapply.scrapers.linkedin.requests.get",
+        return_value=_mock_response(
+            [
+                {
+                    "id": "partial-job",
+                    "title": "Data Scientist",
+                    "companyName": "Acme",
+                    "experienceLevel": "Associate",
+                    "description": "Build ML systems.",
+                }
+            ]
+        ),
+    )
+
+    iterator = LinkedInJobsScraper(
+        token="fake",
+        recovery_path=tmp_path / "apify-runs.json",
+    ).search("Data Scientist", max_results=2)
+
+    first = next(iterator)
+    assert first.source_data["id"] == "partial-job"
+    with pytest.raises(ScraperError, match="run-partial.*FAILED"):
+        next(iterator)
+
+
+def test_linkedin_cancellation_aborts_known_run_and_keeps_partial_dataset(mocker, tmp_path) -> None:
+    stop = Event()
+
+    def post(url, **kwargs):
+        if url.endswith("/abort"):
+            return _mock_response(
+                {"data": {"id": "run-cancel", "status": "ABORTED"}},
+                status_code=200,
+            )
+        return _mock_response(
+            {
+                "data": {
+                    "id": "run-cancel",
+                    "defaultDatasetId": "dataset-cancel",
+                    "status": "RUNNING",
+                }
+            },
+            status_code=201,
+        )
+
+    status_reads = 0
+
+    def get(url, **kwargs):
+        nonlocal status_reads
+        if "/actor-runs/" in url:
+            status_reads += 1
+            if status_reads == 1:
+                stop.set()
+                status = "RUNNING"
+            else:
+                status = "ABORTED"
+            return _mock_response(
+                {
+                    "data": {
+                        "id": "run-cancel",
+                        "defaultDatasetId": "dataset-cancel",
+                        "status": status,
+                    }
+                }
+            )
+        return _mock_response(
+            [
+                {
+                    "id": "partial-1",
+                    "title": "ML Engineer",
+                    "companyName": "Acme",
+                    "experienceLevel": "Associate",
+                    "description": "Build ML systems.",
+                }
+            ]
+        )
+
+    post_mock = mocker.patch("smartapply.scrapers.linkedin.requests.post", side_effect=post)
+    mocker.patch("smartapply.scrapers.linkedin.requests.get", side_effect=get)
+
+    jobs = list(
+        LinkedInJobsScraper(
+            token="fake",
+            poll_wait_seconds=1,
+            recovery_path=tmp_path / "apify-runs.json",
+        ).search(
+            "ML Engineer",
+            max_results=1,
+            stop_requested=stop.is_set,
+        )
+    )
+
+    assert len(jobs) == 1
+    assert jobs[0].source_data["id"] == "partial-1"
+    assert post_mock.call_count == 2
+    assert post_mock.call_args_list[1].args[0].endswith("/actor-runs/run-cancel/abort")
 
 
 def test_linkedin_apify_rejects_limit_above_configured_max(mocker, monkeypatch) -> None:
@@ -324,10 +1138,7 @@ def test_linkedin_apify_maps_jobs_and_payload(mocker) -> None:
             "applyUrl": "",
         }
     ]
-    post_mock = mocker.patch(
-        "smartapply.scrapers.linkedin.requests.post",
-        return_value=_mock_response(payload),
-    )
+    post_mock, _ = _mock_apify_success(mocker, payload)
 
     s = LinkedInJobsScraper(token="fake-apify-token")
     jobs = list(
@@ -403,10 +1214,7 @@ def test_linkedin_apify_prefers_html_description_and_stable_id(mocker) -> None:
             "applyUrl": "",
         }
     ]
-    mocker.patch(
-        "smartapply.scrapers.linkedin.requests.post",
-        side_effect=[_mock_response([]), _mock_response(payload)],
-    )
+    _mock_apify_success(mocker, [], payload)
 
     s = LinkedInJobsScraper(token="fake-apify-token")
     jobs = list(
@@ -495,13 +1303,7 @@ def test_linkedin_apify_uses_mid_senior_fallback_only_when_needed(mocker) -> Non
             "description": "Build ML products.",
         }
     ]
-    post_mock = mocker.patch(
-        "smartapply.scrapers.linkedin.requests.post",
-        side_effect=[
-            _mock_response(first_payload),
-            _mock_response(fallback_payload),
-        ],
-    )
+    post_mock, _ = _mock_apify_success(mocker, first_payload, fallback_payload)
 
     s = LinkedInJobsScraper(token="fake-apify-token")
     jobs = list(
@@ -527,10 +1329,7 @@ def test_linkedin_apify_uses_mid_senior_fallback_only_when_needed(mocker) -> Non
 
 
 def test_linkedin_apify_translates_selector_labels(mocker) -> None:
-    post_mock = mocker.patch(
-        "smartapply.scrapers.linkedin.requests.post",
-        return_value=_mock_response([]),
-    )
+    post_mock, _ = _mock_apify_success(mocker, [])
 
     s = LinkedInJobsScraper(token="fake-apify-token")
     list(
@@ -583,19 +1382,17 @@ def test_linkedin_apify_auth_error_is_actionable_and_not_retried(mocker) -> None
 
 
 def test_linkedin_empty_selectors_keep_jobs_without_adding_filters(mocker) -> None:
-    post_mock = mocker.patch(
-        "smartapply.scrapers.linkedin.requests.post",
-        return_value=_mock_response(
-            [
-                {
-                    "id": "known-experience",
-                    "title": "Data Scientist",
-                    "companyName": "Acme",
-                    "experienceLevel": "Mid-Senior level",
-                    "description": "Build forecasting models.",
-                }
-            ]
-        ),
+    post_mock, _ = _mock_apify_success(
+        mocker,
+        [
+            {
+                "id": "known-experience",
+                "title": "Data Scientist",
+                "companyName": "Acme",
+                "experienceLevel": "Mid-Senior level",
+                "description": "Build forecasting models.",
+            }
+        ],
     )
     scraper = LinkedInJobsScraper(token="fake-apify-token")
 
@@ -616,13 +1413,20 @@ def test_linkedin_empty_selectors_keep_jobs_without_adding_filters(mocker) -> No
 
 
 @pytest.mark.parametrize("error_type", [requests.ReadTimeout, requests.ConnectionError])
-def test_linkedin_uncertain_post_is_not_retried_or_leaked(mocker, error_type) -> None:
+def test_linkedin_uncertain_post_is_not_retried_or_leaked(
+    mocker,
+    tmp_path,
+    error_type,
+) -> None:
     secret_token = "arbitrary-secret-token"
     post_mock = mocker.patch(
         "smartapply.scrapers.linkedin.requests.post",
         side_effect=error_type(f"Failed request token={secret_token}"),
     )
-    scraper = LinkedInJobsScraper(token=secret_token)
+    scraper = LinkedInJobsScraper(
+        token=secret_token,
+        recovery_path=tmp_path / "apify-runs.json",
+    )
 
     with pytest.raises(ScraperError) as exc:
         list(scraper.search("Data Scientist", max_results=1))
@@ -632,6 +1436,11 @@ def test_linkedin_uncertain_post_is_not_retried_or_leaked(mocker, error_type) ->
     assert "vérifiez" in str(exc.value)
     assert secret_token not in str(exc.value)
     assert exc.value.__suppress_context__ is True
+    assert len(scraper.recovery_journal.list_start_reservations()) == 1
+
+    with pytest.raises(ScraperStopError, match="Aucun second run"):
+        list(scraper.search("Data Scientist", max_results=1))
+    assert post_mock.call_count == 1
 
 
 @pytest.mark.parametrize("status_code", [402, 408, 429, 500, 504])
@@ -664,9 +1473,7 @@ def test_linkedin_http_failures_are_actionable_and_never_retry_post(mocker, stat
 def test_linkedin_unreadable_response_is_not_reported_as_no_results(mocker) -> None:
     response = _mock_response({})
     response.json.side_effect = ValueError("private provider response")
-    post_mock = mocker.patch(
-        "smartapply.scrapers.linkedin.requests.post", return_value=response
-    )
+    post_mock = mocker.patch("smartapply.scrapers.linkedin.requests.post", return_value=response)
 
     with pytest.raises(ScraperError, match="JSON illisible"):
         list(LinkedInJobsScraper(token="fake-token").search("Data Scientist", max_results=1))

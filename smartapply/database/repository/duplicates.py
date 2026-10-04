@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import or_, select
+from sqlalchemy import case, or_, select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from smartapply.database.models import Application, Job, JobDuplicateStatus, JobStatus
 
@@ -92,15 +93,34 @@ def _pending_reference_root(session: Session, job: Job) -> Job | None:
     return None
 
 
+def _application_priority():
+    """Prefer an active workflow, then preserved submission history."""
+    return (
+        case(
+            (
+                Application.status.in_(
+                    [JobStatus.SENT, JobStatus.INTERVIEW, JobStatus.REJECTED]
+                ),
+                0,
+            ),
+            (Application.form_submitted_at.is_not(None), 1),
+            (Application.status != JobStatus.ARCHIVED, 2),
+            else_=3,
+        ),
+        Application.updated_at.desc(),
+        Application.id.desc(),
+    )
+
+
 def application_for_duplicate_group(session: Session, job_id: int) -> Application | None:
-    """Return any application attached to an offer or one of its aliases."""
+    """Return the priority dossier, preserving evidence of an existing submission."""
     ids = duplicate_group_ids(session, job_id)
     if not ids:
         return None
     return session.execute(
         select(Application)
         .where(Application.job_id.in_(ids))
-        .order_by(Application.updated_at.desc(), Application.id.desc())
+        .order_by(*_application_priority())
         .limit(1)
     ).scalar_one_or_none()
 
@@ -125,7 +145,7 @@ def application_ids_for_confirmed_groups(session: Session, job_ids: list[int]) -
     applications_by_root: dict[int, int] = {}
     for application_id, owner_id in session.execute(
         select(Application.id, Application.job_id).order_by(
-            Application.updated_at.desc(), Application.id.desc()
+            *_application_priority()
         )
     ):
         applications_by_root.setdefault(root_id(owner_id), application_id)
@@ -147,10 +167,12 @@ def pending_duplicate_job(session: Session, job_id: int) -> Job | None:
 
 
 def pending_duplicate_for_group(session: Session, job_id: int) -> Job | None:
-    """Return another pending review row attached to the same offer group."""
+    """Return an unresolved review on the canonical row or a related offer."""
     root = canonical_job(session, job_id)
     if root is None:
         return None
+    if root.duplicate_review_status == JobDuplicateStatus.PENDING:
+        return root
     for job in session.scalars(
         select(Job).where(Job.duplicate_review_status == JobDuplicateStatus.PENDING)
     ):
@@ -163,7 +185,7 @@ def pending_duplicate_for_group(session: Session, job_id: int) -> Job | None:
 
 
 def confirm_duplicate(session: Session, job_id: int) -> Job | None:
-    """Confirm a review match and turn the row into an archived alias."""
+    """Keep the active republication and carry forward its application history."""
     job = pending_duplicate_job(session, job_id)
     if job is None or job.possible_duplicate_of_id is None:
         return None
@@ -171,39 +193,81 @@ def confirm_duplicate(session: Session, job_id: int) -> Job | None:
     if root is None or int(root.id) == int(job.id):
         return None
 
-    job_archived = bool(job.archived_at or job.status == JobStatus.ARCHIVED)
-    root_archived = bool(root.archived_at or root.status == JobStatus.ARCHIVED)
-    if not job_archived and root_archived:
-        # The pending row is the only actionable offer. Promote it to the
-        # canonical row and retain the archived source as an alias, so a
-        # confirmed duplicate never archives the active offer by mistake.
-        aliases = session.scalars(
-            select(Job).where(Job.canonical_job_id == int(root.id))
-        ).all()
-        for alias in aliases:
-            alias.canonical_job_id = int(job.id)
-        root.canonical_job_id = int(job.id)
-        root.possible_duplicate_of_id = None
-        root.duplicate_review_status = JobDuplicateStatus.CONFIRMED
-        root.duplicate_match_type = job.duplicate_match_type or "fuzzy"
-        root.duplicate_confidence = job.duplicate_confidence
-        root.shortlisted_at = None
-        root.shortlist_origin = None
-        root.status = JobStatus.ARCHIVED
-        root.archived_at = root.archived_at or datetime.now(timezone.utc)
+    # Only this decision and previously confirmed aliases may contribute a
+    # dossier. The broader duplicate_group_ids also includes unconfirmed
+    # siblings and is deliberately reserved for conservative generation guards.
+    # The reference may itself still await a decision against a third offer.
+    # Confirming job–root resolves only that edge, not root's upstream review.
+    upstream_review = (
+        (root.possible_duplicate_of_id, root.duplicate_match_type, root.duplicate_confidence)
+        if root.duplicate_review_status == JobDuplicateStatus.PENDING
+        and root.possible_duplicate_of_id is not None
+        else None
+    )
+    members = [root, job]
+    group_roots = {int(root.id), int(job.id)}
+    for alias in session.scalars(select(Job).where(Job.canonical_job_id.is_not(None))):
+        if alias.id not in group_roots and canonical_job(session, int(alias.id)).id in group_roots:
+            members.append(alias)
+    applications = session.scalars(
+        select(Application).where(Application.job_id.in_([member.id for member in members]))
+        .order_by(*_application_priority())
+    ).all()
+    # Archived dossiers are retained on their source aliases, including their
+    # submission evidence. Only two live workflows require a manual choice.
+    if any(application.status != JobStatus.ARCHIVED for application in applications[1:]):
+        raise ValueError(
+            "Ces offres possèdent plusieurs dossiers. Le regroupement nécessite "
+            "de choisir le dossier à conserver. Aucun dossier n’a été déplacé."
+        )
 
-        job.canonical_job_id = None
-        job.possible_duplicate_of_id = None
-        job.duplicate_review_status = JobDuplicateStatus.CONFIRMED
-        return job
+    def priority(offer: Job) -> tuple[bool, float, float, int]:
+        def timestamp(value: datetime | None) -> float:
+            if value is None:
+                return float("-inf")
+            return value.replace(tzinfo=value.tzinfo or timezone.utc).timestamp()
 
-    job.canonical_job_id = int(root.id)
-    job.possible_duplicate_of_id = None
-    job.duplicate_review_status = JobDuplicateStatus.CONFIRMED
-    job.archived_at = job.archived_at or datetime.now(timezone.utc)
-    job.shortlisted_at = None
-    job.shortlist_origin = None
-    job.status = JobStatus.ARCHIVED
+        return (
+            not bool(offer.archived_at or offer.status == JobStatus.ARCHIVED),
+            timestamp(offer.published_date or offer.scraped_at),
+            timestamp(offer.scraped_at),
+            int(offer.id),
+        )
+
+    winner = max((root, job), key=priority)
+    if applications:
+        application = applications[0]
+        if winner.application is not None and winner.application.id != application.id:
+            raise ValueError(
+                "La publication principale possède déjà un autre dossier. "
+                "Les deux dossiers ont été conservés ; leur rattachement nécessite un choix."
+            )
+        if application.job_id != winner.id:
+            updated_at = application.updated_at
+            application.job = winner
+            application.updated_at = updated_at
+            flag_modified(application, "updated_at")
+        winner.status = application.status
+        if application.status == JobStatus.ARCHIVED:
+            winner.archived_at = winner.archived_at or datetime.now(timezone.utc)
+
+    for member in members:
+        member.canonical_job_id = None if member.id == winner.id else int(winner.id)
+        member.possible_duplicate_of_id = None
+        member.duplicate_review_status = JobDuplicateStatus.CONFIRMED
+        if member.id != winner.id:
+            member.archived_at = member.archived_at or datetime.now(timezone.utc)
+            member.shortlisted_at = None
+            member.shortlist_origin = None
+            member.status = JobStatus.ARCHIVED
+    if upstream_review is not None:
+        reference_id, match_type, confidence = upstream_review
+        reference = canonical_job(session, int(reference_id))
+        if reference is not None and reference.id != winner.id:
+            winner.possible_duplicate_of_id = int(reference.id)
+            winner.duplicate_review_status = JobDuplicateStatus.PENDING
+            winner.duplicate_match_type = match_type
+            winner.duplicate_confidence = confidence
     return job
 
 
