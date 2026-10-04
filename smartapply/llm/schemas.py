@@ -257,6 +257,10 @@ class AssembledCV(CVSelection):
     selected_experiences: list[AdaptedExperience] = Field(
         description="Complete profile experiences copied verbatim in profile order"
     )
+    llm_selected_skills: list[SkillSelectionBlock] | None = Field(
+        default=None,
+        description="Internal original skill ordering captured before deterministic additions",
+    )
 
 
 class AdaptedCV(CVPersonalization):
@@ -268,6 +272,10 @@ class AdaptedCV(CVPersonalization):
 
     selected_experiences: list[AdaptedExperience] = Field(
         description="Complete profile experiences copied verbatim in profile order"
+    )
+    llm_selected_skills: list[SkillSelectionBlock] | None = Field(
+        default=None,
+        description="Internal original skill ordering captured before deterministic additions",
     )
 
 

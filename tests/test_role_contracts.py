@@ -269,3 +269,146 @@ def test_global_baseline_places_sql_in_its_catalogue_category():
     selected = _selected_map(adapted)
     assert "SQL" in selected["data_analysis"]
     assert "SQL" not in selected.get("data_infra", [])
+
+
+def _apply_order_contract(
+    cv: AdaptedCV,
+    *,
+    supported: dict[str, list[str]],
+    must_show: dict[str, list[str]] | None = None,
+    category_order: list[str] | None = None,
+) -> AdaptedCV:
+    adapted, _ = apply_contract(
+        cv,
+        analysis=_analysis(role_type="Data Analyst"),
+        job_title="Data Analyst",
+        allowed_skills_lower={skill.lower() for skills in supported.values() for skill in skills},
+        supported_skills_by_category=supported,
+        contracts={
+            "_global_baseline": {"enabled": False},
+            "data_analyst": {
+                "must_show": must_show or {},
+                "category_order": category_order or [],
+            },
+        },
+    )
+    return adapted
+
+
+def test_llm_order_precedes_additions_to_existing_and_new_categories() -> None:
+    cv = _cv(
+        {
+            "data_analysis": ["SQL", "Python"],
+            "ml_ai": ["scikit-learn", "PyTorch"],
+        }
+    )
+    # The explicit LLM order, not the order of blocks or the role's priority,
+    # determines which category the reader sees first.
+    cv.skills_order = ["ml_ai", "data_analysis"]
+    before = cv.model_dump()
+
+    adapted = _apply_order_contract(
+        cv,
+        supported={
+            "data_analysis": ["Python", "SQL", "pandas"],
+            "ml_ai": ["PyTorch", "scikit-learn"],
+            "data_infra": ["Docker", "Git"],
+        },
+        must_show={"data_analysis": ["pandas"], "data_infra": ["Docker", "Git"]},
+        category_order=["data_infra", "data_analysis", "ml_ai"],
+    )
+
+    assert adapted.skills_order == ["ml_ai", "data_analysis", "data_infra"]
+    assert [(block.category_id, block.skills) for block in adapted.selected_skills] == [
+        ("ml_ai", ["scikit-learn", "PyTorch"]),
+        ("data_analysis", ["SQL", "Python", "pandas"]),
+        ("data_infra", ["Docker", "Git"]),
+    ]
+    assert cv.model_dump() == before
+
+
+def test_code_added_duplicate_does_not_take_the_original_llm_category() -> None:
+    cv = _cv(
+        {
+            "ml_ai": ["PyTorch", "NLP", "Transformers"],
+            "computer_vision": ["PyTorch", "OpenCV"],
+            "data_analysis": ["SQL", "Python"],
+        }
+    )
+    # Simulate an offer guard that has already added a more specific category.
+    # Its duplicate PyTorch must not displace the original LLM selection.
+    cv.llm_selected_skills = [
+        SkillSelectionBlock(category_id="ml_ai", skills=["PyTorch", "NLP", "Transformers"])
+    ]
+
+    adapted = _apply_order_contract(
+        cv,
+        supported={
+            "ml_ai": ["PyTorch", "NLP", "Transformers"],
+            "computer_vision": ["PyTorch", "OpenCV"],
+            "data_analysis": ["SQL", "Python"],
+        },
+        category_order=["computer_vision", "data_analysis", "ml_ai"],
+    )
+
+    assert adapted.skills_order == ["ml_ai", "computer_vision", "data_analysis"]
+    assert [(block.category_id, block.skills) for block in adapted.selected_skills] == [
+        ("ml_ai", ["PyTorch", "NLP", "Transformers"]),
+        ("computer_vision", ["OpenCV"]),
+        ("data_analysis", ["SQL", "Python"]),
+    ]
+    # The order correction changes neither the selected set nor the additions.
+    assert {skill for block in adapted.selected_skills for skill in block.skills} == {
+        "PyTorch", "NLP", "Transformers", "OpenCV", "SQL", "Python"
+    }
+
+
+@pytest.mark.parametrize(
+    ("llm_order", "expected_order"),
+    [
+        ([], ["data_analysis", "ml_ai", "data_infra"]),
+        (["ml_ai"], ["ml_ai", "data_analysis", "data_infra"]),
+        (
+            ["unknown", "ml_ai", "ml_ai", "stats_signal"],
+            ["ml_ai", "data_analysis", "data_infra"],
+        ),
+    ],
+)
+def test_missing_or_partial_llm_order_keeps_remaining_selected_blocks(
+    llm_order: list[str], expected_order: list[str]
+) -> None:
+    selected = {
+        "data_analysis": ["SQL", "Python"],
+        "ml_ai": ["PyTorch", "scikit-learn"],
+        "data_infra": ["Docker", "Git"],
+    }
+    cv = _cv({**selected, "stats_signal": ["Invented framework"]})
+    cv.skills_order = llm_order
+
+    adapted = _apply_order_contract(
+        cv,
+        supported={**selected, "stats_signal": ["Mathematical optimization"]},
+        category_order=["data_infra", "ml_ai", "data_analysis"],
+    )
+
+    assert adapted.skills_order == expected_order
+    assert [block.category_id for block in adapted.selected_skills] == expected_order
+    assert _selected_map(adapted) == selected
+
+
+def test_empty_llm_selection_does_not_promote_offer_guard_additions_to_llm_order() -> None:
+    # None means provenance has not been captured; [] means the LLM really
+    # selected no supported skill before the offer guard supplied these blocks.
+    selected = {"data_analysis": ["SQL", "Python"], "data_infra": ["Docker", "Git"]}
+    cv = _cv(selected)
+    cv.llm_selected_skills = []
+
+    adapted = _apply_order_contract(
+        cv,
+        supported=selected,
+        category_order=["data_infra", "data_analysis"],
+    )
+
+    assert adapted.skills_order == ["data_infra", "data_analysis"]
+    assert [block.category_id for block in adapted.selected_skills] == adapted.skills_order
+    assert _selected_map(adapted) == selected

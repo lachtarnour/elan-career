@@ -6,9 +6,8 @@ The contract is a deterministic enrichment step that:
 2. Adds the ``must_show`` skills that are missing, anchoring a coherent
    baseline for the role (e.g. PyTorch + scikit-learn for a Data Scientist).
 3. Fills a minimum number of skills from contract-approved fallback skills.
-4. Reorders ``selected_skills`` and ``skills_order`` with the role contract's
-   ``category_order``. If a contract omits it, the order falls back to
-   ``must_show`` categories, then ``fill_skills``, then the surviving LLM order.
+4. Restores the LLM's category and skill order before automatic complements.
+   The role contract's ``category_order`` only orders newly added categories.
 
 ``forbidden`` and ``allowed_categories`` guide automatic additions only;
 they never veto a catalogue skill already selected by the LLM or offer guard.
@@ -24,7 +23,11 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from smartapply.cv.role_family import KNOWN_ROLE_FAMILIES, classify, has_data_scientist_ia_signal
-from smartapply.cv.skill_selection import normalize_skill_selection
+from smartapply.cv.skill_selection import (
+    normalize_skill_selection,
+    original_skill_selection,
+    restore_skill_selection_order,
+)
 from smartapply.llm import CVSelection, JobAnalysis, SkillSelectionBlock
 from smartapply.utils.skill_terms import skill_term_matches
 
@@ -378,11 +381,11 @@ def _final_category_order(
     baseline_order: list[str],
     observed_order: list[str],
 ) -> list[str]:
-    """Build the display order without changing the selected skills.
+    """Order automatic complements before restoring the original LLM selection.
 
     ``category_order`` in the JSON is the role-specific presentation strategy.
-    Categories not listed there still survive after the configured priorities,
-    preserving their original arrival order from the LLM/contract additions.
+    The final restoration puts original LLM categories first. This priority
+    therefore only determines the relative order of entirely added categories.
     """
     priority = _contract_category_priority(
         contract,
@@ -414,9 +417,10 @@ def apply_contract(
         allowed_skills_lower=allowed_skills_lower,
         supported_skills_by_category=supported_skills_by_category,
     )
+    original = original_skill_selection(adapted)
     contract = contracts.get(family)
     if contract is None:
-        return adapted, family
+        return restore_skill_selection_order(adapted, original), family
 
     allowed_categories = set(contract.get("allowed_categories", []))
     forbidden_active = _active_forbidden(contract, analysis)
@@ -480,12 +484,10 @@ def apply_contract(
     new_selected = [
         SkillSelectionBlock(category_id=cid, skills=filtered[cid]) for cid in final_order
     ]
-    return (
-        adapted.model_copy(
-            update={
-                "selected_skills": new_selected,
-                "skills_order": list(final_order),
-            }
-        ),
-        family,
+    enriched = adapted.model_copy(
+        update={
+            "selected_skills": new_selected,
+            "skills_order": list(final_order),
+        }
     )
+    return restore_skill_selection_order(enriched, original), family

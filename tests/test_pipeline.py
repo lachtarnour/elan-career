@@ -1182,13 +1182,14 @@ def test_application_selects_cv_then_generates_summary_and_letter_then_persists_
         application = session.get(Application, report.application_id)
         assert application is not None
         assert application.cv_json["selected_skills"]
+        assert application.cv_json["llm_selected_skills"] == []
         assert [reason["project_id"] for reason in application.cv_json["project_selection_reasons"]] == (
             application.cv_json["selected_project_ids"]
         )
         final_cv = {
             key: value
             for key, value in application.cv_json.items()
-            if key not in {"warnings", "project_selection_reasons"}
+            if key not in {"warnings", "project_selection_reasons", "llm_selected_skills"}
         }
         profile = get_profile()
         for call in calls[1:]:
@@ -1502,7 +1503,7 @@ def test_confirmed_cv_title_correction_is_persisted_and_rendered_without_reassem
         assert {
             key: value
             for key, value in application.cv_json.items()
-            if key not in {"warnings", "project_selection_reasons"}
+            if key not in {"warnings", "project_selection_reasons", "llm_selected_skills"}
         } == expected_cv
         assert [reason["project_id"] for reason in application.cv_json["project_selection_reasons"]] == (
             application.cv_json["selected_project_ids"]

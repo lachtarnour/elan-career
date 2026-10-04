@@ -217,11 +217,11 @@ _SKILLS_GOLDENS = [
         ["PyTorch", "FAISS"],
         ["RAG"],
         {
+            "data_infra": ["Docker", "Git", "AWS"],
             "ml_ai": ["NLP", "PyTorch", "scikit-learn", "TensorFlow"],
+            "generative_agentic_ai": ["FAISS", "RAG"],
             "data_analysis": ["pandas", "Python", "SQL", "R", "NumPy"],
             "stats_signal": ["Markov chains", "Time-series analysis"],
-            "data_infra": ["Docker", "Git", "AWS"],
-            "generative_agentic_ai": ["FAISS", "RAG"],
         },
     ),
     (
@@ -230,9 +230,9 @@ _SKILLS_GOLDENS = [
         ["GCP"],
         {
             "data_infra": ["Docker", "Git", "Spark", "CI/CD", "AWS"],
-            "data_analysis": ["pandas", "SQL", "Python"],
             "ml_ai": ["NLP", "Hugging Face"],
             "generative_agentic_ai": ["FAISS", "LangChain"],
+            "data_analysis": ["pandas", "SQL", "Python"],
             "stats_signal": ["Markov chains", "Time-series analysis"],
         },
     ),
@@ -241,7 +241,7 @@ _SKILLS_GOLDENS = [
         ["LangChain", "RAG"],
         ["FAISS"],
         {
-            "generative_agentic_ai": ["FAISS", "LangChain", "RAG", "Vector search"],
+            "data_infra": ["Docker", "Git", "FastAPI", "AWS"],
             "ml_ai": [
                 "NLP",
                 "Transformers",
@@ -250,7 +250,7 @@ _SKILLS_GOLDENS = [
                 "TensorFlow",
                 "scikit-learn",
             ],
-            "data_infra": ["Docker", "Git", "FastAPI", "AWS"],
+            "generative_agentic_ai": ["FAISS", "LangChain", "RAG", "Vector search"],
             "data_analysis": ["pandas", "SQL"],
             "stats_signal": ["Markov chains", "Time-series analysis"],
         },
@@ -278,3 +278,23 @@ def test_fixed_selection_skills_do_not_depend_on_summary(
     if role == "LLM Engineer" and route == "application":
         assert "Python" in cv.professional_summary
         assert "Python" not in {skill for block in cv.selected_skills for skill in block.skills}
+
+
+@pytest.mark.parametrize("route", ["cv", "application"])
+def test_explicit_llm_category_order_survives_offer_recovery_and_generation(profile, route):
+    role, required, keywords, expected = _SKILLS_GOLDENS[0]
+    response = _response(role, "Built reproducible Python workflows.", required[0])
+    response.skills_order = [
+        "stats_signal",
+        "generative_agentic_ai",
+        "data_infra",
+        "data_analysis",
+        "ml_ai",
+    ]
+
+    cv, _ = _generate(profile, _analysis(role, required, keywords), response, route)
+    cv, _ = CvValidator(profile).auto_fix(cv)
+
+    assert {block.category_id: block.skills for block in cv.selected_skills} == expected
+    assert [block.category_id for block in cv.selected_skills] == response.skills_order
+    assert cv.skills_order == response.skills_order

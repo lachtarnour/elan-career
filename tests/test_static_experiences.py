@@ -345,11 +345,14 @@ def test_final_cv_snapshot_loads_legacy_storage_and_preserves_new_audit() -> Non
         **legacy_payload,
         "project_selection_reasons": [],
         "selected_certificate_ids": None,
+        "llm_selected_skills": None,
     }
     draft = ApplicationDraft(**_payload(ApplicationDraft))
     assembled = assemble_cv(draft, profile)
     assert (
-        assembled.model_dump(exclude={"project_selection_reasons", "selected_certificate_ids"})
+        assembled.model_dump(exclude={
+            "project_selection_reasons", "selected_certificate_ids", "llm_selected_skills",
+        })
         == legacy_payload
     )
     assert assembled.project_selection_reasons == draft.project_selection_reasons

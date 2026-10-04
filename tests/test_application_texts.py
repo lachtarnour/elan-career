@@ -85,6 +85,7 @@ def test_selection_schema_has_no_summary_and_text_schema_cannot_reselect_cv(text
 
 def test_second_call_sees_frozen_cv_and_only_adds_summary_without_adding_skills(text_inputs):
     profile, cv, analysis, context = text_inputs
+    cv.llm_selected_skills = [block.model_copy(deep=True) for block in cv.selected_skills]
     before = cv.model_dump()
     profile_before = profile.model_dump()
     # SQL is declared in the profile but deliberately absent from the approved
@@ -121,8 +122,9 @@ def test_second_call_sees_frozen_cv_and_only_adds_summary_without_adding_skills(
     context_start = call["user"].rfind("{", 0, source_position)
     sources, _ = json.JSONDecoder().raw_decode(call["user"][context_start:])
     assert sources["final_cv"]["data"] == cv.model_dump(
-        exclude={"warnings", "project_selection_reasons"}
+        exclude={"warnings", "project_selection_reasons", "llm_selected_skills"}
     )
+    assert "llm_selected_skills" not in sources["final_cv"]["data"]
     assert "professional_summary" not in sources["final_cv"]["data"]
     assert sources["job_offer"]["full_description"] == context["job_description"]
     assert [project["id"] for project in sources["selected_project_evidence"]] == (
