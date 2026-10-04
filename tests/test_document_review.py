@@ -494,7 +494,7 @@ def test_legacy_adapt_application_no_longer_generates_a_joint_application_draft(
     profile, cv, letter, analysis = documents
     personalization = CVSelection.model_validate(
         {
-            **cv.model_dump(exclude={"selected_experiences", "professional_summary"}),
+            **cv.model_dump(include=set(CVSelection.model_fields)),
             "selected_certificate_ids": [],
             "project_selection_reasons": [
                 {
@@ -557,7 +557,7 @@ def test_legacy_adapt_application_keeps_documents_and_diagnostics_despite_review
     profile, cv, letter, analysis = documents
     personalization = CVSelection.model_validate(
         {
-            **cv.model_dump(exclude={"selected_experiences", "professional_summary"}),
+            **cv.model_dump(include=set(CVSelection.model_fields)),
             "selected_certificate_ids": [],
             "project_selection_reasons": [
                 {

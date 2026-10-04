@@ -1,23 +1,19 @@
 """Apply a role-family contract to an LLM-produced CV.
 
-The contract is a deterministic post-filter that:
-1. Strips skills listed in ``forbidden`` (except when an explicit
-   ``required_skill`` from the offer matches the term — in that case the
-   forbidden lock lifts for that specific skill, on the assumption that the
-   offer truly wants it).
-2. Drops blocks whose ``category_id`` is not in ``allowed_categories``,
-   unless one of their skills survived as offer-anchored (i.e. it appeared in
-   ``required_skills`` or ``cv_keywords_to_include``).
-3. Adds the ``must_show`` skills that are missing, anchoring a coherent
+The contract is a deterministic enrichment step that:
+1. Preserves every selected skill present in the candidate's display catalogue,
+   even when the detected family would not normally include it.
+2. Adds the ``must_show`` skills that are missing, anchoring a coherent
    baseline for the role (e.g. PyTorch + scikit-learn for a Data Scientist).
-4. Fills a minimum number of skills from contract-approved fallback skills.
-5. Reorders ``selected_skills`` and ``skills_order`` with the role contract's
-   ``category_order``. If a contract omits it, the order falls back to
-   ``must_show`` categories, then ``fill_skills``, then the surviving LLM order.
+3. Fills a minimum number of skills from eligible fallback skills, using the
+   configured per-category addition priority.
+4. Restores the LLM's category and skill order before automatic complements.
+   The role contract's ``category_order`` only orders newly added categories.
 
-The contract operates on canonical profile skills only — anything that does
-not exist in the candidate's ``allowed_skills`` whitelist is silently
-ignored, so the contract can never reintroduce an unsupported claim.
+``forbidden`` and ``allowed_categories`` guide automatic additions only;
+they never veto a catalogue skill already selected by the LLM or offer guard.
+Only skills in the candidate's ``allowed_skills`` whitelist may survive or be
+added. Deduplication can remove repeated occurrences, never the skill itself.
 """
 
 from __future__ import annotations
@@ -28,6 +24,11 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from smartapply.cv.role_family import KNOWN_ROLE_FAMILIES, classify, has_data_scientist_ia_signal
+from smartapply.cv.skill_selection import (
+    normalize_skill_selection,
+    original_skill_selection,
+    restore_skill_selection_order,
+)
 from smartapply.llm import CVSelection, JobAnalysis, SkillSelectionBlock
 from smartapply.utils.skill_terms import skill_term_matches
 
@@ -84,7 +85,7 @@ def _active_forbidden(
     contract: dict[str, Any],
     analysis: JobAnalysis,
 ) -> set[str]:
-    """``forbidden`` minus the terms explicitly requested by the offer."""
+    """Block automatic additions unless the offer explicitly requests them."""
     forbidden = {_normalize(s) for s in contract.get("forbidden", []) if s}
     if not forbidden:
         return set()
@@ -138,6 +139,24 @@ def _string_list(value: Any) -> list[str]:
     return [item for item in value if isinstance(item, str) and item]
 
 
+def _prioritized_skills(
+    category_id: str,
+    skills: list[str],
+    contracts: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Rank existing candidates; priority never grants eligibility or adds skills.
+
+    Unranked candidates retain their relative order after ranked candidates.
+    Missing configuration therefore preserves the previous traversal order.
+    """
+    priorities = contracts.get("_skill_addition_priority", {})
+    configured = priorities.get(category_id) if isinstance(priorities, dict) else None
+    ranks: dict[str, int] = {}
+    for skill in _string_list(configured):
+        ranks.setdefault(_normalize(skill), len(ranks))
+    return sorted(skills, key=lambda skill: ranks.get(_normalize(skill), len(ranks)))
+
+
 def _add_skill_if_supported(
     skills_by_category: dict[str, list[str]],
     category_order: list[str],
@@ -169,6 +188,7 @@ def _fill_minimum_skills(
     category_order: list[str],
     *,
     contract: dict[str, Any],
+    contracts: dict[str, dict[str, Any]],
     allowed_categories: set[str],
     forbidden_active: set[str],
     allowed_skills_lower: set[str],
@@ -184,18 +204,17 @@ def _fill_minimum_skills(
             continue
         if not isinstance(skills, list):
             continue
-        for skill in skills:
+        for skill in _prioritized_skills(cid, _string_list(skills), contracts):
             if _selected_skill_count(filtered) >= min_total:
                 return
-            if isinstance(skill, str):
-                _add_skill_if_supported(
-                    filtered,
-                    category_order,
-                    category_id=cid,
-                    skill=skill,
-                    forbidden_active=forbidden_active,
-                    allowed_skills_lower=allowed_skills_lower,
-                )
+            _add_skill_if_supported(
+                filtered,
+                category_order,
+                category_id=cid,
+                skill=skill,
+                forbidden_active=forbidden_active,
+                allowed_skills_lower=allowed_skills_lower,
+            )
 
 
 def _apply_global_baseline(
@@ -304,7 +323,8 @@ def _ensure_min_skills_per_category(
 
     This is a deterministic post-LLM polish step. It never invents claims: it
     only uses role must-show skills, role fill skills, the global baseline, or
-    canonical profile skills from the same category.
+    canonical profile skills from the same category. Addition priority applies
+    across these sources, with the existing eligibility checks still decisive.
     """
     if min_per_category <= 1:
         return
@@ -328,28 +348,22 @@ def _ensure_min_skills_per_category(
             baseline_skills.get(cid, []),
             supported_for_category,
         )
-        for candidates in candidate_groups:
-            if not isinstance(candidates, list):
+        candidates = [skill for group in candidate_groups for skill in _string_list(group)]
+        for skill in _prioritized_skills(cid, candidates, contracts):
+            norm = _normalize(skill)
+            if supported_norms and norm not in supported_norms:
                 continue
-            for skill in candidates:
-                if not isinstance(skill, str):
-                    continue
-                norm = _normalize(skill)
-                if supported_norms and norm not in supported_norms:
-                    continue
-                if _skill_exists_anywhere(filtered, skill):
-                    continue
-                added = _add_skill_if_supported(
-                    filtered,
-                    category_order,
-                    category_id=cid,
-                    skill=skill,
-                    forbidden_active=forbidden_active,
-                    allowed_skills_lower=allowed_skills_lower,
-                )
-                if added and len(filtered.get(cid, [])) >= min_per_category:
-                    break
-            if len(filtered.get(cid, [])) >= min_per_category:
+            if _skill_exists_anywhere(filtered, skill):
+                continue
+            added = _add_skill_if_supported(
+                filtered,
+                category_order,
+                category_id=cid,
+                skill=skill,
+                forbidden_active=forbidden_active,
+                allowed_skills_lower=allowed_skills_lower,
+            )
+            if added and len(filtered.get(cid, [])) >= min_per_category:
                 break
 
 
@@ -381,11 +395,11 @@ def _final_category_order(
     baseline_order: list[str],
     observed_order: list[str],
 ) -> list[str]:
-    """Build the display order without changing the selected skills.
+    """Order automatic complements before restoring the original LLM selection.
 
     ``category_order`` in the JSON is the role-specific presentation strategy.
-    Categories not listed there still survive after the configured priorities,
-    preserving their original arrival order from the LLM/contract additions.
+    The final restoration puts original LLM categories first. This priority
+    therefore only determines the relative order of entirely added categories.
     """
     priority = _contract_category_priority(
         contract,
@@ -412,36 +426,23 @@ def apply_contract(
     family = classify(analysis, title=job_title)
     contracts = contracts or load_contracts()
     supported_skills_by_category = supported_skills_by_category or {}
+    adapted = normalize_skill_selection(
+        adapted,
+        allowed_skills_lower=allowed_skills_lower,
+        supported_skills_by_category=supported_skills_by_category,
+    )
+    original = original_skill_selection(adapted)
     contract = contracts.get(family)
     if contract is None:
-        return adapted, family
+        return restore_skill_selection_order(adapted, original), family
 
     allowed_categories = set(contract.get("allowed_categories", []))
     forbidden_active = _active_forbidden(contract, analysis)
-    offer_terms = _offer_anchored_skills(analysis)
     must_show = _augmented_must_show(family, contract, analysis, job_title)
 
-    # Build the filtered selection. Preserve LLM ordering for kept categories.
-    filtered: dict[str, list[str]] = {}
-    category_order: list[str] = []
-    for block in adapted.selected_skills:
-        cid = block.category_id
-        kept: list[str] = []
-        for skill in block.skills:
-            if _normalize(skill) in forbidden_active:
-                continue
-            kept.append(skill)
-        if not kept:
-            continue
-        if allowed_categories and cid not in allowed_categories:
-            # Keep only the skills explicitly required by the offer — the
-            # category survives only if at least one such skill remains.
-            offer_kept = [skill for skill in kept if _is_explicit_offer_skill(skill, offer_terms)]
-            if not offer_kept:
-                continue
-            kept = offer_kept
-        filtered[cid] = kept
-        category_order.append(cid)
+    # Family rules guide additions, not deletion of an existing valid selection.
+    filtered = {block.category_id: list(block.skills) for block in adapted.selected_skills}
+    category_order = list(filtered)
 
     # Add must_show skills that are missing (must already exist in the
     # candidate's profile whitelist — never invent).
@@ -463,6 +464,7 @@ def apply_contract(
         filtered,
         category_order,
         contract=contract,
+        contracts=contracts,
         allowed_categories=allowed_categories,
         forbidden_active=forbidden_active,
         allowed_skills_lower=allowed_skills_lower,
@@ -495,14 +497,18 @@ def apply_contract(
     )
 
     new_selected = [
-        SkillSelectionBlock(category_id=cid, skills=filtered[cid]) for cid in final_order
+        SkillSelectionBlock(
+            category_id=cid,
+            skills=_prioritized_skills(cid, filtered[cid], contracts),
+        )
+        for cid in final_order
     ]
-    return (
-        adapted.model_copy(
-            update={
-                "selected_skills": new_selected,
-                "skills_order": list(final_order),
-            }
-        ),
-        family,
+    # Restoration puts original LLM skills back first in their exact order;
+    # only the automatic suffix retains the addition priority above.
+    enriched = adapted.model_copy(
+        update={
+            "selected_skills": new_selected,
+            "skills_order": list(final_order),
+        }
     )
+    return restore_skill_selection_order(enriched, original), family

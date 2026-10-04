@@ -41,8 +41,9 @@ def _analysis(role: str, required: list[str], keywords: list[str]) -> JobAnalysi
 
 
 def _response(title: str, summary: str, offer_evidence: str) -> CVPersonalization:
-    # Deliberately mixes relevant/off-role skills and duplicates. The adapter
-    # must still recover offer skills, apply baselines and filter/order.
+    # Deliberately mixes role-specific skills and duplicates. The adapter
+    # must retain catalogue-backed selections, recover offer skills, add
+    # baselines and display each skill only once per category.
     selected = {
         "data_infra": ["Docker", "Git", "Git"],
         "ml_ai": ["NLP"],
@@ -188,6 +189,9 @@ def test_documented_letter_tool_does_not_open_the_display_catalogue(profile):
         "application",
         letter_body=letter_text,
     )
+    assert "Whisper" not in {
+        skill for block in cv.selected_skills for skill in block.skills
+    }
     cleaned, removed = CvValidator(profile).auto_fix(cv)
     selected = {skill for block in cleaned.selected_skills for skill in block.skills}
 
@@ -196,25 +200,29 @@ def test_documented_letter_tool_does_not_open_the_display_catalogue(profile):
     assert "Whisper" not in selected
     assert "Speech-to-text" in selected
     assert selected <= profile.skills.allowed_skills
-    assert "selected_skill:Whisper" in removed
+    assert removed == []
     assert cleaned.selected_experiences == profile_experiences(profile)
     assert any("Whisper" in b.text for exp in cleaned.selected_experiences for b in exp.bullets)
 
 
-# Keep the Skills contract explicit: offer recovery, role filtering, baseline
-# completion and display ordering happen before the summary is generated.
+# Keep the Skills contract explicit: offer recovery, catalogue normalization,
+# baseline completion and display ordering happen before the summary is generated.
 # In the LLM case, Python was formerly inserted only because the summary named
 # it; that dependency is intentionally removed, preserving the selected content.
+# Preserved categories reach Data Engineer's minimum skill count without NumPy;
+# the one-skill category polish still appends a second supported skill per block.
+# Automatic choices and their display suffix use the configured category priority.
 _SKILLS_GOLDENS = [
     (
         "Data Scientist",
         ["PyTorch", "FAISS"],
         ["RAG"],
         {
-            "ml_ai": ["NLP", "PyTorch", "scikit-learn", "TensorFlow"],
-            "data_analysis": ["pandas", "Python", "SQL", "R", "NumPy"],
             "data_infra": ["Docker", "Git", "AWS"],
+            "ml_ai": ["NLP", "PyTorch", "scikit-learn", "TensorFlow"],
             "generative_agentic_ai": ["FAISS", "RAG"],
+            "data_analysis": ["pandas", "Python", "SQL", "NumPy", "R"],
+            "stats_signal": ["Markov chains", "Monte Carlo methods"],
         },
     ),
     (
@@ -222,8 +230,11 @@ _SKILLS_GOLDENS = [
         ["Spark", "SQL"],
         ["GCP"],
         {
-            "data_infra": ["Docker", "Git", "Spark", "CI/CD", "AWS"],
-            "data_analysis": ["pandas", "SQL", "Python", "NumPy"],
+            "data_infra": ["Docker", "Git", "CI/CD", "AWS", "Spark"],
+            "ml_ai": ["NLP", "Anomaly detection"],
+            "generative_agentic_ai": ["FAISS", "LangChain"],
+            "data_analysis": ["pandas", "Python", "SQL"],
+            "stats_signal": ["Markov chains", "Monte Carlo methods"],
         },
     ),
     (
@@ -231,17 +242,17 @@ _SKILLS_GOLDENS = [
         ["LangChain", "RAG"],
         ["FAISS"],
         {
-            "generative_agentic_ai": ["FAISS", "LangChain", "RAG", "Vector search"],
+            "data_infra": ["Docker", "Git", "FastAPI", "AWS"],
             "ml_ai": [
                 "NLP",
-                "Transformers",
-                "Fine-tuning",
                 "PyTorch",
-                "TensorFlow",
                 "scikit-learn",
+                "TensorFlow",
+                "Transformers",
             ],
-            "data_infra": ["Docker", "Git", "FastAPI", "AWS"],
+            "generative_agentic_ai": ["FAISS", "LangChain", "RAG", "Vector search"],
             "data_analysis": ["pandas", "SQL"],
+            "stats_signal": ["Markov chains", "Monte Carlo methods"],
         },
     ),
 ]
@@ -267,3 +278,23 @@ def test_fixed_selection_skills_do_not_depend_on_summary(
     if role == "LLM Engineer" and route == "application":
         assert "Python" in cv.professional_summary
         assert "Python" not in {skill for block in cv.selected_skills for skill in block.skills}
+
+
+@pytest.mark.parametrize("route", ["cv", "application"])
+def test_explicit_llm_category_order_survives_offer_recovery_and_generation(profile, route):
+    role, required, keywords, expected = _SKILLS_GOLDENS[0]
+    response = _response(role, "Built reproducible Python workflows.", required[0])
+    response.skills_order = [
+        "stats_signal",
+        "generative_agentic_ai",
+        "data_infra",
+        "data_analysis",
+        "ml_ai",
+    ]
+
+    cv, _ = _generate(profile, _analysis(role, required, keywords), response, route)
+    cv, _ = CvValidator(profile).auto_fix(cv)
+
+    assert {block.category_id: block.skills for block in cv.selected_skills} == expected
+    assert [block.category_id for block in cv.selected_skills] == response.skills_order
+    assert cv.skills_order == response.skills_order

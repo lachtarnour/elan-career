@@ -157,7 +157,8 @@ def build_document_context(
             # Warnings can contain the drafting model's reasoning; the reviewer
             # receives final text and source facts, never that self-assessment.
             "data": adapted_cv.model_dump(
-                mode="json", exclude={"warnings", "project_selection_reasons"}
+                mode="json",
+                exclude={"warnings", "project_selection_reasons", "llm_selected_skills"},
             ),
         },
         "candidate_evidence_scope": {

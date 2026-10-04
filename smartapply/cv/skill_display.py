@@ -49,7 +49,8 @@ def compact_sparse_secondary_categories(
 ) -> tuple[AdaptedCV, tuple[SkillDisplayMerge, ...]]:
     """Return a render-only CV copy with sparse secondary blocks compacted.
 
-    A category is secondary when it is outside the primary role contract's
+    Original LLM categories remain standalone to preserve their display order.
+    A code-added category is secondary when it is outside the primary role contract's
     ``allowed_categories``. Categories containing at least
     ``min_standalone_skills`` remain standalone. Smaller ones are folded into
     the nearest compatible category already present. The canonical ``adapted``
@@ -68,14 +69,19 @@ def compact_sparse_secondary_categories(
         for category_id in contract.get("allowed_categories", [])
         if isinstance(category_id, str)
     }
-    protected_categories = protected_categories or set()
+    protected_categories = set(protected_categories or ())
+    if adapted.llm_selected_skills is not None:
+        protected_categories.update(block.category_id for block in adapted.llm_selected_skills)
     if not allowed_categories:
         return adapted, ()
 
-    category_order = [block.category_id for block in adapted.selected_skills]
     skills_by_category = {
         block.category_id: list(block.skills) for block in adapted.selected_skills
     }
+    category_order = [
+        cid for cid in dict.fromkeys([*adapted.skills_order, *skills_by_category])
+        if cid in skills_by_category
+    ]
     merges: list[SkillDisplayMerge] = []
 
     for source_category in list(category_order):

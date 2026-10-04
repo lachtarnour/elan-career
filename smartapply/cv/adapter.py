@@ -13,6 +13,7 @@ from smartapply.cv.project_selection import (
 )
 from smartapply.cv.role_contracts import apply_contract
 from smartapply.cv.selector import CvBlockSelector, SelectionResult
+from smartapply.cv.skill_selection import normalize_skill_selection
 from smartapply.llm import (
     AdaptedCV,
     AssembledCV,
@@ -242,6 +243,13 @@ class CvAdapter:
         appear in the CV skills block; unsupported terms such as Kubernetes
         remain excluded.
         """
+        adapted = normalize_skill_selection(
+            adapted,
+            allowed_skills_lower={skill.lower() for skill in self.profile.skills.allowed_skills},
+            supported_skills_by_category={
+                category.id: list(category.skills) for category in self.profile.skills.categories
+            },
+        )
         category_by_skill: dict[str, str] = {}
         canonical_by_skill: dict[str, str] = {}
         for category in self.profile.skills.categories:
@@ -291,7 +299,7 @@ class CvAdapter:
         analysis: JobAnalysis,
         job_title: str,
     ) -> AssembledCV:
-        """Strip off-role skills and anchor a coherent baseline per family."""
+        """Preserve supported selections and add the role-family baseline."""
         allowed_skills_lower = {s.lower() for s in self.profile.skills.allowed_skills}
         supported_skills_by_category = {
             category.id: list(category.skills) for category in self.profile.skills.categories

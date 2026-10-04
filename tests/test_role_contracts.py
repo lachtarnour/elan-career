@@ -1,15 +1,13 @@
-"""Tests for the role-family classifier and the post-LLM skill contract.
+"""Tests for role-family classification and post-LLM skill composition.
 
-These tests pin the behaviour the V1 contract is meant to guarantee:
-- No FAISS / Markov / RL skills on roles that don't ask for them.
-- Data Scientist roles keep a minimal ML/IA baseline.
-- Data Scientist offers with AI/NLP signals get NLP + Transformers.
-- Analytics / Software offers strip Flask/FastAPI/NLP unless explicit.
-- LLM offers anchor RAG + FAISS + Vector search.
-- Explicit ``required_skills`` lifts the forbidden lock for that term.
+The contract retains catalogue-backed skills selected by the LLM, including
+skills outside a family's usual categories. Family rules still govern automatic
+additions and supply a baseline when the LLM selection is sparse.
 """
 
 from __future__ import annotations
+
+import pytest
 
 from smartapply.cv.role_contracts import apply_contract, load_contracts
 from smartapply.cv.role_family import (
@@ -170,21 +168,96 @@ def test_data_scientist_anchors_ml_baseline():
     assert "NLP" not in selected.get("ml_ai", [])
 
 
-def test_explicit_required_skill_lifts_forbidden_lock():
-    """If an Analytics offer explicitly requires NLP, NLP survives."""
-    cv = _cv(
-        {
-            "data_analysis": ["SQL", "Python"],
-            "ml_ai": ["NLP"],
-        }
-    )
-    analysis = _analysis(
-        role_type="Analytics Engineer",
-        required=["NLP"],
-    )
-    adapted, _family = _apply(cv, analysis, "Analytics Engineer")
+def test_explicit_required_skill_lifts_forbidden_lock_for_automatic_additions():
+    """A requested skill may be added despite a role-family forbidden rule."""
+    analysis = _analysis(role_type="Data Analyst", required=["Git"])
+    adapted, _family = _apply(_cv({}), analysis, "Data Analyst")
     selected = _selected_map(adapted)
-    assert "NLP" in selected.get("ml_ai", [])
+    assert "Git" in selected.get("data_infra", [])
+
+
+@pytest.mark.parametrize(
+    ("title", "analysis", "category", "llm_skills", "expected_family"),
+    [
+        (
+            "Data Analyst",
+            _analysis(role_type="Data Analyst", nice_to_have=["Git", "CI/CD"]),
+            "data_infra",
+            ["Git", "CI/CD"],
+            "data_analyst",
+        ),
+        (
+            "PhD Researcher in Model Compression",
+            _analysis(
+                role_type="PhD Researcher",
+                main_tasks=["Optimize compressed self-supervised models"],
+            ),
+            "stats_signal",
+            ["Mathematical optimization"],
+            "other",
+        ),
+        (
+            "Research Scientist - Speech/Audio Machine Learning",
+            _analysis(
+                role_type="Research Scientist Speech/Audio Machine Learning",
+                required=["Transformer-based audio LLMs"],
+            ),
+            "speech_audio",
+            ["Pyannote", "openSMILE"],
+            "llm_engineer",
+        ),
+        (
+            "Développeur IA / LLM",
+            _analysis(role_type="Développeur IA / LLM", required=["Computer Vision"]),
+            "computer_vision",
+            ["OpenCV", "Facial affect estimation"],
+            "llm_engineer",
+        ),
+    ],
+)
+def test_contract_keeps_catalogue_skills_selected_by_llm_across_family_boundaries(
+    title: str,
+    analysis: JobAnalysis,
+    category: str,
+    llm_skills: list[str],
+    expected_family: str,
+) -> None:
+    adapted, family = _apply(_cv({category: llm_skills}), analysis, title)
+
+    assert family == expected_family
+    displayed = _selected_map(adapted)[category]
+    assert [skill for skill in displayed if skill in llm_skills] == llm_skills
+
+
+def test_contract_does_not_keep_uncatalogued_llm_skill() -> None:
+    adapted, _ = _apply(
+        _cv({"data_analysis": ["Python", "Invented framework", "SQL"]}),
+        _analysis(role_type="Data Analyst"),
+        "Data Analyst",
+    )
+
+    selected = _selected_map(adapted)
+    assert "Invented framework" not in {
+        skill for skills in selected.values() for skill in skills
+    }
+    assert [skill for skill in selected["data_analysis"] if skill in {"Python", "SQL"}] == [
+        "Python",
+        "SQL",
+    ]
+
+
+def test_family_forbidden_still_gates_automatic_baseline_additions() -> None:
+    adapted, family = _apply(
+        _cv({}),
+        _analysis(role_type="Data Analyst"),
+        "Data Analyst",
+    )
+
+    assert family == "data_analyst"
+    selected = _selected_map(adapted)
+    # The global baseline proposes these skills, but the analyst contract
+    # forbids adding them unless the offer explicitly asks for them.
+    assert not {"Docker", "Git", "AWS"}.intersection(selected.get("data_infra", []))
 
 
 def test_global_baseline_places_sql_in_its_catalogue_category():
@@ -196,3 +269,146 @@ def test_global_baseline_places_sql_in_its_catalogue_category():
     selected = _selected_map(adapted)
     assert "SQL" in selected["data_analysis"]
     assert "SQL" not in selected.get("data_infra", [])
+
+
+def _apply_order_contract(
+    cv: AdaptedCV,
+    *,
+    supported: dict[str, list[str]],
+    must_show: dict[str, list[str]] | None = None,
+    category_order: list[str] | None = None,
+) -> AdaptedCV:
+    adapted, _ = apply_contract(
+        cv,
+        analysis=_analysis(role_type="Data Analyst"),
+        job_title="Data Analyst",
+        allowed_skills_lower={skill.lower() for skills in supported.values() for skill in skills},
+        supported_skills_by_category=supported,
+        contracts={
+            "_global_baseline": {"enabled": False},
+            "data_analyst": {
+                "must_show": must_show or {},
+                "category_order": category_order or [],
+            },
+        },
+    )
+    return adapted
+
+
+def test_llm_order_precedes_additions_to_existing_and_new_categories() -> None:
+    cv = _cv(
+        {
+            "data_analysis": ["SQL", "Python"],
+            "ml_ai": ["scikit-learn", "PyTorch"],
+        }
+    )
+    # The explicit LLM order, not the order of blocks or the role's priority,
+    # determines which category the reader sees first.
+    cv.skills_order = ["ml_ai", "data_analysis"]
+    before = cv.model_dump()
+
+    adapted = _apply_order_contract(
+        cv,
+        supported={
+            "data_analysis": ["Python", "SQL", "pandas"],
+            "ml_ai": ["PyTorch", "scikit-learn"],
+            "data_infra": ["Docker", "Git"],
+        },
+        must_show={"data_analysis": ["pandas"], "data_infra": ["Docker", "Git"]},
+        category_order=["data_infra", "data_analysis", "ml_ai"],
+    )
+
+    assert adapted.skills_order == ["ml_ai", "data_analysis", "data_infra"]
+    assert [(block.category_id, block.skills) for block in adapted.selected_skills] == [
+        ("ml_ai", ["scikit-learn", "PyTorch"]),
+        ("data_analysis", ["SQL", "Python", "pandas"]),
+        ("data_infra", ["Docker", "Git"]),
+    ]
+    assert cv.model_dump() == before
+
+
+def test_code_added_duplicate_does_not_take_the_original_llm_category() -> None:
+    cv = _cv(
+        {
+            "ml_ai": ["PyTorch", "NLP", "Transformers"],
+            "computer_vision": ["PyTorch", "OpenCV"],
+            "data_analysis": ["SQL", "Python"],
+        }
+    )
+    # Simulate an offer guard that has already added a more specific category.
+    # Its duplicate PyTorch must not displace the original LLM selection.
+    cv.llm_selected_skills = [
+        SkillSelectionBlock(category_id="ml_ai", skills=["PyTorch", "NLP", "Transformers"])
+    ]
+
+    adapted = _apply_order_contract(
+        cv,
+        supported={
+            "ml_ai": ["PyTorch", "NLP", "Transformers"],
+            "computer_vision": ["PyTorch", "OpenCV"],
+            "data_analysis": ["SQL", "Python"],
+        },
+        category_order=["computer_vision", "data_analysis", "ml_ai"],
+    )
+
+    assert adapted.skills_order == ["ml_ai", "computer_vision", "data_analysis"]
+    assert [(block.category_id, block.skills) for block in adapted.selected_skills] == [
+        ("ml_ai", ["PyTorch", "NLP", "Transformers"]),
+        ("computer_vision", ["OpenCV"]),
+        ("data_analysis", ["SQL", "Python"]),
+    ]
+    # The order correction changes neither the selected set nor the additions.
+    assert {skill for block in adapted.selected_skills for skill in block.skills} == {
+        "PyTorch", "NLP", "Transformers", "OpenCV", "SQL", "Python"
+    }
+
+
+@pytest.mark.parametrize(
+    ("llm_order", "expected_order"),
+    [
+        ([], ["data_analysis", "ml_ai", "data_infra"]),
+        (["ml_ai"], ["ml_ai", "data_analysis", "data_infra"]),
+        (
+            ["unknown", "ml_ai", "ml_ai", "stats_signal"],
+            ["ml_ai", "data_analysis", "data_infra"],
+        ),
+    ],
+)
+def test_missing_or_partial_llm_order_keeps_remaining_selected_blocks(
+    llm_order: list[str], expected_order: list[str]
+) -> None:
+    selected = {
+        "data_analysis": ["SQL", "Python"],
+        "ml_ai": ["PyTorch", "scikit-learn"],
+        "data_infra": ["Docker", "Git"],
+    }
+    cv = _cv({**selected, "stats_signal": ["Invented framework"]})
+    cv.skills_order = llm_order
+
+    adapted = _apply_order_contract(
+        cv,
+        supported={**selected, "stats_signal": ["Mathematical optimization"]},
+        category_order=["data_infra", "ml_ai", "data_analysis"],
+    )
+
+    assert adapted.skills_order == expected_order
+    assert [block.category_id for block in adapted.selected_skills] == expected_order
+    assert _selected_map(adapted) == selected
+
+
+def test_empty_llm_selection_does_not_promote_offer_guard_additions_to_llm_order() -> None:
+    # None means provenance has not been captured; [] means the LLM really
+    # selected no supported skill before the offer guard supplied these blocks.
+    selected = {"data_analysis": ["SQL", "Python"], "data_infra": ["Docker", "Git"]}
+    cv = _cv(selected)
+    cv.llm_selected_skills = []
+
+    adapted = _apply_order_contract(
+        cv,
+        supported=selected,
+        category_order=["data_infra", "data_analysis"],
+    )
+
+    assert adapted.skills_order == ["data_infra", "data_analysis"]
+    assert [block.category_id for block in adapted.selected_skills] == adapted.skills_order
+    assert _selected_map(adapted) == selected

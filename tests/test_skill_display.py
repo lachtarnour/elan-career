@@ -128,3 +128,35 @@ def test_offer_anchored_category_is_not_compacted() -> None:
 
     assert compacted == original
     assert merges == ()
+
+
+def test_llm_categories_keep_their_order_while_code_categories_can_be_merged() -> None:
+    original = _cv({
+        "data_infra": ["Git", "Docker"],
+        "speech_audio": ["Pyannote", "openSMILE"],
+        "data_analysis": ["Python", "SQL"],
+        "generative_agentic_ai": ["LangChain", "RAG"],
+    })
+    original.skills_order = ["speech_audio", "data_infra", "data_analysis", "generative_agentic_ai"]
+    original.llm_selected_skills = [
+        SkillSelectionBlock(category_id="speech_audio", skills=["Pyannote", "openSMILE"]),
+        SkillSelectionBlock(category_id="data_infra", skills=["Git"]),
+        SkillSelectionBlock(category_id="data_analysis", skills=["Python", "SQL"]),
+    ]
+    before = original.model_dump()
+
+    compacted, merges = compact_sparse_secondary_categories(
+        original, primary_family="data_engineer", contracts=_CONTRACTS,
+    )
+
+    assert compacted.skills_order == ["speech_audio", "data_infra", "data_analysis"]
+    assert [block.category_id for block in compacted.selected_skills] == compacted.skills_order
+    assert _selected(compacted) == {
+        "speech_audio": ["Pyannote", "openSMILE"],
+        "data_infra": ["Git", "Docker", "LangChain", "RAG"],
+        "data_analysis": ["Python", "SQL"],
+    }
+    assert [(merge.source_category, merge.target_category) for merge in merges] == [
+        ("generative_agentic_ai", "data_infra"),
+    ]
+    assert original.model_dump() == before
