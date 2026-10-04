@@ -211,6 +211,7 @@ def test_documented_letter_tool_does_not_open_the_display_catalogue(profile):
 # it; that dependency is intentionally removed, preserving the selected content.
 # Preserved categories reach Data Engineer's minimum skill count without NumPy;
 # the one-skill category polish still appends a second supported skill per block.
+# Automatic choices and their display suffix use the configured category priority.
 _SKILLS_GOLDENS = [
     (
         "Data Scientist",
@@ -220,8 +221,8 @@ _SKILLS_GOLDENS = [
             "data_infra": ["Docker", "Git", "AWS"],
             "ml_ai": ["NLP", "PyTorch", "scikit-learn", "TensorFlow"],
             "generative_agentic_ai": ["FAISS", "RAG"],
-            "data_analysis": ["pandas", "Python", "SQL", "R", "NumPy"],
-            "stats_signal": ["Markov chains", "Time-series analysis"],
+            "data_analysis": ["pandas", "Python", "SQL", "NumPy", "R"],
+            "stats_signal": ["Markov chains", "Monte Carlo methods"],
         },
     ),
     (
@@ -229,11 +230,11 @@ _SKILLS_GOLDENS = [
         ["Spark", "SQL"],
         ["GCP"],
         {
-            "data_infra": ["Docker", "Git", "Spark", "CI/CD", "AWS"],
-            "ml_ai": ["NLP", "Hugging Face"],
+            "data_infra": ["Docker", "Git", "CI/CD", "AWS", "Spark"],
+            "ml_ai": ["NLP", "Anomaly detection"],
             "generative_agentic_ai": ["FAISS", "LangChain"],
-            "data_analysis": ["pandas", "SQL", "Python"],
-            "stats_signal": ["Markov chains", "Time-series analysis"],
+            "data_analysis": ["pandas", "Python", "SQL"],
+            "stats_signal": ["Markov chains", "Monte Carlo methods"],
         },
     ),
     (
@@ -244,15 +245,14 @@ _SKILLS_GOLDENS = [
             "data_infra": ["Docker", "Git", "FastAPI", "AWS"],
             "ml_ai": [
                 "NLP",
-                "Transformers",
-                "Fine-tuning",
                 "PyTorch",
-                "TensorFlow",
                 "scikit-learn",
+                "TensorFlow",
+                "Transformers",
             ],
             "generative_agentic_ai": ["FAISS", "LangChain", "RAG", "Vector search"],
             "data_analysis": ["pandas", "SQL"],
-            "stats_signal": ["Markov chains", "Time-series analysis"],
+            "stats_signal": ["Markov chains", "Monte Carlo methods"],
         },
     ),
 ]

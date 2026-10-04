@@ -5,7 +5,8 @@ The contract is a deterministic enrichment step that:
    even when the detected family would not normally include it.
 2. Adds the ``must_show`` skills that are missing, anchoring a coherent
    baseline for the role (e.g. PyTorch + scikit-learn for a Data Scientist).
-3. Fills a minimum number of skills from contract-approved fallback skills.
+3. Fills a minimum number of skills from eligible fallback skills, using the
+   configured per-category addition priority.
 4. Restores the LLM's category and skill order before automatic complements.
    The role contract's ``category_order`` only orders newly added categories.
 
@@ -138,6 +139,24 @@ def _string_list(value: Any) -> list[str]:
     return [item for item in value if isinstance(item, str) and item]
 
 
+def _prioritized_skills(
+    category_id: str,
+    skills: list[str],
+    contracts: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Rank existing candidates; priority never grants eligibility or adds skills.
+
+    Unranked candidates retain their relative order after ranked candidates.
+    Missing configuration therefore preserves the previous traversal order.
+    """
+    priorities = contracts.get("_skill_addition_priority", {})
+    configured = priorities.get(category_id) if isinstance(priorities, dict) else None
+    ranks: dict[str, int] = {}
+    for skill in _string_list(configured):
+        ranks.setdefault(_normalize(skill), len(ranks))
+    return sorted(skills, key=lambda skill: ranks.get(_normalize(skill), len(ranks)))
+
+
 def _add_skill_if_supported(
     skills_by_category: dict[str, list[str]],
     category_order: list[str],
@@ -169,6 +188,7 @@ def _fill_minimum_skills(
     category_order: list[str],
     *,
     contract: dict[str, Any],
+    contracts: dict[str, dict[str, Any]],
     allowed_categories: set[str],
     forbidden_active: set[str],
     allowed_skills_lower: set[str],
@@ -184,18 +204,17 @@ def _fill_minimum_skills(
             continue
         if not isinstance(skills, list):
             continue
-        for skill in skills:
+        for skill in _prioritized_skills(cid, _string_list(skills), contracts):
             if _selected_skill_count(filtered) >= min_total:
                 return
-            if isinstance(skill, str):
-                _add_skill_if_supported(
-                    filtered,
-                    category_order,
-                    category_id=cid,
-                    skill=skill,
-                    forbidden_active=forbidden_active,
-                    allowed_skills_lower=allowed_skills_lower,
-                )
+            _add_skill_if_supported(
+                filtered,
+                category_order,
+                category_id=cid,
+                skill=skill,
+                forbidden_active=forbidden_active,
+                allowed_skills_lower=allowed_skills_lower,
+            )
 
 
 def _apply_global_baseline(
@@ -304,7 +323,8 @@ def _ensure_min_skills_per_category(
 
     This is a deterministic post-LLM polish step. It never invents claims: it
     only uses role must-show skills, role fill skills, the global baseline, or
-    canonical profile skills from the same category.
+    canonical profile skills from the same category. Addition priority applies
+    across these sources, with the existing eligibility checks still decisive.
     """
     if min_per_category <= 1:
         return
@@ -328,28 +348,22 @@ def _ensure_min_skills_per_category(
             baseline_skills.get(cid, []),
             supported_for_category,
         )
-        for candidates in candidate_groups:
-            if not isinstance(candidates, list):
+        candidates = [skill for group in candidate_groups for skill in _string_list(group)]
+        for skill in _prioritized_skills(cid, candidates, contracts):
+            norm = _normalize(skill)
+            if supported_norms and norm not in supported_norms:
                 continue
-            for skill in candidates:
-                if not isinstance(skill, str):
-                    continue
-                norm = _normalize(skill)
-                if supported_norms and norm not in supported_norms:
-                    continue
-                if _skill_exists_anywhere(filtered, skill):
-                    continue
-                added = _add_skill_if_supported(
-                    filtered,
-                    category_order,
-                    category_id=cid,
-                    skill=skill,
-                    forbidden_active=forbidden_active,
-                    allowed_skills_lower=allowed_skills_lower,
-                )
-                if added and len(filtered.get(cid, [])) >= min_per_category:
-                    break
-            if len(filtered.get(cid, [])) >= min_per_category:
+            if _skill_exists_anywhere(filtered, skill):
+                continue
+            added = _add_skill_if_supported(
+                filtered,
+                category_order,
+                category_id=cid,
+                skill=skill,
+                forbidden_active=forbidden_active,
+                allowed_skills_lower=allowed_skills_lower,
+            )
+            if added and len(filtered.get(cid, [])) >= min_per_category:
                 break
 
 
@@ -450,6 +464,7 @@ def apply_contract(
         filtered,
         category_order,
         contract=contract,
+        contracts=contracts,
         allowed_categories=allowed_categories,
         forbidden_active=forbidden_active,
         allowed_skills_lower=allowed_skills_lower,
@@ -482,8 +497,14 @@ def apply_contract(
     )
 
     new_selected = [
-        SkillSelectionBlock(category_id=cid, skills=filtered[cid]) for cid in final_order
+        SkillSelectionBlock(
+            category_id=cid,
+            skills=_prioritized_skills(cid, filtered[cid], contracts),
+        )
+        for cid in final_order
     ]
+    # Restoration puts original LLM skills back first in their exact order;
+    # only the automatic suffix retains the addition priority above.
     enriched = adapted.model_copy(
         update={
             "selected_skills": new_selected,

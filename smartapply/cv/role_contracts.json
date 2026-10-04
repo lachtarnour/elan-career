@@ -1,4 +1,88 @@
 {
+  "_skill_addition_priority": {
+    "ml_ai": [
+      "PyTorch",
+      "scikit-learn",
+      "NLP",
+      "Tree-based models & boosting",
+      "TensorFlow",
+      "Transformers",
+      "Hugging Face Transformers",
+      "Fine-tuning",
+      "Anomaly detection",
+      "Time-series modeling",
+      "Distributed training (PyTorch DDP)",
+      "RNN",
+      "GNN"
+    ],
+    "generative_agentic_ai": [
+      "LangChain",
+      "LangGraph",
+      "RAG",
+      "Vector search",
+      "FAISS"
+    ],
+    "knowledge_graphs": [
+      "RDF",
+      "SPARQL",
+      "Neo4j"
+    ],
+    "computer_vision": [
+      "Image processing",
+      "torchvision",
+      "OpenCV",
+      "CNNs",
+      "Object detection",
+      "Segmentation",
+      "Facial affect estimation"
+    ],
+    "speech_audio": [
+      "Speech processing",
+      "Speech-to-text",
+      "Speaker diarization",
+      "Pyannote",
+      "openSMILE"
+    ],
+    "data_analysis": [
+      "Python",
+      "SQL",
+      "pandas",
+      "NumPy",
+      "Statistical analysis",
+      "SciPy",
+      "Streamlit / Panel / Plotly",
+      "Polars",
+      "Forecasting",
+      "R"
+    ],
+    "data_infra": [
+      "Git",
+      "Docker",
+      "CI/CD",
+      "FastAPI",
+      "AWS",
+      "Weights & Biases",
+      "Grafana",
+      "Model quantization",
+      "Spark",
+      "Flask",
+      "OVHcloud"
+    ],
+    "stats_signal": [
+      "Data imputation",
+      "Monte Carlo methods",
+      "Mathematical optimization",
+      "ARIMA/SARIMA",
+      "Stationarity tests",
+      "Markov chains"
+    ],
+    "rl": [
+      "Q-learning",
+      "Policy gradients",
+      "MCTS",
+      "SARSA"
+    ]
+  },
   "_global_baseline": {
     "enabled": true,
     "skills": {
