@@ -41,8 +41,9 @@ def _analysis(role: str, required: list[str], keywords: list[str]) -> JobAnalysi
 
 
 def _response(title: str, summary: str, offer_evidence: str) -> CVPersonalization:
-    # Deliberately mixes relevant/off-role skills and duplicates. The adapter
-    # must still recover offer skills, apply baselines and filter/order.
+    # Deliberately mixes role-specific skills and duplicates. The adapter
+    # must retain catalogue-backed selections, recover offer skills, add
+    # baselines and display each skill only once per category.
     selected = {
         "data_infra": ["Docker", "Git", "Git"],
         "ml_ai": ["NLP"],
@@ -188,6 +189,9 @@ def test_documented_letter_tool_does_not_open_the_display_catalogue(profile):
         "application",
         letter_body=letter_text,
     )
+    assert "Whisper" not in {
+        skill for block in cv.selected_skills for skill in block.skills
+    }
     cleaned, removed = CvValidator(profile).auto_fix(cv)
     selected = {skill for block in cleaned.selected_skills for skill in block.skills}
 
@@ -196,15 +200,17 @@ def test_documented_letter_tool_does_not_open_the_display_catalogue(profile):
     assert "Whisper" not in selected
     assert "Speech-to-text" in selected
     assert selected <= profile.skills.allowed_skills
-    assert "selected_skill:Whisper" in removed
+    assert removed == []
     assert cleaned.selected_experiences == profile_experiences(profile)
     assert any("Whisper" in b.text for exp in cleaned.selected_experiences for b in exp.bullets)
 
 
-# Keep the Skills contract explicit: offer recovery, role filtering, baseline
-# completion and display ordering happen before the summary is generated.
+# Keep the Skills contract explicit: offer recovery, catalogue normalization,
+# baseline completion and display ordering happen before the summary is generated.
 # In the LLM case, Python was formerly inserted only because the summary named
 # it; that dependency is intentionally removed, preserving the selected content.
+# Preserved categories reach Data Engineer's minimum skill count without NumPy;
+# the one-skill category polish still appends a second supported skill per block.
 _SKILLS_GOLDENS = [
     (
         "Data Scientist",
@@ -213,6 +219,7 @@ _SKILLS_GOLDENS = [
         {
             "ml_ai": ["NLP", "PyTorch", "scikit-learn", "TensorFlow"],
             "data_analysis": ["pandas", "Python", "SQL", "R", "NumPy"],
+            "stats_signal": ["Markov chains", "Time-series analysis"],
             "data_infra": ["Docker", "Git", "AWS"],
             "generative_agentic_ai": ["FAISS", "RAG"],
         },
@@ -223,7 +230,10 @@ _SKILLS_GOLDENS = [
         ["GCP"],
         {
             "data_infra": ["Docker", "Git", "Spark", "CI/CD", "AWS"],
-            "data_analysis": ["pandas", "SQL", "Python", "NumPy"],
+            "data_analysis": ["pandas", "SQL", "Python"],
+            "ml_ai": ["NLP", "Hugging Face"],
+            "generative_agentic_ai": ["FAISS", "LangChain"],
+            "stats_signal": ["Markov chains", "Time-series analysis"],
         },
     ),
     (
@@ -242,6 +252,7 @@ _SKILLS_GOLDENS = [
             ],
             "data_infra": ["Docker", "Git", "FastAPI", "AWS"],
             "data_analysis": ["pandas", "SQL"],
+            "stats_signal": ["Markov chains", "Time-series analysis"],
         },
     ),
 ]

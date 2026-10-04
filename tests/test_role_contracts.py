@@ -1,15 +1,13 @@
-"""Tests for the role-family classifier and the post-LLM skill contract.
+"""Tests for role-family classification and post-LLM skill composition.
 
-These tests pin the behaviour the V1 contract is meant to guarantee:
-- No FAISS / Markov / RL skills on roles that don't ask for them.
-- Data Scientist roles keep a minimal ML/IA baseline.
-- Data Scientist offers with AI/NLP signals get NLP + Transformers.
-- Analytics / Software offers strip Flask/FastAPI/NLP unless explicit.
-- LLM offers anchor RAG + FAISS + Vector search.
-- Explicit ``required_skills`` lifts the forbidden lock for that term.
+The contract retains catalogue-backed skills selected by the LLM, including
+skills outside a family's usual categories. Family rules still govern automatic
+additions and supply a baseline when the LLM selection is sparse.
 """
 
 from __future__ import annotations
+
+import pytest
 
 from smartapply.cv.role_contracts import apply_contract, load_contracts
 from smartapply.cv.role_family import (
@@ -170,21 +168,96 @@ def test_data_scientist_anchors_ml_baseline():
     assert "NLP" not in selected.get("ml_ai", [])
 
 
-def test_explicit_required_skill_lifts_forbidden_lock():
-    """If an Analytics offer explicitly requires NLP, NLP survives."""
-    cv = _cv(
-        {
-            "data_analysis": ["SQL", "Python"],
-            "ml_ai": ["NLP"],
-        }
-    )
-    analysis = _analysis(
-        role_type="Analytics Engineer",
-        required=["NLP"],
-    )
-    adapted, _family = _apply(cv, analysis, "Analytics Engineer")
+def test_explicit_required_skill_lifts_forbidden_lock_for_automatic_additions():
+    """A requested skill may be added despite a role-family forbidden rule."""
+    analysis = _analysis(role_type="Data Analyst", required=["Git"])
+    adapted, _family = _apply(_cv({}), analysis, "Data Analyst")
     selected = _selected_map(adapted)
-    assert "NLP" in selected.get("ml_ai", [])
+    assert "Git" in selected.get("data_infra", [])
+
+
+@pytest.mark.parametrize(
+    ("title", "analysis", "category", "llm_skills", "expected_family"),
+    [
+        (
+            "Data Analyst",
+            _analysis(role_type="Data Analyst", nice_to_have=["Git", "CI/CD"]),
+            "data_infra",
+            ["Git", "CI/CD"],
+            "data_analyst",
+        ),
+        (
+            "PhD Researcher in Model Compression",
+            _analysis(
+                role_type="PhD Researcher",
+                main_tasks=["Optimize compressed self-supervised models"],
+            ),
+            "stats_signal",
+            ["Mathematical optimization"],
+            "other",
+        ),
+        (
+            "Research Scientist - Speech/Audio Machine Learning",
+            _analysis(
+                role_type="Research Scientist Speech/Audio Machine Learning",
+                required=["Transformer-based audio LLMs"],
+            ),
+            "speech_audio",
+            ["Pyannote", "openSMILE"],
+            "llm_engineer",
+        ),
+        (
+            "Développeur IA / LLM",
+            _analysis(role_type="Développeur IA / LLM", required=["Computer Vision"]),
+            "computer_vision",
+            ["OpenCV", "Facial affect estimation"],
+            "llm_engineer",
+        ),
+    ],
+)
+def test_contract_keeps_catalogue_skills_selected_by_llm_across_family_boundaries(
+    title: str,
+    analysis: JobAnalysis,
+    category: str,
+    llm_skills: list[str],
+    expected_family: str,
+) -> None:
+    adapted, family = _apply(_cv({category: llm_skills}), analysis, title)
+
+    assert family == expected_family
+    displayed = _selected_map(adapted)[category]
+    assert [skill for skill in displayed if skill in llm_skills] == llm_skills
+
+
+def test_contract_does_not_keep_uncatalogued_llm_skill() -> None:
+    adapted, _ = _apply(
+        _cv({"data_analysis": ["Python", "Invented framework", "SQL"]}),
+        _analysis(role_type="Data Analyst"),
+        "Data Analyst",
+    )
+
+    selected = _selected_map(adapted)
+    assert "Invented framework" not in {
+        skill for skills in selected.values() for skill in skills
+    }
+    assert [skill for skill in selected["data_analysis"] if skill in {"Python", "SQL"}] == [
+        "Python",
+        "SQL",
+    ]
+
+
+def test_family_forbidden_still_gates_automatic_baseline_additions() -> None:
+    adapted, family = _apply(
+        _cv({}),
+        _analysis(role_type="Data Analyst"),
+        "Data Analyst",
+    )
+
+    assert family == "data_analyst"
+    selected = _selected_map(adapted)
+    # The global baseline proposes these skills, but the analyst contract
+    # forbids adding them unless the offer explicitly asks for them.
+    assert not {"Docker", "Git", "AWS"}.intersection(selected.get("data_infra", []))
 
 
 def test_global_baseline_places_sql_in_its_catalogue_category():

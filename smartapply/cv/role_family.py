@@ -4,9 +4,9 @@ The family id drives a deterministic skill-display contract applied after the
 LLM produces its CV draft. It is intentionally local and free (regex over the
 analysis + title) so we don't pay an LLM call for a routing decision.
 
-Granularity is coarse on purpose. The contracts only need to distinguish
-roles that demand different skill envelopes (e.g. an Analytics Engineer must
-not display FAISS or NLP, a Data Scientist must keep a ML/IA baseline).
+Granularity is coarse on purpose. The contracts distinguish the automatic
+complements and presentation appropriate to each role. They do not remove
+catalogue skills already selected by the LLM for a particular offer.
 """
 
 from __future__ import annotations

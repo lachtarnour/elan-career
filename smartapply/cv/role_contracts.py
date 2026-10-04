@@ -1,23 +1,19 @@
 """Apply a role-family contract to an LLM-produced CV.
 
-The contract is a deterministic post-filter that:
-1. Strips skills listed in ``forbidden`` (except when an explicit
-   ``required_skill`` from the offer matches the term — in that case the
-   forbidden lock lifts for that specific skill, on the assumption that the
-   offer truly wants it).
-2. Drops blocks whose ``category_id`` is not in ``allowed_categories``,
-   unless one of their skills survived as offer-anchored (i.e. it appeared in
-   ``required_skills`` or ``cv_keywords_to_include``).
-3. Adds the ``must_show`` skills that are missing, anchoring a coherent
+The contract is a deterministic enrichment step that:
+1. Preserves every selected skill present in the candidate's display catalogue,
+   even when the detected family would not normally include it.
+2. Adds the ``must_show`` skills that are missing, anchoring a coherent
    baseline for the role (e.g. PyTorch + scikit-learn for a Data Scientist).
-4. Fills a minimum number of skills from contract-approved fallback skills.
-5. Reorders ``selected_skills`` and ``skills_order`` with the role contract's
+3. Fills a minimum number of skills from contract-approved fallback skills.
+4. Reorders ``selected_skills`` and ``skills_order`` with the role contract's
    ``category_order``. If a contract omits it, the order falls back to
    ``must_show`` categories, then ``fill_skills``, then the surviving LLM order.
 
-The contract operates on canonical profile skills only — anything that does
-not exist in the candidate's ``allowed_skills`` whitelist is silently
-ignored, so the contract can never reintroduce an unsupported claim.
+``forbidden`` and ``allowed_categories`` guide automatic additions only;
+they never veto a catalogue skill already selected by the LLM or offer guard.
+Only skills in the candidate's ``allowed_skills`` whitelist may survive or be
+added. Deduplication can remove repeated occurrences, never the skill itself.
 """
 
 from __future__ import annotations
@@ -28,6 +24,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from smartapply.cv.role_family import KNOWN_ROLE_FAMILIES, classify, has_data_scientist_ia_signal
+from smartapply.cv.skill_selection import normalize_skill_selection
 from smartapply.llm import CVSelection, JobAnalysis, SkillSelectionBlock
 from smartapply.utils.skill_terms import skill_term_matches
 
@@ -84,7 +81,7 @@ def _active_forbidden(
     contract: dict[str, Any],
     analysis: JobAnalysis,
 ) -> set[str]:
-    """``forbidden`` minus the terms explicitly requested by the offer."""
+    """Block automatic additions unless the offer explicitly requests them."""
     forbidden = {_normalize(s) for s in contract.get("forbidden", []) if s}
     if not forbidden:
         return set()
@@ -412,36 +409,22 @@ def apply_contract(
     family = classify(analysis, title=job_title)
     contracts = contracts or load_contracts()
     supported_skills_by_category = supported_skills_by_category or {}
+    adapted = normalize_skill_selection(
+        adapted,
+        allowed_skills_lower=allowed_skills_lower,
+        supported_skills_by_category=supported_skills_by_category,
+    )
     contract = contracts.get(family)
     if contract is None:
         return adapted, family
 
     allowed_categories = set(contract.get("allowed_categories", []))
     forbidden_active = _active_forbidden(contract, analysis)
-    offer_terms = _offer_anchored_skills(analysis)
     must_show = _augmented_must_show(family, contract, analysis, job_title)
 
-    # Build the filtered selection. Preserve LLM ordering for kept categories.
-    filtered: dict[str, list[str]] = {}
-    category_order: list[str] = []
-    for block in adapted.selected_skills:
-        cid = block.category_id
-        kept: list[str] = []
-        for skill in block.skills:
-            if _normalize(skill) in forbidden_active:
-                continue
-            kept.append(skill)
-        if not kept:
-            continue
-        if allowed_categories and cid not in allowed_categories:
-            # Keep only the skills explicitly required by the offer — the
-            # category survives only if at least one such skill remains.
-            offer_kept = [skill for skill in kept if _is_explicit_offer_skill(skill, offer_terms)]
-            if not offer_kept:
-                continue
-            kept = offer_kept
-        filtered[cid] = kept
-        category_order.append(cid)
+    # Family rules guide additions, not deletion of an existing valid selection.
+    filtered = {block.category_id: list(block.skills) for block in adapted.selected_skills}
+    category_order = list(filtered)
 
     # Add must_show skills that are missing (must already exist in the
     # candidate's profile whitelist — never invent).
