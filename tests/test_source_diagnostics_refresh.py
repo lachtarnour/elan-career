@@ -137,7 +137,8 @@ bridge._thread_pool = bridge._read_pool = SimpleNamespace(start=calls.append)
 bridge._workers = set()
 bridge.service = SimpleNamespace(
     job_statuses=lambda: [], list_jobs=lambda: [], source_label=lambda key: key,
-    source_diagnostics_stale=lambda: False, invalidate_diagnostics_cache=lambda: None,
+    # Navigation must check stale diagnostics regardless of the CI runner uptime.
+    source_diagnostics_stale=lambda: True, invalidate_diagnostics_cache=lambda: None,
     diagnostics=lambda **kwargs: {"source_health": {
         "linkedin": {"configured": True, "ready": False, "state": "checking"}
     }},
