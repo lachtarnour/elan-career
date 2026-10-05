@@ -505,7 +505,7 @@ def test_each_query_uses_its_own_limit_and_keeps_all_returned_offers(monkeypatch
         }
 
 
-def test_uncertain_start_preserves_parallel_batch_and_stops_new_queries(monkeypatch, isolated_db):
+def test_uncertain_start_preserves_parallel_batch_and_continues_new_queries(monkeypatch, isolated_db):
     calls = []
     _scraper(monkeypatch, None)
     first_started = Event()
@@ -548,12 +548,11 @@ def test_uncertain_start_preserves_parallel_batch_and_stops_new_queries(monkeypa
     )
 
     assert {"Unmapped First", "Unmapped Failed"}.issubset(calls)
-    assert "Unmapped Final" not in calls
+    assert "Unmapped Final" in calls
     assert report.fetched == report.persisted == 1
-    assert len(report.warnings) == 2
+    assert len(report.warnings) == 1
     assert "Unmapped Failed" in report.warnings[0]
     assert "démarrage Apify n’a pas répondu" in report.warnings[0]
-    assert "arrêtées" in report.warnings[1]
     with session_scope() as session:
         assert session.query(Job).count() == 1
 

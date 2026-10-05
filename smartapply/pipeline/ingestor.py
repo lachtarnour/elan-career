@@ -96,6 +96,10 @@ class Ingestor:
                 f"Source {source!r} is not configured. "
                 "Check your .env (SERPAPI_API_KEY, FRANCETRAVAIL_* or APIFY_TOKEN)."
             )
+        if source.strip().lower() == "linkedin":
+            begin_fresh_search = getattr(scraper, "begin_fresh_search", None)
+            if begin_fresh_search is not None:
+                begin_fresh_search()
         query_plan = build_source_query_plan(
             source,
             query,

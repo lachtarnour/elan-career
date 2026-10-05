@@ -66,11 +66,14 @@ requêtes du plan.
 Les runs Actor sont lancés par cohortes fixes de trois au maximum. Élan attend la
 fin des trois runs avant d'en soumettre d'autres. Un éventuel fallback de niveau
 d'expérience forme lui aussi une nouvelle cohorte : un run lent retarde donc la
-cohorte suivante. Une erreur fatale (authentification, quota, démarrage incertain
-ou perte durable du suivi d'un run connu) arrête les cohortes suivantes, sans
+cohorte suivante. Une erreur fatale d'authentification ou de quota arrête les
+cohortes suivantes, sans
 interrompre les runs déjà soumis. Une erreur limitée à une requête conserve ses
 résultats partiels, ajoute un avertissement et laisse les cohortes suivantes
-continuer. Les résultats sont fusionnés dans l'ordre initial du plan afin de
+continuer. Pendant un nouveau fetch, un démarrage incertain ou une perte durable
+du suivi d'un run reste limité à sa requête : son POST n'est pas retenté, son
+journal est conservé et les autres titres restent interrogés. Les résultats sont
+fusionnés dans l'ordre initial du plan afin de
 garder une déduplication déterministe.
 
 Il n'existe plus de timeout client global pour un run. Élan conserve le `runId`,
@@ -82,14 +85,21 @@ réseau est réduit au budget restant. Le timeout Requests concerne les échange
 réseau ; il ne constitue pas une garantie de durée totale d'un flux HTTP qui
 continue à envoyer des données. Le `runId`, le `datasetId`, la requête et le
 payload sont enregistrés
-atomiquement dans le journal local `apify_pending_runs.json`. Le prochain passage
+atomiquement dans un journal local. Chaque collecte lancée par le pipeline crée
+un nouveau journal `apify_searches/<identifiant-fetch>.json`. Les mêmes titres
+sont interrogés à nouveau à chaque fetch : les datasets et réservations des
+exécutions précédentes ne peuvent ni remplacer les résultats récents ni bloquer
+le nouveau plan. Les offres déjà en base restent dédupliquées localement.
+
+La récupération explicite d'une exécution conserve le comportement existant :
+un scraper utilisant son ancien `recovery_path`, sans `begin_fresh_search()`,
 reprend ce même run ou dataset au lieu d'envoyer un second POST. Si une passe
 fallback reste en attente après le commit de la passe primaire, elle est reprise
 directement : le primaire n'est pas relancé. La limite et les identifiants à
 ignorer ne changent pas l'identité de cette passe ; son payload initial reste
 celui de la récupération, même si la limite demandée a changé.
 
-Lorsqu'un plan contient des runs connus en attente, ce passage est réservé à
+Lorsqu'un plan de récupération contient des runs connus en attente, ce passage est réservé à
 leur récupération, sans lancer les autres requêtes ni de nouveaux Actors.
 Un avertissement explique ce comportement. Une recherche suivante peut repartir
 après leur enregistrement local. Un changement de titre, lieu, fraîcheur ou
@@ -105,11 +115,13 @@ la récupération si cette cause ne peut pas être obtenue.
 L'entrée n'est supprimée qu'après l'enregistrement local des offres ; un crash entre le commit
 SQLite et ce nettoyage provoque seulement une relecture idempotente du dataset.
 Le journal utilise aussi un verrou de processus et inscrit une réservation avant
-chaque POST : deux recherches identiques lancées simultanément ne peuvent donc
-pas créer deux runs. Si la connexion casse pendant le POST avant que l'identifiant
-soit connu, cette réservation reste volontairement bloquante jusqu'à vérification
-manuelle dans Apify ; l'application ne devine jamais qu'il est sûr de repayer un
-run.
+chaque POST : une même passe dans la même exécution ne peut pas être lancée deux
+fois. Si la connexion casse pendant le POST avant que l'identifiant soit connu,
+la réservation reste enregistrée. Le fetch poursuit les autres titres sans
+retenter cette passe. Un nouveau fetch est une nouvelle recherche volontaire et
+peut payer une nouvelle interrogation du même titre, même si l'ancien lancement
+avait finalement réussi côté Apify. Les journaux précédents sont conservés ;
+ils ne sont pas effacés pour contourner leur état incertain.
 
 Le POST de démarrage transmet aussi `maxItems` afin de borner le nombre d'items
 facturables pour les actors pay-per-result, et n'est jamais retenté si sa réponse

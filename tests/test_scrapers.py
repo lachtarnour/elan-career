@@ -1433,7 +1433,7 @@ def test_linkedin_uncertain_post_is_not_retried_or_leaked(
 
     assert post_mock.call_count == 1
     assert "Aucune relance automatique" in str(exc.value)
-    assert "vérifiez" in str(exc.value)
+    assert "journal" in str(exc.value)
     assert secret_token not in str(exc.value)
     assert exc.value.__suppress_context__ is True
     assert len(scraper.recovery_journal.list_start_reservations()) == 1
