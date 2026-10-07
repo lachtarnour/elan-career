@@ -44,7 +44,7 @@ Item {
                     iconSource: Theme.icon("search")
                     progress: AppBridge.dashboard.analysis_progress || 0
                     interactive: true
-                    onActivated: root.navigateRequested("jobs?status=scraped")
+                    onActivated: root.navigateRequested("jobs?status=analyzed")
                 }
                 MetricCard {
                     Layout.fillWidth: true
@@ -54,7 +54,7 @@ Item {
                     iconSource: Theme.icon("briefcase")
                     progress: Math.min(1, root.pendingCount / Math.max(1, root.jobCount))
                     interactive: true
-                    onActivated: root.navigateRequested("search")
+                    onActivated: root.navigateRequested("analysis")
                 }
                 MetricCard {
                     Layout.fillWidth: true

@@ -18,6 +18,9 @@ Edit the copied profile files with your experience, skills, and preferences. The
 
 ## Providers
 
+Bulk offer analysis is available on the dedicated **Analyse** page. See
+[Batch analysis](batch-analysis.md) for progress tracking, delays and recovery.
+
 Set credentials in `.env` for the providers you use:
 
 | Setting | Purpose |
@@ -190,24 +193,88 @@ The profile controls the main user preferences, but several deterministic vocabu
 
 | File | What to change |
 |---|---|
-| [`smartapply/filtering/rules.py`](../smartapply/filtering/rules.py) | Positive and negative title keywords, hard rejects, seniority gates, description penalties, blocked contracts, and score thresholds |
+| [`smartapply/filtering/rules.py`](../smartapply/filtering/rules.py) | Profile-derived inputs shared by the gates: target roles, accepted contracts, languages, experience ceiling, and seniority title markers |
 | [`smartapply/pipeline/ingest/role_families.py`](../smartapply/pipeline/ingest/role_families.py) | Search role families and bilingual aliases used to expand search queries |
+| [`smartapply/filtering/hard_reject/engine.py`](../smartapply/filtering/hard_reject/engine.py) | Coordinator for independent deterministic gates; survivors are routed to `pending_relevance` |
+| [`smartapply/filtering/hard_reject/role_families.py`](../smartapply/filtering/hard_reject/role_families.py) | Explicit occupation families and their `hard reject` or `defer to relevance` policy |
+| [`smartapply/filtering/experience_requirements.py`](../smartapply/filtering/experience_requirements.py) | Policy-neutral parsing of mandatory, optional, structured, and conflicting experience evidence, shared by rejection and ranking |
+| [`smartapply/filtering/seniority.py`](../smartapply/filtering/seniority.py) | Policy-neutral assessment of explicit seniority, management duties, and ambiguous titles, shared by rejection and ranking |
+| [`smartapply/filtering/hard_reject/`](../smartapply/filtering/hard_reject/) | Contract, qualification, language, and role gates plus thin experience/seniority adapters; this package can only return `rejected` or `pending_relevance` and never owns a score |
 | [`smartapply/filtering/relevance.py`](../smartapply/filtering/relevance.py) | Bilingual role concepts, title patterns, technical concepts, and off-target role patterns |
 | [`smartapply/filtering/role_signals.py`](../smartapply/filtering/role_signals.py) | Domain, analytics, engineering, and off-target signal vocabularies |
-| [`smartapply/filtering/contract_signals.py`](../smartapply/filtering/contract_signals.py) | Contract markers and contextual exceptions |
-| [`smartapply/filtering/seniority.py`](../smartapply/filtering/seniority.py) | Seniority and people-management patterns |
 | [`smartapply/filtering/location_signals.py`](../smartapply/filtering/location_signals.py) | Location markers and foreign-location detection patterns |
 
 Recommended order:
 
 1. Update `preferences.json` first.
-2. Adjust `rules.py` and `role_families.py` for the new target.
-3. Update the deeper signal files only when you need domain-specific vocabulary or different safety gates.
+2. Adjust the search role families and shared inputs in `rules.py`.
+3. Change a deterministic rejection policy only in its dedicated `hard_reject` gate and add gate-level tests.
 4. Run the test suite after every filter change.
 
 ```bash
 make test-fast
 ```
+
+For changes to the deterministic rejection rules, also run both frozen audit
+guards. The first protects the reviewed rejection cohort. The second evaluates
+every offer that was previously classified `relevant` or `uncertain`:
+
+```bash
+.venv/bin/python scripts/replay_hard_reject_audit.py --strict \
+  --output /private/tmp/hard-reject-replay.json
+.venv/bin/python scripts/replay_hard_reject_positive_control.py --strict \
+  --output /private/tmp/hard-reject-positive-control.json
+```
+
+For the former `relevant` cohort, the positive control uses the reviewed
+ID-level decisions in its manifest: an unreviewed rejection and every reviewed
+false or ambiguous rejection fail the guard. The former `uncertain` cohort is
+also protected by its exhaustively reviewed rejected-ID allowlist and by an
+explicit aggregate ceiling. `--strict` fails if a rules change rejects a former
+`uncertain` offer outside that allowlist or raises the rejected count above the
+ceiling. An allowed rejection may be released without failure. Any new rejected
+ID must be reviewed before the manifest changes. Neither replay writes to the
+frozen database.
+
+The current deterministic filter stores only `rejected` and
+`pending_relevance`. Relevance is evaluated separately after this first filter.
+The Nouvelle class selector therefore offers only `Rejeté` and `À classer`,
+plus `Toutes les classes`.
+
+Ranking and analysis also validate the persisted deterministic decision, rather
+than relying on phase timestamps. Imported legacy labels are re-evaluated before
+ranking. Rejected offers cannot enter automatic ranking or LLM analysis; an
+explicit manual keep remains recorded with the blocker it overrides. Repairing
+protected history changes filter metadata without erasing prior applications,
+analyses, scores or manual selections.
+
+To migrate persisted legacy `uncertain` decisions, run the dedicated command
+against the active database. It previews changes by default; add `--apply` to
+create a backup and apply exactly the reviewed plan atomically:
+
+```bash
+.venv/bin/python -m scripts.migrate_legacy_filter \
+  --database "/absolute/path/to/smartapply.db" \
+  --review-manifest audit_manifests/classification-audit-20261005/positive-control-decisions.json \
+  --output /private/tmp/legacy-filter-plan.json
+```
+
+Review the plan, then apply it. The command refuses any change to the scope,
+offer inputs, decisions, or audit manifest:
+
+```bash
+.venv/bin/python -m scripts.migrate_legacy_filter \
+  --database "/absolute/path/to/smartapply.db" \
+  --review-manifest audit_manifests/classification-audit-20261005/positive-control-decisions.json \
+  --apply --expected-plan /private/tmp/legacy-filter-plan.json
+```
+
+The migration preserves scores, analyses, documents, applications, and manual
+or duplicate workflow decisions. Only untouched offers with a reviewed blocker
+are automatically archived. Offers that pass the first filter become
+`pending_relevance`; this does not start an LLM analysis. Migrating legacy
+`relevant` decisions additionally requires the explicit `--include-relevant`
+option. Repeating the preview after migration should report zero planned rows.
 
 ### CV template and writing style
 

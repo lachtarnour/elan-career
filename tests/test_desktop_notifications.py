@@ -218,11 +218,14 @@ page = component.create()
 assert page is not None, [error.toString() for error in component.errors()]
 page.setProperty("width", 1300)
 page.setProperty("height", 800)
-assert page.property("sortKey") == "filter_disposition"
-assert page.property("sortAscending") is True
+assert page.property("filterStatus") == "analyzed"
+assert page.property("sortKey") == "llm_score"
+assert page.property("sortAscending") is False
 published_date_header = page.findChild(QObject, "offerPublishedDateHeader")
 assert published_date_header is not None
-assert published_date_header.property("visible") is True
+assert published_date_header.property("visible") is False
+assert page.findChild(QObject, "offerFilterHeader").property("visible") is False
+assert page.findChild(QObject, "offerMatchHeader").property("visible") is True
 regenerate = page.findChild(QObject, "offerRegenerateAction")
 assert regenerate is not None
 wait_until(lambda: regenerate.property("visible") is True)

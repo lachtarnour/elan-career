@@ -6,6 +6,7 @@ from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt
 
 
 class OfferListModel(QAbstractListModel):
+    _large_reorder_threshold = 1_000
     row_role = int(Qt.ItemDataRole.UserRole) + 1
 
     def __init__(self, parent=None):
@@ -25,6 +26,12 @@ class OfferListModel(QAbstractListModel):
 
     def replace(self, rows: list[dict]) -> None:
         """Diff identities, then update data; keep existing delegates when possible."""
+        if self._large_relative_reorder(rows):
+            self.beginResetModel()
+            self._rows = list(rows)
+            self.endResetModel()
+            return
+
         wanted = {row["id"] for row in rows}
         for position in range(len(self._rows) - 1, -1, -1):
             if self._rows[position]["id"] not in wanted:
@@ -49,3 +56,18 @@ class OfferListModel(QAbstractListModel):
                     self._rows[position] = row
                     index = self.index(position)
                     self.dataChanged.emit(index, index, [self.row_role])
+
+    def _large_relative_reorder(self, rows: list[dict]) -> bool:
+        """Use one reset when a large result changes the order of existing IDs."""
+        if max(len(self._rows), len(rows)) < self._large_reorder_threshold:
+            return False
+        old_positions = {row["id"]: position for position, row in enumerate(self._rows)}
+        previous = -1
+        for row in rows:
+            position = old_positions.get(row["id"])
+            if position is None:
+                continue
+            if position < previous:
+                return True
+            previous = position
+        return False

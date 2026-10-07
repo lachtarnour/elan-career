@@ -181,6 +181,8 @@ def build_bundle(*, smoke_test: bool = True) -> Path:
         "--windowed",
         "--name",
         BUNDLE_NAME,
+        "--distpath",
+        str(DIST_APP.parent),
         "--specpath",
         str(BUILD_DIR),
         "--workpath",

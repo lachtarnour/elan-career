@@ -33,12 +33,13 @@ ApplicationWindow {
 
     property string currentRoute: "dashboard"
     property string pendingRoute: "dashboard"
-    property string jobsFilterStatus: "scraped"
+    property string jobsFilterStatus: "analyzed"
     property int requestedJobId: 0
     property real pageOffset: 0
     property bool dashboardLoaded: true
     property bool searchLoaded: false
     property bool duplicatesLoaded: false
+    property bool analysisLoaded: false
     property bool jobsLoaded: false
     property bool companiesLoaded: false
     property bool manualLoaded: false
@@ -51,6 +52,7 @@ ApplicationWindow {
         {title: "Accueil", icon: Theme.icon("home"), route: "dashboard"},
         {title: "Recherche", icon: Theme.icon("search"), route: "search"},
         {title: "Doublons", icon: Theme.icon("files"), route: "duplicates"},
+        {title: "Analyse", icon: Theme.icon("analysis"), route: "analysis"},
         {title: "Offres", icon: Theme.icon("briefcase"), route: "jobs"},
         {title: "Entreprises", icon: Theme.icon("database"), route: "companies"},
         {title: "Ajouter une offre", icon: Theme.icon("plus"), route: "manual"},
@@ -59,7 +61,7 @@ ApplicationWindow {
     ]
 
     function routeIndex(route) {
-        var routes = ["dashboard", "search", "duplicates", "jobs", "companies", "manual", "profile", "settings"]
+        var routes = ["dashboard", "search", "duplicates", "analysis", "jobs", "companies", "manual", "profile", "settings"]
         var value = routes.indexOf(routePage(route))
         return value < 0 ? 0 : value
     }
@@ -81,6 +83,7 @@ ApplicationWindow {
         if (page === "dashboard") AppBridge.refreshDashboard()
         if (page === "companies") AppBridge.loadCompanies()
         if (page === "duplicates") AppBridge.loadJobs("", "duplicate_review", "duplicate_confidence", false)
+        if (page === "analysis") AppBridge.refreshAnalysisWorkspace()
         if (page === "jobs") {
             if (jobsLoader.item) {
                 jobsLoader.item.refreshOffers(requestedJobId)
@@ -96,6 +99,7 @@ ApplicationWindow {
         if (page === "dashboard") dashboardLoaded = true
         else if (page === "search") searchLoaded = true
         else if (page === "duplicates") duplicatesLoaded = true
+        else if (page === "analysis") analysisLoaded = true
         else if (page === "jobs") jobsLoaded = true
         else if (page === "companies") companiesLoaded = true
         else if (page === "manual") manualLoaded = true
@@ -106,6 +110,11 @@ ApplicationWindow {
     function navigate(route, selectedId) {
         var page = routePage(route)
         var status = routeStatus(route)
+        if (page === "jobs" && status === "scraped") {
+            route = "analysis"
+            page = "analysis"
+            status = ""
+        }
         requestedJobId = page === "jobs" ? Number(selectedId || 0) : 0
         if (page === "jobs" && status) jobsFilterStatus = status
         if (pageSwitch.running && pendingRoute === route) return
@@ -167,6 +176,7 @@ ApplicationWindow {
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Accueil"; compactText: "Accueil"; iconSource: Theme.icon("home"); selected: window.currentRoute === "dashboard"; onClicked: window.navigate("dashboard") }
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Recherche"; compactText: "Recherche"; iconSource: Theme.icon("search"); selected: window.currentRoute === "search"; onClicked: window.navigate("search") }
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Doublons"; compactText: "Doublons"; iconSource: Theme.icon("files"); selected: window.currentRoute === "duplicates"; onClicked: window.navigate("duplicates") }
+                RailItem { objectName: "analysisNavigation"; Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Analyse"; compactText: "Analyse"; iconSource: Theme.icon("analysis"); selected: window.currentRoute === "analysis"; onClicked: window.navigate("analysis") }
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Offres"; compactText: "Offres"; iconSource: Theme.icon("briefcase"); selected: window.currentRoute === "jobs"; onClicked: window.navigate("jobs") }
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Entreprises"; compactText: "Sociétés"; iconSource: Theme.icon("database"); selected: window.currentRoute === "companies"; onClicked: window.navigate("companies") }
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Ajouter une offre"; compactText: "Ajouter"; iconSource: Theme.icon("plus"); selected: window.currentRoute === "manual"; onClicked: window.navigate("manual") }
@@ -262,6 +272,15 @@ ApplicationWindow {
                         active: window.duplicatesLoaded
                         asynchronous: true
                         sourceComponent: Component { DuplicatesPage { onNavigateRequested: function(route) { window.navigate(route) } } }
+                    }
+                    Loader {
+                        active: window.analysisLoaded
+                        asynchronous: true
+                        sourceComponent: Component {
+                            AnalysisPage {
+                                onNavigateRequested: function(route, selectedId) { window.navigate(route, selectedId) }
+                            }
+                        }
                     }
                     Loader {
                         id: jobsLoader
