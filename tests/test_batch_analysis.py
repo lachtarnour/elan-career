@@ -19,7 +19,7 @@ from smartapply.database.analysis_batches import (
 from smartapply.database.models import Job, JobAnalysis, JobScore, LLMCache, LLMUsage
 from smartapply.database.repository.llm_cache import cache_set
 from smartapply.filtering.hard_reject.types import HardRejectResult
-from smartapply.llm import JobFitAssessment, MockLLMProvider, OfferAnalysis
+from smartapply.llm import JobFitEvaluation, MockLLMProvider, OfferAnalysis
 from smartapply.llm.batch import BatchResult, BatchSnapshot
 from smartapply.llm.cache import make_cache_key
 from smartapply.llm.prompts import job_analysis, job_fit
@@ -32,6 +32,7 @@ from smartapply.pipeline.batch_analysis.presentation import analysis_workspace
 from smartapply.pipeline.errors import TaskCancelledError
 from smartapply.profile import get_profile
 from smartapply.ranking import MockEmbeddingsProvider
+from tests.fit_fixtures import evaluation_from_user
 
 pytestmark = pytest.mark.usefixtures("isolated_db")
 
@@ -49,6 +50,8 @@ def offer(role="Machine Learning Engineer"):
 
 
 def fit():
+    from smartapply.llm import JobFitAssessment
+
     return JobFitAssessment(
         fit_score=0.7,
         match_reasons=["Documented Python work"],
@@ -142,7 +145,7 @@ class FakeTransport:
             answer = answers.get(custom_id) or (
                 offer(f"Machine Learning Engineer {custom_id}")
                 if schema == "OfferAnalysis"
-                else fit()
+                else evaluation_from_user(record["body"]["messages"][1]["content"])
             )
             successes[custom_id] = BatchResult(
                 custom_id=custom_id,
@@ -269,7 +272,7 @@ def test_restart_resumes_two_dependent_waves_and_keeps_full_analysis():
     assert counts()["paid"] == 4
     with session_scope() as session:
         jobs = [session.get(Job, job_id) for job_id in ids]
-        assert all(job.analysis.fit_score == 0.7 and job.analyzed_at is not None for job in jobs)
+        assert all(job.analysis.fit_score == 0.88 and job.analyzed_at is not None for job in jobs)
         assert all(job.ranked_at is None and job.score.final_score is None for job in jobs)
 
 
@@ -514,7 +517,7 @@ def test_retry_failed_evaluation_reuses_successful_extraction():
     coordinator.retry(run_id)
     assert len(transport.created) == 3
     request = transport.requests(transport.created[-1])[0]
-    assert request["body"]["response_format"]["json_schema"]["name"] == "JobFitAssessment"
+    assert request["body"]["response_format"]["json_schema"]["name"] == "JobFitEvaluation"
     finish_next(transport, coordinator)
     assert journal(run_id)[0].state == "completed"
     assert counts()["analyses"] == 1
@@ -772,10 +775,12 @@ def _write_sync_cache(job_id, *, extraction=True, evaluation=False):
             requests.append(
                 (
                     "job_fit_assessment",
-                    JobFitAssessment,
+                    JobFitEvaluation,
                     job_fit.build_system_prompt(),
                     job_fit.build_user_prompt(profile=profile, offer_analysis=offer()),
-                    fit(),
+                    evaluation_from_user(
+                        job_fit.build_user_prompt(profile=profile, offer_analysis=offer())
+                    ),
                 )
             )
         for purpose, schema, system, user, answer in requests:
@@ -867,7 +872,9 @@ def test_cancelled_extraction_resumes_evaluation_without_cache(next_mode):
 
         instance.llm = SimpleNamespace(
             cheap_model=coordinator.settings.openai_model_cheap,
-            complete_json=lambda **kwargs: calls.append(kwargs["purpose"]) or fit(),
+            complete_json=lambda **kwargs: (
+                calls.append(kwargs["purpose"]) or evaluation_from_user(kwargs["user"])
+            ),
         )
         instance._processor.llm = instance.llm
         assert instance.analyze_jobs(ids).analyzed == 1

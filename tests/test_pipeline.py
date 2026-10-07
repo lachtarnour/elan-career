@@ -18,13 +18,14 @@ from smartapply.llm import (
     ApplicationTexts,
     CVSelection,
     DocumentTextReview,
-    JobFitAssessment,
+    JobFitEvaluation,
     MockLLMProvider,
     MotivationLetter,
     OfferAnalysis,
 )
 from smartapply.offers import RawJob
 from smartapply.ranking import MockEmbeddingsProvider
+from tests.fit_fixtures import evaluation_from_user
 
 
 @pytest.fixture(autouse=True)
@@ -68,11 +69,7 @@ def _register_llm_responses() -> None:
     )
     MockLLMProvider.register(
         "job_fit_assessment",
-        JobFitAssessment(
-            fit_score=0.5,
-            match_reasons=["Strong NLP background", "Multimodal AI experience"],
-            risks=["No prior healthtech experience"],
-        ),
+        lambda **kwargs: evaluation_from_user(kwargs["user"], levels=(2, 4, 4)),
     )
     MockLLMProvider.register(
         "cv_adaptation",
@@ -649,11 +646,7 @@ def test_analysis_replaces_job_board_company_with_extracted_employer() -> None:
     )
     MockLLMProvider.register(
         "job_fit_assessment",
-        JobFitAssessment(
-            fit_score=0.5,
-            match_reasons=["Expérience IA alignée"],
-            risks=[],
-        ),
+        lambda **kwargs: evaluation_from_user(kwargs["user"], levels=(2, 4, 4)),
     )
 
     from smartapply.database import session_scope
@@ -915,12 +908,15 @@ def test_nonarchived_rejected_scores_never_enter_ranking_selection() -> None:
             mark_ranked(session, job_id)
             mark_analyzed(session, job_id)
             set_score(session, job_id, final_score=score)
-        assert set_shortlisted(
-            session,
-            rejected,
-            selected=True,
-            origin=ShortlistOrigin.MANUAL,
-        ) is not None
+        assert (
+            set_shortlisted(
+                session,
+                rejected,
+                selected=True,
+                origin=ShortlistOrigin.MANUAL,
+            )
+            is not None
+        )
 
     report = pipeline.rank_pending(top_k_ranked=1, persist_shortlist=True)
 
@@ -1426,7 +1422,7 @@ def test_application_selects_cv_then_generates_summary_and_letter_then_persists_
         "job_offer_analysis",
         "job_fit_assessment",
     ]
-    assert [call["schema"] for call in calls] == [OfferAnalysis, JobFitAssessment]
+    assert [call["schema"] for call in calls] == [OfferAnalysis, JobFitEvaluation]
     assert all(call["model"] == pipeline.llm.cheap_model for call in calls)
     calls.clear()
     with session_scope() as session:
@@ -1476,9 +1472,9 @@ def test_application_selects_cv_then_generates_summary_and_letter_then_persists_
         assert application is not None
         assert application.cv_json["selected_skills"]
         assert application.cv_json["llm_selected_skills"] == []
-        assert [reason["project_id"] for reason in application.cv_json["project_selection_reasons"]] == (
-            application.cv_json["selected_project_ids"]
-        )
+        assert [
+            reason["project_id"] for reason in application.cv_json["project_selection_reasons"]
+        ] == (application.cv_json["selected_project_ids"])
         final_cv = {
             key: value
             for key, value in application.cv_json.items()
@@ -1798,9 +1794,9 @@ def test_confirmed_cv_title_correction_is_persisted_and_rendered_without_reassem
             for key, value in application.cv_json.items()
             if key not in {"warnings", "project_selection_reasons", "llm_selected_skills"}
         } == expected_cv
-        assert [reason["project_id"] for reason in application.cv_json["project_selection_reasons"]] == (
-            application.cv_json["selected_project_ids"]
-        )
+        assert [
+            reason["project_id"] for reason in application.cv_json["project_selection_reasons"]
+        ] == (application.cv_json["selected_project_ids"])
         cv_document = next(
             document for document in application.documents if document.doc_type == "cv_json"
         )
@@ -1817,7 +1813,9 @@ def test_confirmed_cv_title_correction_is_persisted_and_rendered_without_reassem
             document for document in application.documents if document.doc_type == "document_review"
         )
         assert json.loads(review_document.content) == report.document_review
-        assert review_document.extra["scope"] == "cv_title_professional_summary_and_motivation_letter"
+        assert (
+            review_document.extra["scope"] == "cv_title_professional_summary_and_motivation_letter"
+        )
 
     headline = f'<p class="headline">{escape(corrected_title)}</p>'
     assert headline in Path(report.cv_html_path).read_text(encoding="utf-8")
@@ -1885,7 +1883,9 @@ def test_unavailable_review_keeps_dossier_available_with_incomplete_control() ->
 
 
 @pytest.mark.parametrize("field", ["professional_summary", "motivation_letter_body"])
-def test_overlimit_documents_remain_available_with_diagnostics_without_truncation(field: str) -> None:
+def test_overlimit_documents_remain_available_with_diagnostics_without_truncation(
+    field: str,
+) -> None:
     _register_llm_responses()
 
     from smartapply.cv.motivation_validator import _word_count

@@ -193,6 +193,7 @@ class JobAnalysis(Base):
     cv_keywords_to_include: Mapped[Any | None] = mapped_column(JSON, nullable=True)
     fit_score: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)
     raw_response: Mapped[Any | None] = mapped_column(JSON, nullable=True)
+    fit_diagnostics: Mapped[Any | None] = mapped_column(JSON, nullable=True)
     model_used: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 

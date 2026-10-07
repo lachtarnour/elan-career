@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict
 
+from jsonschema import Draft202012Validator
 from sqlalchemy.orm import Session
 
+from smartapply.config import get_settings
 from smartapply.database.analysis_batches import AnalysisBatchItem, AnalysisBatchRun
 from smartapply.database.models import Job
 from smartapply.database.repository.llm_cache import cache_get, cache_set, record_usage
-from smartapply.llm import JobFitAssessment, OfferAnalysis
+from smartapply.llm import JobFitAssessment, JobFitEvaluation, OfferAnalysis
 from smartapply.llm.batch import BatchRequest, BatchResult, build_batch_request
-from smartapply.llm.prompts import job_analysis, job_fit
+from smartapply.llm.fit_context import (
+    build_fit_user,
+    candidate_facts,
+    context_is_current,
+)
+from smartapply.llm.fit_request import check_request_budget
+from smartapply.llm.fit_scoring import evaluate_fit
+from smartapply.llm.prompts import job_analysis
 from smartapply.llm.provider import LLMValidationError
 from smartapply.llm.usage import estimate_cost_usd
 from smartapply.offers import build_analyzer_input
@@ -30,7 +40,7 @@ from smartapply.pipeline.process.analysis_checkpoint import (
 from smartapply.pipeline.snapshots import job_snapshot_key
 from smartapply.profile import Profile, get_profile
 
-PHASE_SCHEMA = {"extraction": OfferAnalysis, "evaluation": JobFitAssessment}
+PHASE_SCHEMA = {"extraction": OfferAnalysis, "evaluation": JobFitEvaluation}
 PHASE_PURPOSE = {"extraction": "job_offer_analysis", "evaluation": "job_fit_assessment"}
 
 
@@ -62,7 +72,17 @@ def current_job(session: Session, item: AnalysisBatchItem, run: AnalysisBatchRun
         item.state = "skipped"
         item.error = "Offre modifiée, déjà analysée, rejetée ou devenue indisponible."
         return None
-    if get_profile().model_dump(mode="json") != run.profile_data:
+    if (
+        run.fit_context is not None
+        and (
+            run.model != get_settings().openai_model_cheap
+            or not context_is_current(run.fit_context, get_profile())
+        )
+    ) or (
+        run.fit_context is None
+        and candidate_facts(get_profile())
+        != candidate_facts(Profile.model_validate(run.profile_data))
+    ):
         item.state = "skipped"
         item.error = "Le profil a changé depuis le lancement. Relancez avec le profil actuel."
         return None
@@ -79,11 +99,14 @@ def item_request(
             analyzer_input=AnalyzerInput(**item.analyzer_input)
         )
     else:
-        system = job_fit.build_system_prompt()
-        user = job_fit.build_user_prompt(
-            profile=Profile.model_validate(run.profile_data),
-            offer_analysis=OfferAnalysis.model_validate(item.offer_data),
-        )
+        if run.fit_context is None:
+            raise LLMValidationError(
+                "Ancien lot sans contexte d'évaluation figé : reprise explicite nécessaire."
+            )
+        system = run.fit_context["system_prompt"]
+        user = build_fit_user(run.fit_context, OfferAnalysis.model_validate(item.offer_data))
+        check_request_budget(run.fit_context, user)
+        max_completion_tokens = run.fit_context["max_completion_tokens"]
     return build_batch_request(
         custom_id=f"{phase}-{item.id}",
         system=system,
@@ -96,7 +119,13 @@ def item_request(
 
 
 def accept_result(
-    session: Session, item: AnalysisBatchItem, run: AnalysisBatchRun, phase: str, validated
+    session: Session,
+    item: AnalysisBatchItem,
+    run: AnalysisBatchRun,
+    phase: str,
+    validated,
+    *,
+    request_body: dict | None = None,
 ) -> None:
     job = current_job(session, item, run)
     if job is None:
@@ -110,8 +139,34 @@ def accept_result(
         item.offer_data = grounded.model_dump(mode="json")
         item.state = "evaluation_pending"
     else:
-        analysis = _assemble_analysis(OfferAnalysis.model_validate(item.offer_data), validated)
-        persist_job_analysis(session, job, analysis, run.model)
+        offer = OfferAnalysis.model_validate(item.offer_data)
+        diagnostics = None
+        if isinstance(validated, JobFitEvaluation):
+            if run.fit_context is None:
+                raise LLMValidationError("Diagnostic sans contexte figé")
+            validated, diagnostics = evaluate_fit(
+                validated,
+                run.fit_context,
+                offer,
+                extraction_provenance={"analyzer_input": item.analyzer_input, "run_id": run.id},
+            )
+            diagnostics["request_user"] = (
+                request_body["messages"][1]["content"]
+                if request_body
+                else build_fit_user(run.fit_context, offer)
+            )
+            diagnostics["request_budget"] = check_request_budget(
+                run.fit_context, diagnostics["request_user"]
+            )
+        elif request_body is not None:
+            diagnostics = {
+                "policy_version": "legacy_llm_fit",
+                "request": request_body,
+                "profile_snapshot": run.profile_data,
+                "offer_facts": item.offer_data,
+            }
+        analysis = _assemble_analysis(offer, validated)
+        persist_job_analysis(session, job, analysis, run.model, fit_diagnostics=diagnostics)
         item.state = "completed"
 
 
@@ -126,11 +181,11 @@ def accept_cache(
     if cached is None:
         return False
     try:
-        validated = PHASE_SCHEMA[phase].model_validate_json(cached.response)
-    except ValueError:
+        validated = validate_request_response(request.body, cached.response)
+        accept_result(session, item, run, phase, validated, request_body=request.body)
+    except (ValueError, LLMValidationError):
         session.delete(cached)
         return False
-    accept_result(session, item, run, phase, validated)
     record_usage(
         session,
         purpose=PHASE_PURPOSE[phase],
@@ -178,7 +233,14 @@ def import_result(
         cache_key=request["cache_key"],
     )
     try:
-        validated = result.validate(PHASE_SCHEMA[phase])
+        # Check refusal/truncation first, then the exact schema saved with this request.
+        schema = schema_for_request(request["body"])
+        result.validate(schema)
+        validated = validate_request_response(request["body"], result.content)
+        # Roll back all publications if one grouped item fails validation. Usage remains recorded.
+        with session.begin_nested():
+            for item in items:
+                accept_result(session, item, run, phase, validated, request_body=request["body"])
     except (ValueError, LLMValidationError) as exc:
         for item in items:
             item.state = f"{phase}_failed"
@@ -193,5 +255,26 @@ def import_result(
         completion_tokens=result.completion_tokens,
         purpose=PHASE_PURPOSE[phase],
     )
-    for item in items:
-        accept_result(session, item, run, phase, validated)
+
+
+def schema_for_request(body: dict):
+    stored = body.get("response_format", {}).get("json_schema", {})
+    classes = {
+        model.__name__: model for model in (OfferAnalysis, JobFitAssessment, JobFitEvaluation)
+    }
+    if stored.get("name") not in classes or not stored.get("schema"):
+        raise LLMValidationError(
+            "Schéma historique absent ou inconnu : reprise explicite nécessaire"
+        )
+    return classes[stored["name"]]
+
+
+def validate_request_response(body: dict, content: str):
+    schema = schema_for_request(body)
+    saved = body["response_format"]["json_schema"]["schema"]
+    try:
+        data = json.loads(content)
+        Draft202012Validator(saved).validate(data)
+        return schema.model_validate(data)
+    except Exception as exc:
+        raise LLMValidationError(f"Réponse incompatible avec le schéma enregistré : {exc}") from exc

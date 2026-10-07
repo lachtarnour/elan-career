@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict
 
 from smartapply.concurrency import job_operation
 from smartapply.database import session_scope, write_session_scope
@@ -14,8 +15,14 @@ from smartapply.database.repository import (
     update_status,
 )
 from smartapply.llm import JobAnalysis, JobFitAssessment, OfferAnalysis
+from smartapply.llm.fit_context import (
+    build_fit_context,
+    candidate_facts,
+    context_is_current,
+    fingerprint,
+)
+from smartapply.llm.fit_request import complete_fit
 from smartapply.llm.prompts import job_analysis as analysis_prompts
-from smartapply.llm.prompts import job_fit as fit_prompts
 from smartapply.logging_setup import get_logger
 from smartapply.offers import build_analyzer_input
 from smartapply.pipeline.errors import StaleTaskResultError, TaskCancelledError
@@ -35,6 +42,7 @@ from smartapply.pipeline.process.audit import (
 )
 from smartapply.pipeline.reports import AnalyzeReport
 from smartapply.pipeline.snapshots import check_cancelled, job_snapshot_key
+from smartapply.profile import get_profile
 
 logger = get_logger(__name__)
 
@@ -76,7 +84,9 @@ def _assemble_analysis(offer: OfferAnalysis, fit: JobFitAssessment) -> JobAnalys
     )
 
 
-def persist_job_analysis(session, job: Job, analysis: JobAnalysis, model: str) -> None:
+def persist_job_analysis(
+    session, job: Job, analysis: JobAnalysis, model: str, *, fit_diagnostics: dict | None = None
+) -> None:
     """Publish a validated analysis consistently for immediate and Batch runs.
 
     The caller owns the transaction and checks current admission and its source
@@ -97,6 +107,7 @@ def persist_job_analysis(session, job: Job, analysis: JobAnalysis, model: str) -
         cv_keywords_to_include=analysis.cv_keywords_to_include,
         raw_response=analysis.model_dump(),
         model_used=model,
+        fit_diagnostics=fit_diagnostics,
     )
     if _should_replace_job_company(job.company, analysis.extracted_company_name):
         job.company = analysis.extracted_company_name.strip()
@@ -235,6 +246,7 @@ class AnalysisMixin(AnalysisAdmissionMixin):
         check_cancelled(stop_requested)
         with job_operation([job_id], operation="analyse"):
             check_cancelled(stop_requested)
+            loaded_profile_key = fingerprint(candidate_facts(get_profile()))
             with session_scope() as session:
                 job = session.get(Job, job_id)
                 if job is None or not is_current_analysis_candidate(
@@ -281,17 +293,29 @@ class AnalysisMixin(AnalysisAdmissionMixin):
                 offer = _ground_offer_excerpts(offer, analyzer_input.offer_body)
                 save_extraction(session, current, key, offer)
             check_cancelled(stop_requested)
-            fit = self.llm.complete_json(
-                system=fit_prompts.build_system_prompt(),
-                user=fit_prompts.build_user_prompt(profile=self.profile, offer_analysis=offer),
-                schema=JobFitAssessment,
-                model=self.llm.cheap_model,
-                purpose="job_fit_assessment",
+            context = build_fit_context(self.profile, self.llm.cheap_model)
+            if loaded_profile_key != fingerprint(candidate_facts(get_profile())):
+                raise StaleTaskResultError()
+            fit, diagnostics = complete_fit(
+                self.llm,
+                context,
+                offer,
                 job_id=job_id,
+                extraction_provenance={
+                    "analyzer_input": asdict(analyzer_input),
+                    "extraction_key": key,
+                    "model": self.llm.cheap_model,
+                },
             )
             check_cancelled(stop_requested)
             analysis = _assemble_analysis(offer, fit)
             with write_session_scope() as session:
+                if (
+                    context["model"] != self.llm.cheap_model
+                    or not context_is_current(context, self.profile)
+                    or loaded_profile_key != fingerprint(candidate_facts(get_profile()))
+                ):
+                    raise StaleTaskResultError()
                 job = session.get(Job, job_id)
                 if (
                     job is None
@@ -305,5 +329,7 @@ class AnalysisMixin(AnalysisAdmissionMixin):
                     )
                 ):
                     raise StaleTaskResultError()
-                persist_job_analysis(session, job, analysis, self.llm.cheap_model)
+                persist_job_analysis(
+                    session, job, analysis, self.llm.cheap_model, fit_diagnostics=diagnostics
+                )
             return True

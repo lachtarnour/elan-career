@@ -22,6 +22,7 @@ from smartapply.pipeline.process.analysis import (
     _ground_offer_excerpts,
 )
 from smartapply.profile import get_profile
+from tests.fit_fixtures import evaluation_from_user
 
 BODY = "Build forecasting models. Python is required. SQL is preferred."
 
@@ -149,7 +150,11 @@ def test_rejection_during_analysis_stops_remaining_calls_and_publication(
                         "gates": [],
                     },
                 }
-        return offer_result() if kwargs["purpose"] == "job_offer_analysis" else fit_result()
+        return (
+            offer_result()
+            if kwargs["purpose"] == "job_offer_analysis"
+            else evaluation_from_user(kwargs["user"])
+        )
 
     instance = runner(SimpleNamespace(complete_json=complete, cheap_model="mock"))
     with pytest.raises(StaleTaskResultError):
@@ -193,7 +198,7 @@ def test_fit_receives_complete_facts_without_cv_policy_or_invented_preferences()
         profile=profile, offer_analysis=offer_result(), reference_date=date(2026, 9, 22)
     )
     candidate = json.loads(
-        prompt.split("=== CANDIDATE PROFILE JSON ===\n", 1)[1].split("=== REFERENCE DATE ===", 1)[0]
+        prompt.split("=== CANDIDATE PROFILE JSON ===\n", 1)[1].split("\n\n===", 1)[0]
     )
     assert candidate["identity"]["residence"] == "Candidate Residence"
     assert candidate["preferences"] == profile.preferences.model_dump(mode="json")
@@ -209,7 +214,7 @@ def test_fit_receives_complete_facts_without_cv_policy_or_invented_preferences()
     assert "Preferred locations:" not in prompt
     assert "junior to mid (1-3 years)" not in prompt
     assert profile.identity.email not in prompt
-    assert "2026-09-22" in prompt
+    assert "2026-09-22" not in prompt
 
 
 @pytest.mark.parametrize("field", ["required_skills", "seniority", "constraints", "main_tasks"])
@@ -297,10 +302,14 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(
         nonlocal fail_fit_once
         schema_name = kwargs["response_format"]["json_schema"]["name"]
         calls.append((schema_name, kwargs))
-        if schema_name == "JobFitAssessment" and fail_fit_once:
+        if schema_name == "JobFitEvaluation" and fail_fit_once:
             fail_fit_once = False
             raise RuntimeError("Temporary matching failure")
-        result = offer_result() if schema_name == "OfferAnalysis" else fit_result()
+        result = (
+            offer_result()
+            if schema_name == "OfferAnalysis"
+            else evaluation_from_user(kwargs["messages"][1]["content"])
+        )
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=result.model_dump_json()))],
             usage=SimpleNamespace(prompt_tokens=10, completion_tokens=10),
@@ -319,7 +328,7 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(
     # An explicit internal rerun can reuse extraction; normal analyze_jobs still
     # skips history and never silently rewrites a previously displayed score.
     instance._analyze_one(job_id=job_id)
-    assert [name for name, _ in calls] == ["OfferAnalysis", "JobFitAssessment", "JobFitAssessment"]
+    assert [name for name, _ in calls] == ["OfferAnalysis", "JobFitEvaluation", "JobFitEvaluation"]
     assert all(kwargs["model"] == "gpt-5.4-mini" for _, kwargs in calls)
     assert "NEW_DECLARED_SKILL" not in calls[0][1]["messages"][1]["content"]
     if not retry_after_failure:
@@ -327,7 +336,7 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(
     with session_scope() as session:
         job = session.get(Job, job_id)
         assert job.analyzed_at is not None
-        assert job.analysis.fit_score == 0.72
+        assert job.analysis.fit_score == 0.88
         assert job.analysis.required_skills == ["Python"]
         assert (
             job.analysis.raw_response["supporting_excerpts"] == offer_result().supporting_excerpts
@@ -336,7 +345,7 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(
     from smartapply.pipeline.apply.cv_writer import CvWriterMixin
 
     _, restored = CvWriterMixin()._load_job_analysis(job_id)
-    assert restored.fit_score == 0.72
+    assert restored.fit_score == 0.88
     assert restored.supporting_excerpts == offer_result().supporting_excerpts
     assert restored.offer_risks == offer_result().offer_risks
 
@@ -356,7 +365,7 @@ def test_failed_evaluation_checkpoint_obeys_exact_extraction_contract(
             return offer_result()
         if fail_fit:
             raise LLMError("Evaluation temporarily unavailable")
-        return fit_result()
+        return evaluation_from_user(kwargs["user"])
 
     instance = runner(SimpleNamespace(complete_json=complete, cheap_model="mock"))
     job_id = insert_job()
@@ -367,7 +376,7 @@ def test_failed_evaluation_checkpoint_obeys_exact_extraction_contract(
         with session_scope() as session:
             session.get(Job, job_id).description += " Work on a new team."
     elif change == "model":
-        instance.llm.cheap_model = "another-model"
+        instance.llm.cheap_model = "mock-another-model"
     elif change == "profile":
         instance.profile.skills.categories[0].skills.append("NEW_SKILL")
     elif change == "prompt":

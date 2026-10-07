@@ -32,6 +32,7 @@ class LLMProvider(ABC):
         job_id: int | None = None,
         use_cache: bool = True,
         refresh_cache: bool = False,
+        max_completion_tokens: int | None = None,
     ) -> T: ...
 
     @property

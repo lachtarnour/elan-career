@@ -24,6 +24,8 @@ from smartapply.database.analysis_batches import (
 )
 from smartapply.database.repository.llm_cache import purge_expired_cache
 from smartapply.llm.batch import BatchRequest, OpenAIBatchTransport, encode_requests, split_requests
+from smartapply.llm.fit_context import build_fit_context
+from smartapply.llm.provider import LLMValidationError
 from smartapply.logging_setup import get_logger
 from smartapply.pipeline.batch_analysis.locking import batch_operation
 from smartapply.pipeline.batch_analysis.results import (
@@ -107,15 +109,22 @@ class BatchAnalysisCoordinator:
             if not candidates:
                 raise ValueError("Aucune offre disponible à analyser dans cette sélection.")
             run_id = str(uuid4())
-            with job_operation(
-                [job.id for job in candidates], operation="préparation Batch",
-            ), write_session_scope() as session:
+            with (
+                job_operation(
+                    [job.id for job in candidates],
+                    operation="préparation Batch",
+                ),
+                write_session_scope() as session,
+            ):
                 check_cancelled(stop_requested)
                 run = AnalysisBatchRun(
                     id=run_id,
                     state="active",
                     model=self.settings.openai_model_cheap,
                     profile_data=self.pipeline.profile.model_dump(mode="json"),
+                    fit_context=build_fit_context(
+                        self.pipeline.profile, self.settings.openai_model_cheap
+                    ),
                     last_error="",
                 )
                 session.add(run)
@@ -169,14 +178,16 @@ class BatchAnalysisCoordinator:
                         raise ValueError(
                             "Un lot annulé ne peut pas être repris. Créez un nouveau lot."
                         )
-                    reserved_elsewhere = set(session.scalars(
-                        select(AnalysisBatchItem.job_id)
-                        .join(AnalysisBatchRun, AnalysisBatchRun.id == AnalysisBatchItem.run_id)
-                        .where(
-                            AnalysisBatchRun.state.in_(ACTIVE_RUN_STATES),
-                            AnalysisBatchRun.id != run_id,
+                    reserved_elsewhere = set(
+                        session.scalars(
+                            select(AnalysisBatchItem.job_id)
+                            .join(AnalysisBatchRun, AnalysisBatchRun.id == AnalysisBatchItem.run_id)
+                            .where(
+                                AnalysisBatchRun.state.in_(ACTIVE_RUN_STATES),
+                                AnalysisBatchRun.id != run_id,
+                            )
                         )
-                    ))
+                    )
                     retryable = [
                         item
                         for item in _items(session, run_id)
@@ -186,8 +197,10 @@ class BatchAnalysisCoordinator:
                         raise ValueError("Aucune demande échouée à reprendre.")
                     reactivated = 0
                     for item in retryable:
-                        if (item.job_id not in reserved_elsewhere
-                                and current_job(session, item, run) is not None):
+                        if (
+                            item.job_id not in reserved_elsewhere
+                            and current_job(session, item, run) is not None
+                        ):
                             item.state = (
                                 "evaluation_pending"
                                 if item.offer_data is not None
@@ -289,7 +302,14 @@ class BatchAnalysisCoordinator:
             for item in _items(session, run_id):
                 if item.state != f"{phase}_pending" or current_job(session, item, run) is None:
                     continue
-                request = item_request(item, run, phase, self.settings.openai_max_completion_tokens)
+                try:
+                    request = item_request(
+                        item, run, phase, self.settings.openai_max_completion_tokens
+                    )
+                except (ValueError, LLMValidationError) as exc:
+                    item.state = f"{phase}_failed"
+                    item.error = str(exc)
+                    continue
                 if accept_cache(session, item, run, phase, request):
                     continue
                 if request.cache_key in unique:
@@ -314,9 +334,12 @@ class BatchAnalysisCoordinator:
                         phase=phase,
                         state="prepared",
                         requests=records,
-                        provider_data={"total": len(records), "offers": len({
-                            item_id for record in records for item_id in record["item_ids"]
-                        })},
+                        provider_data={
+                            "total": len(records),
+                            "offers": len(
+                                {item_id for record in records for item_id in record["item_ids"]}
+                            ),
+                        },
                     )
                 )
             run.updated_at = _now()

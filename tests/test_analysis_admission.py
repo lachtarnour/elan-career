@@ -19,7 +19,7 @@ from smartapply.database.models import (
     JobStatus,
 )
 from smartapply.filtering.hard_reject.types import HardRejectResult
-from smartapply.llm import JobFitAssessment, OfferAnalysis
+from smartapply.llm import OfferAnalysis
 from smartapply.pipeline import Pipeline
 from smartapply.pipeline.errors import StaleTaskResultError
 from smartapply.pipeline.process.analysis import AnalysisMixin
@@ -31,6 +31,7 @@ from smartapply.pipeline.process.analysis_admission import (
 )
 from smartapply.profile import get_profile
 from smartapply.ranking import MockEmbeddingsProvider
+from tests.fit_fixtures import evaluation_from_user
 
 
 def _kept_components():
@@ -70,7 +71,7 @@ def _provider(calls: list, hook=None):
                 nice_to_have=[],
                 cv_keywords_to_include=["Python"],
             )
-        return JobFitAssessment(fit_score=0.7, match_reasons=["Documented Python work"], risks=[])
+        return evaluation_from_user(kwargs["user"])
 
     return SimpleNamespace(cheap_model="mock-cheap", complete_json=complete)
 
@@ -93,7 +94,7 @@ def test_unranked_offer_uses_its_own_score_foreign_key(isolated_db):
     assert calls == [("job_offer_analysis", 1), ("job_fit_assessment", 1)]
     with session_scope() as session:
         kept, rejected = session.get(Job, 1), session.get(Job, 2)
-        assert kept.analysis.fit_score == 0.7
+        assert kept.analysis.fit_score == 0.88
         assert kept.ranked_at is None and kept.score.final_score is None
         assert rejected.analysis is None and rejected.analyzed_at is None
 

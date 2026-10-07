@@ -110,6 +110,7 @@ class OpenAIProvider(LLMProvider):
         job_id: int | None = None,
         use_cache: bool = True,
         refresh_cache: bool = False,
+        max_completion_tokens: int | None = None,
     ) -> T:
         model_name = model or self.cheap_model
         cache_key = make_cache_key(
@@ -198,7 +199,8 @@ class OpenAIProvider(LLMProvider):
                 ],
                 response_format=json_schema,
                 temperature=temperature,
-                max_completion_tokens=self._settings.openai_max_completion_tokens,
+                max_completion_tokens=max_completion_tokens
+                or self._settings.openai_max_completion_tokens,
                 # Groups requests sharing the same stable system/schema prefix
                 # on cache-friendly infrastructure. OpenAI prompt caching is
                 # automatic; this key contains no candidate or job data.
@@ -225,6 +227,11 @@ class OpenAIProvider(LLMProvider):
         # Validate before caching. Invalid output still incurred provider cost,
         # so usage is recorded independently from the cache write.
         try:
+            choice = response.choices[0]
+            if getattr(choice, "finish_reason", None) not in {None, "stop"}:
+                raise LLMValidationError("Incomplete LLM response; no evaluation published")
+            if getattr(choice.message, "refusal", None):
+                raise LLMValidationError("LLM refused the structured request")
             validated = self._validate(content, schema)
         except LLMValidationError:
             self._record_api_usage(

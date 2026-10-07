@@ -278,7 +278,12 @@ def ingest_text_command(
 
 
 @cli.command("process")
-@click.option("--top-k", type=int, default=None, help="Deprecated; analysis now processes all eligible offers.")
+@click.option(
+    "--top-k",
+    type=int,
+    default=None,
+    help="Deprecated; analysis now processes all eligible offers.",
+)
 def process_command(top_k: int | None) -> None:
     """Deterministically filter and analyze every eligible pending job."""
     from smartapply.pipeline import Pipeline
@@ -450,6 +455,104 @@ def stats_command() -> None:
             indent=2,
         )
     )
+
+
+@cli.command("rescore")
+@click.option(
+    "--job-id", "job_ids", type=int, multiple=True, help="Offres explicitement sélectionnées."
+)
+@click.option("--all-active", is_flag=True, help="Préparer le périmètre actif par défaut.")
+@click.option("--dry-run", is_flag=True, help="Préparer un plan, sans appel fournisseur.")
+@click.option(
+    "--plan",
+    "plan_path",
+    type=click.Path(path_type=Path),
+    required=True,
+    help="Fichier local du plan figé à créer ou à exécuter.",
+)
+@click.option(
+    "--include-extractions", is_flag=True, help="Annoncer les extractions nécessaires dans le plan."
+)
+@click.option(
+    "--force", is_flag=True, help="Inclure les évaluations déjà compatibles dans le plan."
+)
+@click.option(
+    "--execute-approved", is_flag=True, help="Exécuter uniquement le plan explicitement approuvé."
+)
+def rescore_command(
+    job_ids, all_active, dry_run, plan_path, include_extractions, force, execute_approved
+):
+    """Prévisualiser ou exécuter un recalcul ciblé du seul fit."""
+    from smartapply.llm import get_llm_provider
+    from smartapply.pipeline.rescore import execute_rescore_plan, plan_summary, prepare_rescore_plan
+
+    try:
+        if dry_run == execute_approved:
+            raise ValueError("Choose --dry-run or --execute-approved, exclusively")
+        if dry_run:
+            plan = prepare_rescore_plan(
+                job_ids=list(job_ids),
+                all_active=all_active,
+                include_extractions=include_extractions,
+                force=force,
+            )
+            # A plan contains private factual snapshots. Never overwrite an approved plan.
+            with plan_path.open("x", encoding="utf-8") as destination:
+                plan_path.chmod(0o600)
+                json.dump(plan, destination, ensure_ascii=False, indent=2)
+                destination.write("\n")
+            click.echo(
+                json.dumps(
+                    {"plan": str(plan_path.resolve()), **plan_summary(plan)},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        else:
+            if job_ids or all_active or include_extractions or force:
+                raise ValueError(
+                    "Execution consumes the saved plan; selection flags are not allowed"
+                )
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            results = execute_rescore_plan(plan, get_llm_provider(), approved=True)
+            click.echo(json.dumps(results, ensure_ascii=False, indent=2))
+            if any(result["status"] == "failed_or_stale" for result in results):
+                raise click.ClickException(
+                    "Certaines offres ont échoué ou changé ; anciennes évaluations préservées."
+                )
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command("fit-diagnostics")
+@click.option("--job-id", required=True, type=int)
+def fit_diagnostics_command(job_id):
+    """Afficher les faits, références et calcul de la dernière évaluation de fit."""
+    from smartapply.database.models import Job
+
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        if job is None or job.analysis is None:
+            raise click.ClickException("Offre sans analyse.")
+        diagnostics = job.analysis.fit_diagnostics
+        click.echo(
+            json.dumps(
+                diagnostics or {"policy_version": "legacy_or_unknown"}, ensure_ascii=False, indent=2
+            )
+        )
+
+
+@cli.command("fit-schema")
+def fit_schema_command():
+    """Ajouter seulement les colonnes de diagnostic, sans recalcul ni maintenance."""
+    from smartapply.database.fit_schema import ensure_fit_schema
+
+    try:
+        click.echo(
+            json.dumps({"schema_changes": ensure_fit_schema()}, ensure_ascii=False, indent=2)
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 if __name__ == "__main__":

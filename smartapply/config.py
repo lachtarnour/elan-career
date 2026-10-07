@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     openai_model_smart: str = Field(default="gpt-5.4")
     openai_model_embed: str = Field(default="text-embedding-3-small")
     openai_max_completion_tokens: int = Field(default=6000, ge=256, le=100_000)
+    fit_max_completion_tokens: int = Field(default=12000, ge=1024, le=100_000)
+    openai_context_window_tokens: int | None = Field(default=None, ge=1024)
+    declared_experience: str = "2 years of professional experience, plus 7 months of internship."
     llm_cache_ttl_days: int = Field(default=15, ge=1, le=365)
     # Embeddings
     embeddings_provider: str = Field(default="openai")

@@ -115,6 +115,68 @@ class OfferAnalysis(BaseModel):
     )
 
 
+class FitFinding(BaseModel):
+    model_config = _strict
+    offer_refs: list[str]
+    candidate_refs: list[str]
+    support: Literal["direct", "transferable", "declared_only", "not_documented", "contradicted"]
+    text: str = Field(min_length=1)
+
+
+class FitDimension(BaseModel):
+    model_config = _strict
+    level: int = Field(ge=0, le=4, strict=True)
+    findings: list[FitFinding]
+
+
+class FitDimensions(BaseModel):
+    model_config = _strict
+    missions: FitDimension
+    essentials: FitDimension
+    responsibilities: FitDimension
+
+
+class FitIssue(BaseModel):
+    model_config = _strict
+    code: Literal[
+        "confirmed_constraint_conflict",
+        "distant_core_work",
+        "substantial_core_gap",
+        "unclear_core_work",
+        "material_core_question",
+        "limited_question",
+        "offer_clarity",
+    ]
+    axis: Literal["missions", "essentials", "responsibilities", "context"]
+    origin: Literal["candidate_evidence", "offer_information", "preference_alignment"]
+    offer_refs: list[str]
+    candidate_refs: list[str]
+    text: str = Field(min_length=1)
+
+
+class NeutralOfferReference(BaseModel):
+    model_config = _strict
+    offer_ref: str
+    reason: Literal[
+        "years_only",
+        "explicit_exemption",
+        "optional_only",
+        "no_declared_preference",
+        "compatible_preference",
+    ]
+    scope: Literal["whole_entry", "years_component"]
+    candidate_refs: list[str]
+
+
+class JobFitEvaluation(BaseModel):
+    """Internal evidence diagnostic. Python alone produces the public score."""
+
+    model_config = _strict
+    dimensions: FitDimensions
+    issues: list[FitIssue]
+    neutral_offer_refs: list[NeutralOfferReference]
+
+
 class JobFitAssessment(BaseModel):
     """The matching call cannot return or overwrite extracted offer fields."""
 

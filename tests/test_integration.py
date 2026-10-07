@@ -15,12 +15,12 @@ from smartapply.llm import (
     ApplicationTexts,
     CVSelection,
     DocumentTextReview,
-    JobFitAssessment,
     MockLLMProvider,
     OfferAnalysis,
 )
 from smartapply.profile import get_profile
 from smartapply.ranking import MockEmbeddingsProvider
+from tests.fit_fixtures import evaluation_from_user
 
 
 @pytest.fixture(autouse=True)
@@ -140,15 +140,7 @@ def _register_llm_fixtures() -> None:
     )
     MockLLMProvider.register(
         "job_fit_assessment",
-        JobFitAssessment(
-            fit_score=0.5,
-            match_reasons=[
-                "Forte expérience NLP/RAG",
-                "Projet Evidence RAG",
-                "Pipelines speech via Whisper",
-            ],
-            risks=["Pas d'expérience prod cloud à grande échelle"],
-        ),
+        lambda **kwargs: evaluation_from_user(kwargs["user"], levels=(2, 4, 4)),
     )
     MockLLMProvider.register(
         "cv_adaptation",
@@ -248,11 +240,13 @@ def test_full_pipeline_on_realistic_sample(tmp_path: Path) -> None:
 
     # ---- Step 3: Optional ranking of the completed analysis pool ----
     with session_scope() as s:
-        analyzed_ids = list(s.scalars(
-            select(Job.id)
-            .join(JobAnalysis, JobAnalysis.job_id == Job.id)
-            .where(Job.archived_at.is_(None), Job.analyzed_at.is_not(None))
-        ))
+        analyzed_ids = list(
+            s.scalars(
+                select(Job.id)
+                .join(JobAnalysis, JobAnalysis.job_id == Job.id)
+                .where(Job.archived_at.is_(None), Job.analyzed_at.is_not(None))
+            )
+        )
     p.rank_pending(job_ids=analyzed_ids, top_k_ranked=2)
     with session_scope() as s:
         top = list(top_jobs_by_score(s, 2))

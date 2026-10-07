@@ -27,6 +27,7 @@ class AnalysisBatchRun(Base):
     state: Mapped[str] = mapped_column(String(32), default="active", index=True)
     model: Mapped[str] = mapped_column(String(128))
     profile_data: Mapped[dict[str, Any]] = mapped_column(JSON)
+    fit_context: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
     last_error: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
