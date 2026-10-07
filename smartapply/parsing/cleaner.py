@@ -63,9 +63,19 @@ _HEADING_RE = re.compile(
     re.UNICODE,
 )
 
+# Only structural HTML elements create a line break. A separator between every
+# text node would split sentences around inline formatting such as <strong>.
+_HTML_BLOCK_TAGS = {
+    "address", "article", "aside", "blockquote", "caption", "dd", "details",
+    "dialog", "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer",
+    "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hgroup", "hr",
+    "li", "main", "nav", "ol", "p", "pre", "section", "summary", "table",
+    "td", "th", "tr", "ul",
+}
+
 
 def strip_html(text: str) -> str:
-    """Remove HTML tags and decode entities. Whitespace is normalized."""
+    """Remove HTML while keeping inline text joined and block boundaries distinct."""
     if not text:
         return ""
     if "<" not in text:
@@ -73,7 +83,16 @@ def strip_html(text: str) -> str:
     soup = BeautifulSoup(text, "lxml")
     for tag in soup(["script", "style", "noscript", "iframe", "svg"]):
         tag.decompose()
-    return soup.get_text("\n", strip=True)
+    for tag in soup.find_all("br"):
+        tag.replace_with("\n")
+    for tag in soup.find_all(_HTML_BLOCK_TAGS):
+        tag.insert_before("\n")
+        tag.insert_after("\n")
+    # Adjacent/nested blocks share one boundary; inline nodes retain their actual
+    # spaces and punctuation instead of gaining a newline (or an extra space).
+    cleaned = soup.get_text()
+    cleaned = re.sub(r"\n[ \t\r\n]*\n", "\n", cleaned)
+    return normalize_whitespace(cleaned)
 
 
 def normalize_whitespace(text: str) -> str:

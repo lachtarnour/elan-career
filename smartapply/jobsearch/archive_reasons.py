@@ -23,12 +23,24 @@ _NON_DECISIVE_REASON_PREFIXES = {
 }
 
 _TITLE_FAMILY_LABELS = {
+    "academic_teaching": "Poste d’enseignement, hors cible Data/IA",
+    "building_hvac": "Poste orienté bâtiment, CVC ou génie climatique, hors cible Data/IA",
     "business": "Poste orienté business, hors cible Data/IA",
+    "data_literal_not_analytics": "Poste lié aux data centers physiques, hors cible Data/IA",
     "data_engineering": "Poste de Data Engineering pur, hors cible actuelle",
     "devops": "Poste DevOps, hors cible Data/IA",
+    "industrial_methods_maintenance": "Poste de méthodes ou maintenance industrielle, hors cible Data/IA",
+    "industrial_studies_operations": "Poste d’études ou d’opérations industrielles, hors cible Data/IA",
+    "laboratory_domain_science": "Poste scientifique spécialisé hors du domaine Data/IA recherché",
+    "legal_compliance": "Poste juridique ou conformité, hors cible Data/IA",
+    "marketing_customer": "Poste marketing ou relation client, hors cible Data/IA",
+    "mechanical_civil_materials": "Poste mécanique, génie civil ou matériaux, hors cible Data/IA",
     "mlops": "Poste MLOps pur, hors cible actuelle",
+    "people_administration": "Poste RH ou administratif, hors cible Data/IA",
     "product": "Poste produit, hors cible Data/IA",
+    "sales_commercial": "Poste commercial ou vente, hors cible Data/IA",
     "software_engineering": "Poste de développement logiciel, hors cible Data/IA",
+    "support_and_administration": "Poste support ou administration, hors cible Data/IA",
 }
 
 _LANGUAGE_LABELS = {
@@ -102,11 +114,13 @@ def _archive_reason_label(reason: str) -> str:
         return f"Type de contrat non recherché : {contract or 'non compatible'}"
     if code.startswith("blocked_work_time_"):
         return "Temps partiel non recherché"
-    if code == "title_hard_reject":
+    if code in {"title_hard_reject", "off_target_role_family"}:
         return _TITLE_FAMILY_LABELS.get(
-            detail,
+            detail.replace(" ", "_"),
             f"Famille de poste hors cible : {detail or 'non reconnue'}",
         )
+    if code == "qualification_required" and detail == "doctorate":
+        return "Doctorat obligatoire non compatible avec le profil actuel"
     if code in {"seniority_in_title", "seniority_blocked"}:
         return (
             f"Niveau de séniorité trop élevé : {detail}"

@@ -16,6 +16,57 @@ def test_strip_html_removes_tags_and_scripts() -> None:
     assert "Hello" in out and "world" in out
 
 
+def test_strip_html_keeps_inline_formatted_ml_missions_together() -> None:
+    html = (
+        "<p>Développer des modèles de <strong>Machine Learning</strong> "
+        "avec <em>PyTorch</em> et <a href='/tensorflow'>TensorFlow</a>.</p>"
+        "<p>Entraîner et déployer des modèles de <span>Deep Learning</span>.</p>"
+    )
+
+    assert strip_html(html) == (
+        "Développer des modèles de Machine Learning avec PyTorch et TensorFlow.\n"
+        "Entraîner et déployer des modèles de Deep Learning."
+    )
+
+
+def test_strip_html_preserves_block_list_and_line_break_boundaries() -> None:
+    html = (
+        "<h2>Missions</h2><div><p>Concevoir des modèles.</p>"
+        "<ul><li>Entraîner les modèles.</li><li>Évaluer les résultats.<br>"
+        "Déployer en production.</li></ul></div>"
+        "<h2>Profil</h2><p>Python et SQL.</p>"
+    )
+
+    assert strip_html(html).splitlines() == [
+        "Missions",
+        "Concevoir des modèles.",
+        "Entraîner les modèles.",
+        "Évaluer les résultats.",
+        "Déployer en production.",
+        "Profil",
+        "Python et SQL.",
+    ]
+
+
+def test_strip_html_preserves_adjacent_inline_text_and_punctuation() -> None:
+    html = (
+        "<p><span>Py</span><strong>Torch</strong>, "
+        "<em>scikit</em>-<span>learn</span> et <a href='/ml'>ML</a>.</p>"
+    )
+
+    assert strip_html(html) == "PyTorch, scikit-learn et ML."
+
+
+def test_strip_html_decodes_entities_and_removes_hidden_content() -> None:
+    html = (
+        "<p>R&amp;D&nbsp;: <strong>IA</strong> &lt;modèles&gt;.</p>"
+        "<style>.hidden { color: red; }</style><script>alert('script')</script>"
+        "<noscript>fallback</noscript><iframe>embedded</iframe><svg>vector</svg>"
+    )
+
+    assert strip_html(html) == "R&D : IA <modèles>."
+
+
 def test_clean_description_reduces_size_meaningfully() -> None:
     noisy = (
         "<p>Looking for a <b>Data Scientist</b>.</p>\n"

@@ -13,11 +13,18 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from functools import lru_cache
+from types import SimpleNamespace
 from typing import Protocol
 
 from rapidfuzz import fuzz
 from unidecode import unidecode
 
+from smartapply.filtering.experience_requirements import assess_candidate_experience
+from smartapply.filtering.preferences import ruleset_from_preferences
+from smartapply.filtering.seniority import assess_seniority
+from smartapply.filtering.source_facts import build_filter_facts
+from smartapply.filtering.types import HasJobFields
 from smartapply.profile import Profile
 from smartapply.ranking.embeddings import (
     EmbeddingsProvider,
@@ -87,6 +94,29 @@ def _norm(s: str | None) -> str:
     return unidecode((s or "").lower())
 
 
+def _skill_lexical_form(value: str | None) -> str:
+    """Normalize separators without erasing meaningful skill punctuation."""
+    normalized = _norm(value)
+    normalized = re.sub(r"\s*([/&])\s*", r"\1", normalized)
+    normalized = re.sub(r"(?<=[a-z0-9])[-_](?=[a-z0-9])", " ", normalized)
+    return " ".join(normalized.split())
+
+
+@lru_cache(maxsize=512)
+def _skill_pattern(skill: str) -> re.Pattern[str]:
+    """Compile one catalogue skill as an independent lexical term."""
+    body = re.escape(skill)
+    if len(skill) == 1 and skill.isalnum():
+        # Single-letter languages must not match words, R&D, C++, or C#.
+        boundary_chars = "a-z0-9+#&"
+        return re.compile(rf"(?<![{boundary_chars}]){body}(?![{boundary_chars}])")
+
+    left = r"(?<![a-z0-9])"
+    # Accept version suffixes such as C++17, while rejecting C++Builder.
+    right = r"(?![a-z+#])" if skill[-1] in "+#" else r"(?![a-z0-9])"
+    return re.compile(f"{left}{body}{right}")
+
+
 def build_profile_text(profile: Profile) -> str:
     """Aggregate the profile into a single document for embedding."""
     parts = [profile.identity.title, profile.identity.summary]
@@ -125,7 +155,15 @@ class JobScorer:
         self.profile = profile
         self.embeddings = embeddings or get_embeddings_provider()
         self._profile_vector: list[float] | None = None
-        self._allowed_skills_lower: set[str] = {s.lower() for s in profile.skills.allowed_skills}
+        skill_terms = {
+            normalized
+            for skill in profile.skills.allowed_skills
+            if (normalized := _skill_lexical_form(skill))
+        }
+        self._allowed_skill_patterns = tuple(
+            _skill_pattern(skill) for skill in sorted(skill_terms)
+        )
+        self._filter_rules = ruleset_from_preferences(profile.preferences)
 
     # -------------------- score components --------------------
 
@@ -140,12 +178,12 @@ class JobScorer:
         return max(0.0, (sim + 1.0) / 2.0)
 
     def _skills_score(self, job: ScorableJob) -> float:
-        if not self._allowed_skills_lower:
+        if not self._allowed_skill_patterns:
             return 0.0
-        text = _norm(job.description) + " " + _norm(job.title)
+        text = _skill_lexical_form(f"{job.description} {job.title}")
         if _analytics_without_python(_norm(job.title), _norm(job.description)):
             return 0.0
-        hits = sum(1 for s in self._allowed_skills_lower if s in text)
+        hits = sum(pattern.search(text) is not None for pattern in self._allowed_skill_patterns)
         # Saturate at 8 matches
         return min(1.0, hits / 8.0)
 
@@ -160,31 +198,62 @@ class JobScorer:
         return best / 100.0
 
     def _seniority_score(self, job: ScorableJob) -> float:
+        seniority = assess_seniority(
+            job.title,
+            job.description,
+            configured_title_markers=self._filter_rules.seniority_title_hard_reject,
+        )
+        if seniority.blocked:
+            return 0.10
+
+        view = self._job_view(job)
+        experience = assess_candidate_experience(
+            title=job.title,
+            description=job.description,
+            facts=build_filter_facts(view),
+            max_required_years=self._filter_rules.max_required_years,
+        )
+        requirements = experience.resolved_mandatory_years
+        if requirements:
+            required_years = max(requirements)
+            if required_years >= 10:
+                return 0.10
+            if required_years >= 6:
+                return 0.20
+            if required_years >= 5:
+                return 0.25
+            if required_years >= 4:
+                return 0.40
+            if required_years >= 3:
+                return 0.90
+            if required_years >= 2:
+                return 0.95
+
         title = _norm(job.title)
-        text = _norm(job.description) + " " + title
-        # Order matters: the FIRST match wins. We start with the strongest
-        # negative signals (senior/lead in title) so they can't be diluted
-        # by an incidental "junior" mention buried in the description.
-        rules = [
-            # ---- Strong negative: explicit seniority labels in the title ----
-            (r"\b(senior|sr\.?|lead|principal|staff|expert)\b", title, 0.10),
-            (r"\bchef de projet|tech lead|team lead\b", text, 0.10),
-            # ---- Years-of-experience floors that are above target ----
-            (r"\b(1[0-9]|[2-9][0-9])\+? ?(years|ans|an)\b", text, 0.10),  # 10+ ans
-            (r"\b[6-9]\+? ?(years|ans|an)\b", text, 0.20),  # 6-9 ans
-            (r"\b5\+? ?(years|ans|an)\b", text, 0.25),  # 5+ ans
-            (r"\b4\+? ?(years|ans|an)\b", text, 0.40),  # 4+ ans
-            # ---- Internships and apprenticeships: out of scope here ----
-            (r"\b(stage|stagiaire|intern(ship)?|alternance|apprenti)\b", text, 0.10),
-            # ---- Positive matches for the candidate's target band ----
-            (r"\b(junior|d[ée]butant)\b", text, 1.0),
-            (r"\b2\+? ?(years|ans|an)\b", text, 0.95),
-            (r"\b3\+? ?(years|ans|an)\b", text, 0.9),
-        ]
-        for pattern, haystack, score in rules:
-            if re.search(pattern, haystack):
-                return score
+        description = _norm(job.description)
+        if re.search(r"\b(?:junior|debutant)\b", title):
+            return 1.0
+        if re.search(
+            r"\b(?:entry[- ]level|debutant(?:e)?s?\s+accepte(?:e)?s?|"
+            r"no\s+experience\s+(?:is\s+)?required|sans\s+experience)\b",
+            description,
+        ):
+            return 1.0
         return 0.7
+
+    @staticmethod
+    def _job_view(job: ScorableJob) -> HasJobFields:
+        return SimpleNamespace(
+            title=job.title,
+            company=str(getattr(job, "company", "") or ""),
+            description=job.description,
+            location=getattr(job, "location", None),
+            contract_type=getattr(job, "contract_type", None),
+            remote_policy=getattr(job, "remote_policy", None),
+            application_url=getattr(job, "application_url", None),
+            source=str(getattr(job, "source", "") or ""),
+            source_data=getattr(job, "source_data", None),
+        )
 
     def _location_score(self, job: ScorableJob) -> float:
         """Stay neutral: the selected search location is authoritative."""
