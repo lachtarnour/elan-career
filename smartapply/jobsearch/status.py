@@ -16,7 +16,10 @@ STATUS_FLOW: tuple[dict[str, Any], ...] = (
     {
         "status": JobStatus.SCRAPED,
         "label": "Nouvelle",
-        "description": "Offre passée le filtre local, en attente d’analyse.",
+        "description": (
+            "Offre non rejetée par les règles déterministes, "
+            "en attente de classification."
+        ),
         "group": "offers",
     },
     {
@@ -82,13 +85,10 @@ def display_status(status: str) -> str:
     return status
 
 
-# States exposed by the unified Offers page. ``FILTERED`` is deliberately
-# absent: it is the internal result of local filtering and is presented as
-# ``Nouvelle`` through the SCRAPED state. Detailed application-tracking states
-# remain available in the offer detail and workflow, but are not filters.
+# New offers live in Analysis. The Offers filters start with analyzed offers;
+# internal pre-analysis states remain available to the pipeline and its API.
 OFFER_FILTER_STATUSES = (
     JobStatus.DUPLICATE_REVIEW,
-    JobStatus.SCRAPED,
     JobStatus.ANALYZED,
     JobStatus.SHORTLISTED,
     JobStatus.READY_FOR_FORM_SUBMISSION,

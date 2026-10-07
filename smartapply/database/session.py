@@ -33,6 +33,9 @@ _observer_lock = RLock()
 _database_observers: dict[object, tuple[Callable[..., None], bool]] = {}
 _MAINTENANCE_KEY = "desktop_startup_maintenance"
 _MAINTENANCE_VERSION = "2"
+_DUPLICATE_AUTOMATION_KEY = "duplicate_review_automation"
+_FILTER_LABELS_KEY = "offer_filter_labels"
+_OFFER_STATE_KEY = "offer_state_policy"
 
 
 class StartupMaintenanceRequiredError(RuntimeError):
@@ -83,6 +86,9 @@ def init_db(*, run_maintenance: bool = True) -> None:
     Base.metadata.create_all(get_engine())
     auto_migrate()
     ensure_indexes()
+    from smartapply.pipeline.output_deletion import recover_application_deletions
+
+    recover_application_deletions()
     # Retention is periodic housekeeping, not a historical schema repair.
     # Provider calls also purge expired responses, but idle users still need
     # bounded retention without rerunning the duplicate backfill.
@@ -93,9 +99,19 @@ def init_db(*, run_maintenance: bool = True) -> None:
 
 
 def startup_maintenance_pending() -> bool:
+    from smartapply.database.repository.offer_state import OFFER_STATE_VERSION
+    from smartapply.dedup.review_decisions import REVIEW_POLICY_VERSION
+    from smartapply.maintenance.filter_labels import FILTER_LABELS_VERSION
+
     with session_scope() as session:
         setting = session.get(AppSetting, _MAINTENANCE_KEY)
-        return setting is None or setting.value != _MAINTENANCE_VERSION
+        duplicate_setting = session.get(AppSetting, _DUPLICATE_AUTOMATION_KEY)
+        labels_setting = session.get(AppSetting, _FILTER_LABELS_KEY)
+        state_setting = session.get(AppSetting, _OFFER_STATE_KEY)
+        return (setting is None or setting.value != _MAINTENANCE_VERSION
+                or duplicate_setting is None or duplicate_setting.value != REVIEW_POLICY_VERSION
+                or labels_setting is None or labels_setting.value != FILTER_LABELS_VERSION
+                or state_setting is None or state_setting.value != OFFER_STATE_VERSION)
 
 
 def ensure_startup_maintenance_complete() -> None:
@@ -107,33 +123,66 @@ def run_startup_maintenance(*, stop_requested: Callable[[], bool] | None = None)
     """Run versioned repairs once, without marking an interrupted pass complete."""
     if not startup_maintenance_pending():
         return True
+    from smartapply.database.repository.offer_state import OFFER_STATE_VERSION
+    from smartapply.dedup.review_decisions import REVIEW_POLICY_VERSION
+    from smartapply.maintenance.duplicate_reviews import reconcile_pending_reviews
+    from smartapply.maintenance.filter_labels import (
+        FILTER_LABELS_VERSION,
+        complete_missing_filter_labels,
+    )
+    from smartapply.maintenance.offer_states import reconcile_offer_states
+
+    with session_scope() as session:
+        setting = session.get(AppSetting, _MAINTENANCE_KEY)
+        legacy_pending = setting is None or setting.value != _MAINTENANCE_VERSION
     steps = (
         backfill_shortlisted_at, clear_archived_shortlists, clear_unanalyzed_shortlists,
         backfill_analyzed_statuses, backfill_usage_job_external_ids,
     )
-    for step in steps:
+    for step in steps if legacy_pending else ():
         if stop_requested and stop_requested():
             return False
         step()
     try:
-        backfill_duplicate_reviews(stop_requested=stop_requested)
+        if legacy_pending:
+            backfill_duplicate_reviews(stop_requested=stop_requested)
+        reconcile_pending_reviews(stop_requested=stop_requested)
+        reconcile_offer_states(stop_requested=stop_requested)
+        complete_missing_filter_labels(stop_requested=stop_requested)
     except _MaintenanceInterrupted:
         return False
     if stop_requested and stop_requested():
         return False
     from smartapply.database.display_metadata import backfill_display_metadata
 
-    backfill_display_metadata(stop_requested=stop_requested)
+    if legacy_pending:
+        backfill_display_metadata(stop_requested=stop_requested)
     if stop_requested and stop_requested():
         return False
     with write_session_scope() as session:
-        clear_shortlist_for_sent_applications(session)
-        purge_expired_cache(session, ttl_days=get_settings().llm_cache_ttl_days)
+        if legacy_pending:
+            clear_shortlist_for_sent_applications(session)
+            purge_expired_cache(session, ttl_days=get_settings().llm_cache_ttl_days)
         setting = session.get(AppSetting, _MAINTENANCE_KEY)
         if setting is None:
             session.add(AppSetting(key=_MAINTENANCE_KEY, value=_MAINTENANCE_VERSION))
         else:
             setting.value = _MAINTENANCE_VERSION
+        duplicate_setting = session.get(AppSetting, _DUPLICATE_AUTOMATION_KEY)
+        if duplicate_setting is None:
+            session.add(AppSetting(key=_DUPLICATE_AUTOMATION_KEY, value=REVIEW_POLICY_VERSION))
+        else:
+            duplicate_setting.value = REVIEW_POLICY_VERSION
+        labels_setting = session.get(AppSetting, _FILTER_LABELS_KEY)
+        if labels_setting is None:
+            session.add(AppSetting(key=_FILTER_LABELS_KEY, value=FILTER_LABELS_VERSION))
+        else:
+            labels_setting.value = FILTER_LABELS_VERSION
+        state_setting = session.get(AppSetting, _OFFER_STATE_KEY)
+        if state_setting is None:
+            session.add(AppSetting(key=_OFFER_STATE_KEY, value=OFFER_STATE_VERSION))
+        else:
+            state_setting.value = OFFER_STATE_VERSION
     return True
 
 
