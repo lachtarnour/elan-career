@@ -278,9 +278,9 @@ def ingest_text_command(
 
 
 @cli.command("process")
-@click.option("--top-k", type=int, default=None)
+@click.option("--top-k", type=int, default=None, help="Deprecated; analysis now processes all eligible offers.")
 def process_command(top_k: int | None) -> None:
-    """Filter, rank and analyze pending jobs."""
+    """Deterministically filter and analyze every eligible pending job."""
     from smartapply.pipeline import Pipeline
 
     report = Pipeline().process_pending(top_k_analyze=top_k)

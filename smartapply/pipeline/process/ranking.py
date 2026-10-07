@@ -18,12 +18,46 @@ from smartapply.database.repository import (
     set_score,
     set_shortlisted,
 )
+from smartapply.filtering.hard_reject.types import HardRejectDisposition
+from smartapply.pipeline.process.analysis_admission import has_protected_workflow_history
+from smartapply.pipeline.process.filter_state import (
+    current_hard_reject_disposition,
+    has_manual_keep_override,
+    is_current_hard_reject_survivor,
+)
+from smartapply.pipeline.process.score_components import replace_ranking_components
 from smartapply.pipeline.reports import RankingReport
 from smartapply.pipeline.snapshots import check_cancelled, job_is_active, job_snapshot_key
 
 
 class RankingMixin:
     """Rank locally kept jobs and persist shortlist status."""
+
+    @staticmethod
+    def _filter_disposition(job: Job) -> HardRejectDisposition | None:
+        components = job.score.components if job.score is not None else None
+        return current_hard_reject_disposition(components)
+
+    @staticmethod
+    def _has_manual_keep_override(job: Job) -> bool:
+        components = job.score.components if job.score is not None else None
+        return has_manual_keep_override(components)
+
+    @staticmethod
+    def _has_protected_filter_history(job: Job) -> bool:
+        """Return whether filter repair must preserve the workflow record."""
+
+        return has_protected_workflow_history(job)
+
+    @staticmethod
+    def _needs_ranking(job: Job) -> bool:
+        """Return whether the persisted ranking contract is incomplete."""
+
+        return (
+            job.ranked_at is None
+            or job.score is None
+            or job.score.final_score is None
+        )
 
     def rank_pending(
         self,
@@ -41,37 +75,97 @@ class RankingMixin:
         """
         stop_requested = getattr(self, "stop_requested", None)
         check_cancelled(stop_requested)
+        requested_ids = set(job_ids or [])
+        requested_override_ids = set(local_filter_override_ids or [])
         with session_scope() as session:
-            active_jobs = list(session.scalars(
-                select(Job).where(
-                    Job.archived_at.is_(None), Job.analyzed_at.is_(None),
-                    or_(Job.duplicate_review_status.is_(None),
-                        Job.duplicate_review_status != JobDuplicateStatus.PENDING),
-                ).options(selectinload(Job.score), selectinload(Job.analysis))
-            ))
-            pending = [job for job in active_jobs if job.ranked_at is None]
+            conditions = [
+                Job.archived_at.is_(None),
+                or_(
+                    Job.duplicate_review_status.is_(None),
+                    Job.duplicate_review_status != JobDuplicateStatus.PENDING,
+                ),
+            ]
+            if job_ids is None:
+                # Routine ranking stays limited to the pending-analysis queue.
+                # An analyzed legacy row is repaired only through an explicit
+                # user-selected workflow, never as a startup or global sweep.
+                conditions.append(Job.analyzed_at.is_(None))
+            else:
+                conditions.append(
+                    or_(Job.analyzed_at.is_(None), Job.id.in_(requested_ids))
+                )
+            active_jobs = list(
+                session.scalars(
+                    select(Job)
+                    .where(*conditions)
+                    .options(
+                        selectinload(Job.score),
+                        selectinload(Job.analysis),
+                        selectinload(Job.application),
+                    )
+                )
+            )
+            force_keep_ids = requested_override_ids | {
+                int(job.id) for job in active_jobs
+                if self._has_manual_keep_override(job)
+            }
+            pending = []
+            for job in active_jobs:
+                disposition = self._filter_disposition(job)
+                rejected = disposition is HardRejectDisposition.REJECTED
+                needs_filter = job.filtered_at is None or disposition is None
+                if (
+                    (not rejected and (needs_filter or self._needs_ranking(job)))
+                    or (rejected and int(job.id) in force_keep_ids)
+                    or (
+                        rejected and needs_filter
+                        and not self._has_protected_filter_history(job)
+                    )
+                ):
+                    pending.append(job)
             if job_ids is not None:
-                selected_ids = set(job_ids)
-                pending = [job for job in pending if job.id in selected_ids]
+                pending = [job for job in pending if job.id in requested_ids]
             snapshots = {int(job.id): job_snapshot_key(job) for job in pending}
             duplicate_ids = self._mark_duplicates(session, active_jobs)
             session.expunge_all()
 
-        override_ids = set(local_filter_override_ids or [])
-        filter_results = {
-            int(job.id): self.filter.evaluate(job)
-            for job in pending if job.id not in duplicate_ids and job.filtered_at is None
-        }
-        kept = [job for job in pending if job.id not in duplicate_ids and (
-            job.filtered_at is not None or filter_results[job.id].kept or job.id in override_ids
-        )]
+        filter_results = {}
+        kept = []
+        for job in pending:
+            job_id = int(job.id)
+            if job_id in duplicate_ids:
+                continue
+            disposition = self._filter_disposition(job)
+            needs_filter = (
+                job.filtered_at is None
+                or disposition is None
+                or (
+                    disposition is HardRejectDisposition.REJECTED
+                    and job_id in force_keep_ids
+                )
+            )
+            if needs_filter:
+                result = self.filter.evaluate(job)
+                filter_results[job_id] = result
+                protected_complete_rank = (
+                    self._has_protected_filter_history(job)
+                    and not self._needs_ranking(job)
+                )
+                if (result.kept or job_id in force_keep_ids) and not protected_complete_rank:
+                    kept.append(job)
+            elif disposition is HardRejectDisposition.PENDING_RELEVANCE:
+                kept.append(job)
         check_cancelled(stop_requested)
         ranked = self.scorer.rank(kept) if kept else []
         check_cancelled(stop_requested)
         with write_session_scope() as session:
             current_by_id = {int(job.id): job for job in session.scalars(
                 select(Job).where(Job.id.in_(snapshots))
-                .options(selectinload(Job.score), selectinload(Job.analysis))
+                .options(
+                    selectinload(Job.score),
+                    selectinload(Job.analysis),
+                    selectinload(Job.application),
+                )
             )}
             valid_ids = {
                 job_id for job_id, job in current_by_id.items()
@@ -79,16 +173,42 @@ class RankingMixin:
             }
             for job_id, result in filter_results.items():
                 if job_id in valid_ids:
-                    self._persist_filter_result(
-                        session, current_by_id[job_id], result,
-                        force_keep=job_id in override_ids, update_pipeline_status=True,
+                    job = current_by_id[job_id]
+                    force_keep = (
+                        job_id in requested_override_ids
+                        or self._has_manual_keep_override(job)
                     )
+                    protected_history = self._has_protected_filter_history(job)
+                    if protected_history:
+                        self._persist_filter_state_only(
+                            session,
+                            job,
+                            result,
+                            force_keep=force_keep,
+                        )
+                    else:
+                        self._persist_filter_result(
+                            session,
+                            job,
+                            result,
+                            force_keep=force_keep,
+                            update_pipeline_status=job.analyzed_at is None,
+                        )
             session.flush()
             for job_id in valid_ids & filter_results.keys():
                 session.expire(current_by_id[job_id], ["score"])
+            ranking_eligible_ids = {
+                job_id
+                for job_id in valid_ids
+                if is_current_hard_reject_survivor(
+                    current_by_id[job_id].score.components
+                    if current_by_id[job_id].score is not None
+                    else None
+                )
+            }
             self._persist_scores(session, [
                 (current_by_id[job.id], components) for job, components in ranked
-                if job.id in valid_ids
+                if job.id in ranking_eligible_ids
             ])
             ranked_candidates = self._ranked_shortlist_candidates(
                 session, unanalyzed_only=not persist_shortlist,
@@ -130,14 +250,14 @@ class RankingMixin:
             previous_components = (
                 dict(job.score.components) if job.score is not None and job.score.components else {}
             )
-            components = comp.to_dict()
-            if previous_components.get("reasons"):
-                components["reasons"] = previous_components["reasons"]
-            if previous_components.get("filter_disposition"):
-                components["filter_disposition"] = previous_components["filter_disposition"]
+            components = replace_ranking_components(
+                previous_components,
+                comp.to_dict(),
+            )
             set_score(
                 session,
                 job.id,
+                rule_based_score=None,
                 semantic_score=comp.semantic,
                 skill_score=comp.skills,
                 title_score=comp.title,
@@ -173,7 +293,7 @@ class RankingMixin:
             conditions.append(Job.analyzed_at.is_(None))
         elif analyzed_only:
             conditions.append(Job.analyzed_at.is_not(None))
-        return list(
+        candidates = list(
             session.execute(
                 select(Job)
                 .join(JobScore, JobScore.job_id == Job.id)
@@ -184,6 +304,13 @@ class RankingMixin:
             .scalars()
             .all()
         )
+        return [
+            job
+            for job in candidates
+            if is_current_hard_reject_survivor(
+                job.score.components if job.score is not None else None
+            )
+        ]
 
     @staticmethod
     def _mixed_score_shortlist(candidates: list[Job], shortlist_n: int) -> list[Job]:

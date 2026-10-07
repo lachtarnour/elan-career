@@ -50,6 +50,10 @@ _FT_TEMPORARY_MARKERS = ("interim", "mission interim")
 _FT_PART_TIME_MARKERS = ("temps partiel", "mi temps", "mi-temps", "part time", "part-time")
 _FT_FULL_TIME_MARKERS = ("temps plein", "plein temps", "full time", "full-time")
 _FT_WEEKLY_HOURS_RE = re.compile(r"\b(?P<hours>\d{1,2})(?:[,.]\d+)?\s*h\b")
+_FT_WEEKLY_PERIOD_RE = re.compile(
+    r"(?:/\s*semaine\b|\b(?:par\s+)?semaine\b|\bhebdomadaire\b|"
+    r"/\s*week\b|\bper\s+week\b|\bweekly\b)"
+)
 
 
 def build_francetravail_filter_facts(source_data: dict[str, Any]) -> FilterFacts:
@@ -172,6 +176,13 @@ def _extract_francetravail_work_modalities(
         facts.structured_alternance = alternance
         facts.facts_used.append(f"structured_alternance:{str(alternance).lower()}")
 
+    raw_label = _clean_text(source_data.get("dureeTravailLibelle"))
+    weekly_hours = _weekly_hours(raw_label)
+    if weekly_hours is not None and weekly_hours <= 1:
+        facts.warnings.append(
+            f"structured_work_time_implausible_weekly_hours:{weekly_hours}"
+        )
+
     converted = _clean_text(source_data.get("dureeTravailLibelleConverti"))
     if converted:
         work_time = _normalized_work_time_label(converted) or converted
@@ -180,7 +191,6 @@ def _extract_francetravail_work_modalities(
         facts.facts_used.append(f"structured_work_time:{work_time}")
         return
 
-    raw_label = _clean_text(source_data.get("dureeTravailLibelle"))
     work_time = _work_time_from_raw_label(raw_label)
     if not work_time:
         return
@@ -227,6 +237,16 @@ def _work_time_from_raw_label(value: str | None) -> str | None:
     if hours < 35:
         return "Temps partiel"
     return None
+
+
+def _weekly_hours(value: str | None) -> int | None:
+    normalized = norm(value)
+    if not normalized or not _FT_WEEKLY_PERIOD_RE.search(normalized):
+        return None
+    match = _FT_WEEKLY_HOURS_RE.search(normalized)
+    if not match:
+        return None
+    return int(match.group("hours"))
 
 
 def _experience_requirement(

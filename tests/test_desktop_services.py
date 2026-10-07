@@ -15,6 +15,7 @@ from smartapply.database.repository import (
     mark_analyzed,
     mark_archived,
     mark_filtered,
+    mark_ranked,
     set_analysis,
     set_score,
     set_shortlisted,
@@ -41,6 +42,49 @@ def _job(*, external_id: str, description: str = "Description") -> int:
         )
         session.flush()
         return job.id
+
+
+def _prepare_ranked_analysis(session, job_id: int) -> None:
+    mark_filtered(session, job_id)
+    set_score(
+        session,
+        job_id,
+        final_score=0.75,
+        components={
+            "final": 0.75,
+            "filter_disposition": "pending_relevance",
+            "hard_reject": {
+                "ruleset_version": "hard-reject-v2",
+                "rejected": False,
+                "gates": [],
+            },
+        },
+    )
+    mark_ranked(session, job_id)
+    mark_analyzed(session, job_id)
+
+
+def test_job_detail_exposes_classification_without_changing_the_record(isolated_db) -> None:
+    job_id = _job(external_id="classification-detail")
+    components = {
+        "filter_disposition": "pending_relevance",
+        "hard_reject": {
+            "rejected": False,
+            "gates": [{"gate": "contract", "status": "unresolved"}],
+        },
+    }
+    with session_scope() as session:
+        mark_filtered(session, job_id)
+        set_score(session, job_id, final_score=None, components=components)
+
+    detail = DesktopService().get_job(job_id)
+
+    assert detail is not None
+    assert "pertinence" in detail.classification_summary
+    assert detail.classification_reasons
+    assert "contrat" in " ".join(detail.classification_reasons).lower()
+    with session_scope() as session:
+        assert session.get(Job, job_id).score.components == components
 
 
 def test_bridge_keeps_the_selected_top_k_for_shortlist_updates() -> None:
@@ -89,8 +133,8 @@ def test_selected_analysis_is_scoped_and_does_not_persist_a_shortlist(isolated_d
     calls: list[tuple[str, object]] = []
 
     class FakePipeline:
-        def rank_pending(self, **kwargs):
-            calls.append(("rank", kwargs))
+        def prepare_analysis(self, **kwargs):
+            calls.append(("prepare", kwargs))
 
         def analyze_jobs(self, job_ids):
             calls.append(("analyze", list(job_ids)))
@@ -107,8 +151,8 @@ def test_selected_analysis_is_scoped_and_does_not_persist_a_shortlist(isolated_d
 
     assert calls == [
         (
-            "rank",
-            {"top_k_ranked": 2, "job_ids": [8, 3], "persist_shortlist": False},
+            "prepare",
+            {"job_ids": [8, 3]},
         ),
         ("analyze", [8, 3]),
     ]
@@ -172,7 +216,8 @@ def test_job_rows_include_experience_and_application_state(isolated_db) -> None:
     assert len(rows) == 1
     assert rows[0].experience == "3+ ans"
     assert rows[0].application_id == application_id
-    assert rows[0].status == JobStatus.ANALYZED
+    assert rows[0].status == JobStatus.SCRAPED
+    assert not rows[0].analyzed  # An empty reservation is not a completed analysis.
     assert rows[0].analyzed is False
     assert rows[0].can_generate is False
     assert rows[0].can_send is False
@@ -205,6 +250,61 @@ def test_new_offer_rows_expose_and_sort_by_publication_date(isolated_db) -> None
 
     assert [row.id for row in rows] == [newer_id, older_id]
     assert [row.published_date for row in rows] == ["01/10/2026", "28/09/2026"]
+
+
+def test_analysis_dates_use_completion_and_sort_across_pages(isolated_db) -> None:
+    ids = [_job(external_id=f"analysis-date-{index}") for index in range(3)]
+    with session_scope() as session:
+        for index, job_id in enumerate(ids):
+            _prepare_ranked_analysis(session, job_id)
+            session.get(Job, job_id).analyzed_at = datetime(
+                2026, 10, index + 1, 12, tzinfo=timezone.utc,
+            )
+    service = DesktopService()
+    rows = service.list_jobs(status=JobStatus.ANALYZED, sort_key="analyzed_at")
+    assert [row.id for row in rows] == ids[::-1]
+    assert [row.analyzed_at for row in rows] == ["03/10/2026", "02/10/2026", "01/10/2026"]
+    page = service.list_jobs_page(
+        status=JobStatus.ANALYZED, sort_key="analyzed_at", page=1, page_size=1,
+    )
+    assert page["total"] == 3 and page["rows"][0].id == ids[1]
+    assert service.get_job(ids[2]).analyzed_at == "03/10/2026"
+
+
+def test_preparation_dates_keep_document_evidence_after_note_edits(isolated_db) -> None:
+    from smartapply.database.models import GeneratedDocument
+    from smartapply.database.repository import update_application_tracking
+
+    historical_id = _job(external_id="historical-preparation-date")
+    current_id = _job(external_id="current-preparation-date")
+    unknown_id = _job(external_id="unknown-preparation-date")
+    with session_scope() as session:
+        for job_id in (historical_id, current_id, unknown_id):
+            _prepare_ranked_analysis(session, job_id)
+            application = create_or_get_application(session, job_id)
+            application.status = JobStatus.READY_FOR_FORM_SUBMISSION
+            application.cv_docx_path = f"/tmp/{application.id}/cv.docx"
+            application.created_at = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
+            if job_id == current_id:
+                application.ready_at = datetime(2026, 10, 4, 12, tzinfo=timezone.utc)
+            if job_id == historical_id:
+                historical_app_id = application.id
+                session.add(GeneratedDocument(
+                    application_id=application.id, doc_type="document_review",
+                    created_at=datetime(2026, 10, 2, 12, tzinfo=timezone.utc),
+                ))
+        session.flush()
+        update_application_tracking(session, historical_app_id, notes="New note")
+
+    service = DesktopService()
+    rows = service.list_jobs(status=JobStatus.READY_FOR_FORM_SUBMISSION, sort_key="ready_at")
+    assert [row.id for row in rows] == [current_id, historical_id, unknown_id]
+    assert [row.ready_at for row in rows] == ["04/10/2026", "02/10/2026", "—"]
+    page = service.list_jobs_page(
+        status=JobStatus.READY_FOR_FORM_SUBMISSION, sort_key="ready_at", page_size=1,
+    )
+    assert page["total"] == 3 and page["rows"][0].id == current_id
+    assert service.get_job(historical_id).ready_at == "02/10/2026"
 
 
 def test_dashboard_counts_confirmed_duplicate_submissions_once(isolated_db) -> None:
@@ -316,7 +416,7 @@ def test_archived_job_detail_shows_only_human_readable_decisive_reason(isolated_
 def test_manual_archive_records_a_clear_reason(isolated_db) -> None:
     job_id = _job(external_id="manual:user-archive")
     with session_scope() as session:
-        mark_analyzed(session, job_id)
+        _prepare_ranked_analysis(session, job_id)
         assert set_shortlisted(session, job_id, selected=True) is not None
 
     DesktopService().archive_job(job_id)
@@ -403,7 +503,11 @@ def test_rescue_jobs_prepares_documents_for_archived_selection(
         assert rescued.shortlisted_at is None
         assert rescued.archived_at is None
         assert rescued.analyzed_at is not None
-        assert rescued.score.components["manual_rescue"] is True
+        assert rescued.ranked_at is None
+        assert rescued.score.final_score is None
+        assert rescued.score.components["manual_rescue"]["schema_version"] == 3
+        assert "filter_disposition" not in rescued.score.components
+        assert rescued.score.components["completed_filter_routing"]["disposition"] == "pending_relevance"
         assert rescued.application.id in report["application_ids"]
         assert rescued.application.cv_pdf_path
         assert {doc.doc_type for doc in rescued.application.documents} >= {
@@ -540,16 +644,19 @@ def test_rescue_reports_analysis_failure_and_continues_batch(
     with session_scope() as session:
         for job_id in (first_id, second_id):
             mark_archived(session, job_id)
+        archived_application = create_or_get_application(session, first_id)
+        archived_application.cv_pdf_path = "/documents/old-cv.pdf"
+        archived_application.status = JobStatus.ARCHIVED
     from smartapply.pipeline import Pipeline
 
     analyze = Pipeline.analyze_jobs
 
-    def fail_first(self, ids):
+    def fail_first(self, ids, **kwargs):
         if ids == [first_id]:
             return SimpleNamespace(
                 analyzed=0, already_analyzed=0, errors=[{"message": "API indisponible"}]
             )
-        return analyze(self, ids)
+        return analyze(self, ids, **kwargs)
 
     monkeypatch.setattr(Pipeline, "analyze_jobs", fail_first)
     report = DesktopService().rescue_jobs([first_id, second_id])
@@ -559,7 +666,8 @@ def test_rescue_reports_analysis_failure_and_continues_batch(
     with session_scope() as session:
         failed = session.get(Job, first_id)
         assert failed.archived_at is None
-        assert failed.application is None
+        assert failed.application.status == JobStatus.ARCHIVED
+        assert failed.application.cv_pdf_path == "/documents/old-cv.pdf"
         assert failed.analyzed_at is None
 
 
@@ -596,7 +704,7 @@ def test_bridge_runs_single_rescue_in_background_and_keeps_navigation() -> None:
 def test_manual_top_selection_persists_across_service_instances(isolated_db) -> None:
     job_id = _job(external_id="manual:persistent-shortlist")
     with session_scope() as session:
-        mark_analyzed(session, job_id)
+        _prepare_ranked_analysis(session, job_id)
 
     assert DesktopService().set_job_shortlisted(job_id, selected=True) is True
 
@@ -622,12 +730,84 @@ def test_manual_top_selection_persists_across_service_instances(isolated_db) -> 
     assert final_detail.archive_reasons == ()
 
 
+def test_shortlist_refuses_analyzed_offer_without_a_real_ranking(isolated_db) -> None:
+    job_id = _job(external_id="manual:analyzed-without-ranking")
+    with session_scope() as session:
+        mark_analyzed(session, job_id)
+        assert set_shortlisted(session, job_id, selected=True) is None
+
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        assert job.ranked_at is None
+        assert job.shortlisted_at is None
+        assert job.score is None or job.score.final_score is None
+
+
+def test_update_shortlist_excludes_current_rejection_and_preserves_manual_choice(
+    isolated_db,
+) -> None:
+    survivor_id = _job(external_id="manual:shortlist-current-survivor")
+    rejected_id = _job(external_id="manual:shortlist-current-rejected")
+    with session_scope() as session:
+        _prepare_ranked_analysis(session, survivor_id)
+        _prepare_ranked_analysis(session, rejected_id)
+        survivor = session.get(Job, survivor_id)
+        rejected = session.get(Job, rejected_id)
+        assert survivor is not None and survivor.score is not None
+        assert rejected is not None and rejected.score is not None
+        survivor.score.final_score = 0.20
+        rejected.score.final_score = 0.99
+        rejected.score.components = {
+            **rejected.score.components,
+            "filter_disposition": "rejected",
+            "hard_reject": {
+                "ruleset_version": "hard-reject-v2",
+                "rejected": True,
+                "gates": [],
+            },
+        }
+        assert set_shortlisted(
+            session,
+            rejected_id,
+            selected=True,
+            origin=ShortlistOrigin.MANUAL,
+        ) is not None
+
+    report = DesktopService().update_shortlist(top_k=1)
+
+    assert report["ranked_ids"] == [survivor_id]
+    assert report["shortlisted_ids"] == [survivor_id]
+    with session_scope() as session:
+        rejected = session.get(Job, rejected_id)
+        survivor = session.get(Job, survivor_id)
+        assert rejected is not None and survivor is not None
+        assert rejected.shortlist_origin == ShortlistOrigin.MANUAL
+        assert rejected.shortlisted_at is not None
+        assert survivor.shortlist_origin == ShortlistOrigin.AUTOMATIC
+
+
 def test_manual_top_selection_analyzes_unanalyzed_offer_first(isolated_db, monkeypatch) -> None:
     job_id = _job(external_id="manual:auto-analysis-before-shortlist")
     analyzed_calls: list[list[int]] = []
 
     class FakePipeline:
-        def analyze_jobs(self, job_ids):
+        def prepare_analysis(self, **kwargs):
+            return SimpleNamespace(kept_ids=list(kwargs["job_ids"]))
+
+        def rank_pending(self, **kwargs):
+            with session_scope() as session:
+                mark_filtered(session, job_id)
+                set_score(
+                    session,
+                    job_id,
+                    final_score=0.75,
+                    components={"final": 0.75},
+                )
+                mark_ranked(session, job_id)
+            return SimpleNamespace(ranked=1)
+
+        def analyze_jobs(self, job_ids, **kwargs):
             analyzed_calls.append(list(job_ids))
             with session_scope() as session:
                 mark_analyzed(session, job_id)
@@ -651,7 +831,7 @@ def test_removing_analyzed_offer_from_top_selection_keeps_analyzed_status(isolat
     job_id = _job(external_id="manual:analyzed-shortlist-removal")
     service = DesktopService()
     with session_scope() as session:
-        mark_analyzed(session, job_id)
+        _prepare_ranked_analysis(session, job_id)
 
     assert service.set_job_shortlisted(job_id, selected=True) is True
 
@@ -668,8 +848,7 @@ def test_new_filter_only_includes_filtered_offers_waiting_for_analysis(isolated_
     service = DesktopService()
     with session_scope() as session:
         mark_filtered(session, pending_id)
-        mark_filtered(session, shortlisted_id)
-        mark_analyzed(session, shortlisted_id)
+        _prepare_ranked_analysis(session, shortlisted_id)
         set_shortlisted(session, shortlisted_id, selected=True)
 
     new_rows = service.list_jobs(status=JobStatus.SCRAPED)
@@ -678,12 +857,212 @@ def test_new_filter_only_includes_filtered_offers_waiting_for_analysis(isolated_
     assert all(row.status == JobStatus.SCRAPED for row in new_rows)
 
 
+def test_new_offer_list_has_no_implicit_500_row_limit(isolated_db) -> None:
+    now = datetime.now(timezone.utc)
+    with session_scope() as session:
+        for index in range(501):
+            job = upsert_job(
+                session,
+                external_id=f"manual:unbounded-new-{index}",
+                title=f"Machine Learning Engineer {index:03d}",
+                company="Acme",
+                location="Paris",
+                contract_type="CDI",
+                description="Description",
+                source="manual",
+            )
+            job.filtered_at = now
+
+    service = DesktopService()
+    assert len(service.list_jobs(status=JobStatus.SCRAPED)) == 501
+    assert len(service.list_jobs(status=JobStatus.SCRAPED, limit=37)) == 37
+
+
+def test_offer_pages_sort_and_filter_before_pagination(isolated_db) -> None:
+    ids = [_job(external_id=f"manual:paged-{index}") for index in range(5)]
+    scores = [0.15, 0.80, 0.35, 0.95, 0.60]
+    with session_scope() as session:
+        for job_id, score in zip(ids, scores, strict=True):
+            _prepare_ranked_analysis(session, job_id)
+            set_analysis(session, job_id, fit_score=score)
+        session.get(Job, ids[1]).company = "Target"
+        session.get(Job, ids[3]).company = "Target"
+
+    service = DesktopService()
+    first = service.list_jobs_page(
+        status=JobStatus.ANALYZED, sort_key="llm_score", page_size=2
+    )
+    second = service.list_jobs_page(
+        status=JobStatus.ANALYZED, sort_key="llm_score", page=1, page_size=2
+    )
+    filtered = service.list_jobs_page(
+        status=JobStatus.ANALYZED, sort_key="llm_score", search="Target", page_size=1
+    )
+    assert first["total"] == second["total"] == 5
+    assert [row.id for row in first["rows"]] == [ids[3], ids[1]]
+    assert [row.id for row in second["rows"]] == [ids[4], ids[2]]
+    assert filtered["total"] == 2
+    assert [row.id for row in filtered["rows"]] == [ids[3]]
+
+    later_id = _job(external_id="manual:paged-later")
+    with session_scope() as session:
+        _prepare_ranked_analysis(session, later_id)
+        set_analysis(session, later_id, fit_score=0.99)
+    refreshed = service.list_jobs_page(
+        status=JobStatus.ANALYZED, sort_key="llm_score", page_size=2
+    )
+    assert refreshed["total"] == 6
+    assert [row.id for row in refreshed["rows"]] == [later_id, ids[3]]
+    assert [row.id for row in service.list_jobs(status=JobStatus.ANALYZED)[:2]] == [
+        later_id, ids[3],
+    ]
+    assert service.job_page_for(
+        ids[2], status=JobStatus.ANALYZED, sort_key="llm_score", page_size=2
+    ) == 2
+
+
+def test_ready_offer_pages_follow_persisted_ai_score(isolated_db) -> None:
+    ids = [_job(external_id=f"manual:ready-paged-{index}") for index in range(3)]
+    with session_scope() as session:
+        for job_id, score in zip(ids, [0.50, 0.90, 0.70], strict=True):
+            _prepare_ranked_analysis(session, job_id)
+            set_analysis(session, job_id, fit_score=score)
+            application = create_or_get_application(session, job_id)
+            application.status = JobStatus.READY_FOR_FORM_SUBMISSION
+
+    page = DesktopService().list_jobs_page(
+        status=JobStatus.READY_FOR_FORM_SUBMISSION,
+        sort_key="llm_score", page_size=2,
+    )
+    assert page["total"] == 3
+    assert [row.id for row in page["rows"]] == [ids[1], ids[2]]
+    assert [row.id for row in DesktopService().list_jobs(
+        status=JobStatus.READY_FOR_FORM_SUBMISSION
+    )] == [ids[1], ids[2], ids[0]]
+
+
+def test_new_offer_disposition_filter_is_exact_and_sql_scoped(isolated_db) -> None:
+    legacy_relevant_id = _job(external_id="manual:class-legacy-relevant")
+    rejected_id = _job(external_id="manual:class-rejected")
+    pending_id = _job(external_id="manual:class-pending")
+    uncertain_id = _job(external_id="manual:class-legacy-uncertain")
+    missing_score_id = _job(external_id="manual:class-no-score")
+    analyzed_pending_id = _job(external_id="manual:class-analyzed-pending")
+    dispositions = {
+        legacy_relevant_id: "relevant",
+        rejected_id: "rejected",
+        pending_id: "pending_relevance",
+        uncertain_id: "uncertain",
+        analyzed_pending_id: "pending_relevance",
+    }
+    with session_scope() as session:
+        for job_id in (*dispositions, missing_score_id):
+            mark_filtered(session, job_id)
+        for job_id, disposition in dispositions.items():
+            set_score(
+                session,
+                job_id,
+                final_score=0.5,
+                components={"filter_disposition": disposition},
+            )
+        mark_analyzed(session, analyzed_pending_id)
+
+    service = DesktopService()
+    unfiltered_ids = {row.id for row in service.list_jobs(status=JobStatus.SCRAPED)}
+    assert unfiltered_ids == {
+        legacy_relevant_id,
+        rejected_id,
+        pending_id,
+        uncertain_id,
+        missing_score_id,
+    }
+    assert {
+        disposition: [row.id for row in service.list_jobs(
+            status=JobStatus.SCRAPED,
+            filter_disposition=disposition,
+        )]
+        for disposition in ("rejected", "pending_relevance")
+    } == {
+        "rejected": [rejected_id],
+        "pending_relevance": [pending_id],
+    }
+    assert [row.id for row in service.list_jobs(
+        status=JobStatus.SCRAPED,
+        sort_key="filter_disposition",
+        sort_ascending=True,
+    )] == [
+        pending_id,
+        rejected_id,
+        legacy_relevant_id,
+        uncertain_id,
+        missing_score_id,
+    ]
+
+
+@pytest.mark.parametrize("disposition", ["relevant", "uncertain", "pending"])
+def test_disposition_filter_rejects_legacy_and_unknown_classes(
+    isolated_db,
+    disposition,
+) -> None:
+    service = DesktopService()
+    with pytest.raises(ValueError, match="Unsupported filter disposition"):
+        service.list_jobs(status=JobStatus.SCRAPED, filter_disposition=disposition)
+
+
+def test_disposition_filter_rejects_non_new_statuses(isolated_db) -> None:
+    service = DesktopService()
+    with pytest.raises(ValueError, match="only for new offers"):
+        service.list_jobs(status=JobStatus.ANALYZED, filter_disposition="pending_relevance")
+
+
+def test_duplicate_pending_filter_requires_both_offers_to_be_pending(isolated_db) -> None:
+    both_parent = _job(external_id="manual:duplicate-both-parent")
+    both_child = _job(external_id="manual:duplicate-both-child")
+    legacy_parent = _job(external_id="manual:duplicate-legacy-parent")
+    legacy_child = _job(external_id="manual:duplicate-legacy-child")
+    legacy_child_parent = _job(external_id="manual:duplicate-legacy-child-parent")
+    legacy_child_child = _job(external_id="manual:duplicate-legacy-child-child")
+    dispositions = {
+        both_parent: "pending_relevance",
+        both_child: "pending_relevance",
+        legacy_parent: "relevant",
+        legacy_child: "pending_relevance",
+        legacy_child_parent: "pending_relevance",
+        legacy_child_child: "relevant",
+    }
+    with session_scope() as session:
+        for job_id, disposition in dispositions.items():
+            set_score(
+                session,
+                job_id,
+                final_score=0.5,
+                components={"filter_disposition": disposition},
+            )
+        for child_id, parent_id in (
+            (both_child, both_parent),
+            (legacy_child, legacy_parent),
+            (legacy_child_child, legacy_child_parent),
+        ):
+            child = session.get(Job, child_id)
+            child.possible_duplicate_of_id = parent_id
+            child.duplicate_review_status = "pending"
+
+    service = DesktopService()
+    assert {
+        row.id for row in service.list_jobs(status=JobStatus.DUPLICATE_REVIEW)
+    } == {both_child, legacy_child, legacy_child_child}
+    assert [row.id for row in service.list_jobs(
+        status=JobStatus.DUPLICATE_REVIEW,
+        only_pending_duplicates=True,
+    )] == [both_child]
+
+
 def test_shortlist_filter_excludes_generated_applications(isolated_db) -> None:
     shortlisted_id = _job(external_id="manual:shortlist-without-app")
     generated_id = _job(external_id="manual:shortlist-with-app")
     with session_scope() as session:
         for job_id in (shortlisted_id, generated_id):
-            mark_analyzed(session, job_id)
+            _prepare_ranked_analysis(session, job_id)
             set_shortlisted(session, job_id, selected=True)
         create_or_get_application(session, generated_id)
 
@@ -696,7 +1075,7 @@ def test_shortlist_summary_ignores_unanalyzed_legacy_rows(isolated_db) -> None:
     valid_id = _job(external_id="manual:valid-summary-shortlist")
     stale_id = _job(external_id="manual:stale-summary-shortlist")
     with session_scope() as session:
-        mark_analyzed(session, valid_id)
+        _prepare_ranked_analysis(session, valid_id)
         assert set_shortlisted(session, valid_id, selected=True) is not None
         stale = session.get(Job, stale_id)
         assert stale is not None
@@ -715,7 +1094,6 @@ def test_job_statuses_hide_internal_filtered_state(isolated_db) -> None:
     assert JobStatus.FILTERED not in {value for value, _label in statuses}
     assert [value for value, _label in statuses] == [
         JobStatus.DUPLICATE_REVIEW,
-        JobStatus.SCRAPED,
         JobStatus.ANALYZED,
         JobStatus.SHORTLISTED,
         JobStatus.READY_FOR_FORM_SUBMISSION,
@@ -775,8 +1153,8 @@ def test_generate_top_selection_ignores_non_selected_jobs(isolated_db, monkeypat
     second_id = _job(external_id="manual:top-second")
     outside_id = _job(external_id="manual:not-in-top")
     with session_scope() as session:
-        mark_analyzed(session, first_id)
-        mark_analyzed(session, second_id)
+        _prepare_ranked_analysis(session, first_id)
+        _prepare_ranked_analysis(session, second_id)
         set_shortlisted(session, first_id, selected=True)
         set_shortlisted(session, second_id, selected=True)
 
@@ -784,7 +1162,10 @@ def test_generate_top_selection_ignores_non_selected_jobs(isolated_db, monkeypat
     generated_calls: list[int] = []
 
     class FakePipeline:
-        def analyze_jobs(self, job_ids):
+        def prepare_analysis(self, **kwargs):
+            return SimpleNamespace(kept_ids=list(kwargs["job_ids"]))
+
+        def analyze_jobs(self, job_ids, **kwargs):
             analyzed_calls.extend(job_ids)
             return SimpleNamespace(analyzed=1, already_analyzed=0)
 
@@ -823,7 +1204,10 @@ def test_generate_applications_analyzes_new_rows_and_skips_ineligible(
     generated_calls: list[int] = []
 
     class FakePipeline:
-        def analyze_jobs(self, job_ids):
+        def prepare_analysis(self, **kwargs):
+            return SimpleNamespace(kept_ids=list(kwargs["job_ids"]))
+
+        def analyze_jobs(self, job_ids, **kwargs):
             analyzed_calls.extend(job_ids)
             return SimpleNamespace(analyzed=1, already_analyzed=0)
 
@@ -853,7 +1237,10 @@ def test_generate_applications_reports_analysis_failure_details(
     job_id = _job(external_id="manual:analysis-failure")
 
     class FakePipeline:
-        def analyze_jobs(self, job_ids):
+        def prepare_analysis(self, **kwargs):
+            return SimpleNamespace(kept_ids=list(kwargs["job_ids"]))
+
+        def analyze_jobs(self, job_ids, **kwargs):
             return SimpleNamespace(
                 analyzed=0,
                 already_analyzed=0,
@@ -914,7 +1301,10 @@ def test_manual_generation_returns_document_warnings(isolated_db, monkeypatch) -
     from smartapply.pipeline import ApplyReport
 
     class FakePipeline:
-        def analyze_jobs(self, job_ids):
+        def prepare_analysis(self, **kwargs):
+            return SimpleNamespace(kept_ids=list(kwargs["job_ids"]))
+
+        def analyze_jobs(self, job_ids, **kwargs):
             assert len(job_ids) == 1
             return SimpleNamespace(analyzed=1, already_analyzed=0)
 

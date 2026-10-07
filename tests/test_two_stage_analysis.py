@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -11,9 +11,11 @@ from pydantic import ValidationError
 
 from smartapply.config import get_settings
 from smartapply.database import session_scope
-from smartapply.database.models import Job, JobStatus
+from smartapply.database.models import Job, JobScore, JobStatus
+from smartapply.filtering.hard_reject.types import HardRejectResult
 from smartapply.llm import JobAnalysis, JobFitAssessment, LLMError, OfferAnalysis, OpenAIProvider
 from smartapply.llm.prompts import job_analysis, job_fit
+from smartapply.pipeline.errors import StaleTaskResultError
 from smartapply.pipeline.process.analysis import (
     AnalysisMixin,
     _assemble_analysis,
@@ -56,6 +58,7 @@ def runner(provider, profile=None):
 
 def insert_job():
     with session_scope() as session:
+        now = datetime.now(timezone.utc)
         job = Job(
             external_id="two-stage-offer",
             title="Data Scientist",
@@ -63,10 +66,102 @@ def insert_job():
             location="Metadata City",
             description=BODY,
             source="manual",
+            filtered_at=now,
+            ranked_at=now,
+            score=JobScore(
+                final_score=0.7,
+                components={
+                    "filter_disposition": "pending_relevance",
+                    "hard_reject": HardRejectResult(decisions=()).audit_payload(),
+                },
+            ),
         )
         session.add(job)
         session.flush()
         return job.id
+
+
+@pytest.mark.parametrize(
+    "components",
+    [
+        {},
+        {"filter_disposition": "relevant"},
+        {"filter_disposition": "uncertain"},
+        {"filter_disposition": "pending_relevance"},
+        {
+            "filter_disposition": "pending_relevance",
+            "hard_reject": {
+                "ruleset_version": "old-filter",
+                "rejected": False,
+                "gates": [],
+            },
+        },
+        {
+            "filter_disposition": "rejected",
+            "hard_reject": {
+                "ruleset_version": "hard-reject-v2",
+                "rejected": True,
+                "gates": [],
+            },
+        },
+    ],
+)
+def test_analysis_requires_a_current_kept_filter_decision(isolated_db, components):
+    job_id = insert_job()
+    with session_scope() as session:
+        session.get(JobScore, job_id).components = components
+    calls = []
+    instance = runner(
+        SimpleNamespace(
+            complete_json=lambda **kwargs: calls.append(kwargs["purpose"]),
+            cheap_model="mock",
+        )
+    )
+
+    assert instance._analyze_one(job_id=job_id) is False
+    report = instance.analyze_jobs([job_id])
+    assert report.analyzed == 0 and report.skipped_missing == 1
+    assert calls == []
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        assert job.analysis is None and job.analyzed_at is None
+        assert job.score.components == components
+        assert job.score.final_score == 0.7
+
+
+@pytest.mark.parametrize("changed_purpose", ["job_offer_analysis", "job_fit_assessment"])
+def test_rejection_during_analysis_stops_remaining_calls_and_publication(
+    isolated_db,
+    changed_purpose,
+):
+    job_id = insert_job()
+    calls = []
+
+    def complete(**kwargs):
+        calls.append(kwargs["purpose"])
+        if kwargs["purpose"] == changed_purpose:
+            with session_scope() as session:
+                session.get(JobScore, job_id).components = {
+                    "filter_disposition": "rejected",
+                    "hard_reject": {
+                        "ruleset_version": "hard-reject-v2",
+                        "rejected": True,
+                        "gates": [],
+                    },
+                }
+        return offer_result() if kwargs["purpose"] == "job_offer_analysis" else fit_result()
+
+    instance = runner(SimpleNamespace(complete_json=complete, cheap_model="mock"))
+    with pytest.raises(StaleTaskResultError):
+        instance._analyze_one(job_id=job_id)
+
+    assert calls == (
+        ["job_offer_analysis"]
+        if changed_purpose == "job_offer_analysis"
+        else ["job_offer_analysis", "job_fit_assessment"]
+    )
+    with session_scope() as session:
+        assert session.get(Job, job_id).analysis is None
 
 
 def test_extraction_is_identical_for_different_profiles():
@@ -79,8 +174,11 @@ def test_extraction_is_identical_for_different_profiles():
     second = job_analysis.build_user_prompt(profile=changed, job_title="Role", job_description=BODY)
     assert first == second
     for private in (
-        "PRIVATE_CANDIDATE_FACT", "PRIVATE_NEW_SKILL", "PRIVATE_EXPERIENCE",
-        original.identity.email, original.identity.full_name,
+        "PRIVATE_CANDIDATE_FACT",
+        "PRIVATE_NEW_SKILL",
+        "PRIVATE_EXPERIENCE",
+        original.identity.email,
+        original.identity.full_name,
     ):
         assert private not in second
 
@@ -94,15 +192,18 @@ def test_fit_receives_complete_facts_without_cv_policy_or_invented_preferences()
     prompt = job_fit.build_user_prompt(
         profile=profile, offer_analysis=offer_result(), reference_date=date(2026, 9, 22)
     )
-    candidate = json.loads(prompt.split("=== CANDIDATE PROFILE JSON ===\n", 1)[1].split(
-        "=== REFERENCE DATE ===", 1
-    )[0])
+    candidate = json.loads(
+        prompt.split("=== CANDIDATE PROFILE JSON ===\n", 1)[1].split("=== REFERENCE DATE ===", 1)[0]
+    )
     assert candidate["identity"]["residence"] == "Candidate Residence"
     assert candidate["preferences"] == profile.preferences.model_dump(mode="json")
     assert [e["id"] for e in candidate["experiences"]] == [e.id for e in profile.experiences]
     assert [p["id"] for p in candidate["projects"]] == [p.id for p in profile.projects]
-    for source, supplied in zip(profile.experiences + profile.projects,
-                                candidate["experiences"] + candidate["projects"], strict=True):
+    for source, supplied in zip(
+        profile.experiences + profile.projects,
+        candidate["experiences"] + candidate["projects"],
+        strict=True,
+    ):
         assert [b["text"] for b in supplied["bullets"]] == [b.text for b in source.bullets]
     assert "selection_policy" not in prompt
     assert "Preferred locations:" not in prompt
@@ -133,7 +234,7 @@ def test_assembly_preserves_extraction_and_both_kinds_of_risk():
     offer, fit = offer_result(), fit_result()
     original_offer, original_fit = offer.model_dump(), fit.model_dump()
     analysis = _assemble_analysis(offer, fit)
-    assert {k:analysis.model_dump()[k] for k in OfferAnalysis.model_fields} == original_offer
+    assert {k: analysis.model_dump()[k] for k in OfferAnalysis.model_fields} == original_offer
     assert analysis.fit_score == fit.fit_score
     assert analysis.risks == [*offer.offer_risks, *fit.risks]
     assert offer.model_dump() == original_offer
@@ -184,7 +285,9 @@ def test_failure_does_not_save_partial_analysis_or_mark_job_analyzed(isolated_db
 
 
 @pytest.mark.parametrize("retry_after_failure", [False, True])
-def test_offer_cache_survives_profile_edit_or_failed_fit(isolated_db, monkeypatch, retry_after_failure):
+def test_offer_cache_survives_profile_edit_or_failed_fit(
+    isolated_db, monkeypatch, retry_after_failure
+):
     """Exercise the real cache/provider boundary; network calls are replaced locally."""
     provider = OpenAIProvider()
     calls = []
@@ -226,7 +329,9 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(isolated_db, monkeypatc
         assert job.analyzed_at is not None
         assert job.analysis.fit_score == 0.72
         assert job.analysis.required_skills == ["Python"]
-        assert job.analysis.raw_response["supporting_excerpts"] == offer_result().supporting_excerpts
+        assert (
+            job.analysis.raw_response["supporting_excerpts"] == offer_result().supporting_excerpts
+        )
         assert job.analysis.raw_response["offer_risks"] == offer_result().offer_risks
     from smartapply.pipeline.apply.cv_writer import CvWriterMixin
 
@@ -234,3 +339,80 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(isolated_db, monkeypatc
     assert restored.fit_score == 0.72
     assert restored.supporting_excerpts == offer_result().supporting_excerpts
     assert restored.offer_risks == offer_result().offer_risks
+
+
+@pytest.mark.parametrize("change", ["none", "profile", "body", "model", "prompt", "schema"])
+def test_failed_evaluation_checkpoint_obeys_exact_extraction_contract(
+    isolated_db, monkeypatch, change
+):
+    from smartapply.database.analysis_checkpoints import AnalysisCheckpoint
+
+    calls = []
+    fail_fit = True
+
+    def complete(**kwargs):
+        calls.append(kwargs["purpose"])
+        if kwargs["purpose"] == "job_offer_analysis":
+            return offer_result()
+        if fail_fit:
+            raise LLMError("Evaluation temporarily unavailable")
+        return fit_result()
+
+    instance = runner(SimpleNamespace(complete_json=complete, cheap_model="mock"))
+    job_id = insert_job()
+    with pytest.raises(LLMError):
+        instance._analyze_one(job_id=job_id)
+    fail_fit = False
+    if change == "body":
+        with session_scope() as session:
+            session.get(Job, job_id).description += " Work on a new team."
+    elif change == "model":
+        instance.llm.cheap_model = "another-model"
+    elif change == "profile":
+        instance.profile.skills.categories[0].skills.append("NEW_SKILL")
+    elif change == "prompt":
+        original = job_analysis.build_system_prompt()
+        monkeypatch.setattr(job_analysis, "build_system_prompt", lambda: original + " Revised.")
+    elif change == "schema":
+        original = OfferAnalysis.model_json_schema()
+        monkeypatch.setattr(
+            OfferAnalysis, "model_json_schema", lambda: {**original, "version": "new"}
+        )
+    assert instance._analyze_one(job_id=job_id, allow_existing=False)
+    expected_extractions = 1 if change in {"none", "profile"} else 2
+    assert calls.count("job_offer_analysis") == expected_extractions
+    assert calls.count("job_fit_assessment") == 2
+    with session_scope() as session:
+        assert session.get(AnalysisCheckpoint, job_id) is None
+    assert instance.analyze_jobs([job_id]).already_analyzed == 1
+    assert calls.count("job_offer_analysis") == expected_extractions
+
+
+def test_cancel_after_valid_extraction_keeps_checkpoint_before_stopping(isolated_db):
+    from smartapply.database.analysis_checkpoints import AnalysisCheckpoint
+    from smartapply.pipeline.errors import TaskCancelledError
+    from smartapply.pipeline.snapshots import CancellableProvider
+
+    stopped = False
+    calls = []
+
+    def complete(**kwargs):
+        nonlocal stopped
+        calls.append(kwargs["purpose"])
+        stopped = True
+        return offer_result()
+
+    instance = runner(
+        CancellableProvider(
+            SimpleNamespace(cheap_model="mock", complete_json=complete),
+            lambda: stopped,
+        )
+    )
+    instance.stop_requested = lambda: stopped
+    job_id = insert_job()
+    with pytest.raises(TaskCancelledError):
+        instance._analyze_one(job_id=job_id)
+    assert calls == ["job_offer_analysis"]
+    with session_scope() as session:
+        assert session.get(AnalysisCheckpoint, job_id) is not None
+        assert session.get(Job, job_id).analysis is None

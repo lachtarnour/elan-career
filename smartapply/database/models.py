@@ -215,6 +215,7 @@ class Application(Base):
     form_submitted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, index=True
@@ -270,6 +271,8 @@ class LLMUsage(Base):
     )
     # Immutable attribution survives hard deletion of a Job row.
     job_external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Enables targeted removal of exact responses when an offer is deleted.
+    cache_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
@@ -294,6 +297,23 @@ class JobEmbedding(Base):
     job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), unique=True)
     model: Mapped[str] = mapped_column(String(100))
     vector: Mapped[Any] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class DuplicateReviewEvent(Base):
+    """Reversible, transaction-bound evidence for automatic relation decisions."""
+
+    __tablename__ = "duplicate_review_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_id: Mapped[int | None] = mapped_column(ForeignKey("jobs.id", ondelete="SET NULL"))
+    reference_id: Mapped[int | None] = mapped_column(ForeignKey("jobs.id", ondelete="SET NULL"))
+    policy_version: Mapped[str] = mapped_column(String(80))
+    action: Mapped[str] = mapped_column(String(40))
+    reason: Mapped[str] = mapped_column(String(100))
+    before_state: Mapped[dict[str, Any]] = mapped_column(JSON)
+    after_state: Mapped[dict[str, Any]] = mapped_column(JSON)
+    history_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 

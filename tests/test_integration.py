@@ -218,7 +218,10 @@ def test_full_pipeline_on_realistic_sample(tmp_path: Path) -> None:
     """Ingest 5 jobs → process → apply to top 2. Verify everything."""
     _register_llm_fixtures()
 
+    from sqlalchemy import select
+
     from smartapply.database import session_scope
+    from smartapply.database.models import Job, JobAnalysis
     from smartapply.database.repository import top_jobs_by_score
     from smartapply.pipeline import Pipeline
 
@@ -243,7 +246,14 @@ def test_full_pipeline_on_realistic_sample(tmp_path: Path) -> None:
     assert process_report.kept_after_filter <= 4
     assert process_report.analyzed >= 2
 
-    # ---- Step 3: Apply to top-scoring jobs ----
+    # ---- Step 3: Optional ranking of the completed analysis pool ----
+    with session_scope() as s:
+        analyzed_ids = list(s.scalars(
+            select(Job.id)
+            .join(JobAnalysis, JobAnalysis.job_id == Job.id)
+            .where(Job.archived_at.is_(None), Job.analyzed_at.is_not(None))
+        ))
+    p.rank_pending(job_ids=analyzed_ids, top_k_ranked=2)
     with session_scope() as s:
         top = list(top_jobs_by_score(s, 2))
         top_ids = [j.id for j in top]

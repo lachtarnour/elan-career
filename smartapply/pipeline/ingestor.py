@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
-from smartapply.concurrency import job_operation
+from smartapply.concurrency import TaskConflictError, job_operation
 from smartapply.database import session_scope, write_session_scope
 from smartapply.database.models import Job, JobDuplicateStatus, JobStatus
 from smartapply.database.repository import (
@@ -24,6 +24,7 @@ from smartapply.dedup import (
     offers_within_duplicate_group_time_window,
 )
 from smartapply.dedup.deduplicator import linked_duplicate_components
+from smartapply.dedup.review_decisions import automatic_match_reason, automatic_state
 from smartapply.logging_setup import get_logger
 from smartapply.offer_identity import is_direct_offer_url
 from smartapply.offers import ManualOfferInput, RawJob
@@ -39,7 +40,7 @@ from smartapply.pipeline.ingest import (
     expand_query_for_source,
     split_or_query,
 )
-from smartapply.pipeline.ingest.dedupe import _native_offer_key
+from smartapply.pipeline.ingest.dedupe import _native_offer_key, _StrictCopyIndex
 from smartapply.pipeline.snapshots import application_snapshot_key, job_snapshot_key
 from smartapply.scrapers import ManualScraper, get_scraper
 from smartapply.scrapers.apify_recovery import (
@@ -52,6 +53,16 @@ logger = get_logger(__name__)
 
 class Ingestor:
     """Turn external job postings into persisted rows."""
+
+    def __init__(self, *, job_filter=None):
+        self._job_filter = job_filter
+
+    def _get_job_filter(self):
+        if self._job_filter is None:
+            from smartapply.maintenance.hard_reject_backfill import build_rejector
+
+            self._job_filter = build_rejector()
+        return self._job_filter
 
     def from_source(
         self,
@@ -96,6 +107,10 @@ class Ingestor:
                 f"Source {source!r} is not configured. "
                 "Check your .env (SERPAPI_API_KEY, FRANCETRAVAIL_* or APIFY_TOKEN)."
             )
+        if source.strip().lower() == "linkedin":
+            begin_fresh_search = getattr(scraper, "begin_fresh_search", None)
+            if begin_fresh_search is not None:
+                begin_fresh_search()
         query_plan = build_source_query_plan(
             source,
             query,
@@ -218,9 +233,23 @@ class Ingestor:
         warnings: list[str] | None = None,
         completed_source_run_ids: list[str] | None = None,
     ) -> IngestReport:
+        from smartapply.maintenance.duplicate_reviews import (
+            DuplicateReviewSnapshotChanged,
+            reconcile_pending_reviews,
+        )
+        from smartapply.maintenance.filter_labels import needs_filter_label, persist_filter_label
+
+        try:
+            reconcile_pending_reviews()
+        except (TaskConflictError, DuplicateReviewSnapshotChanged):
+            # A provider may already have fetched this batch. Housekeeping
+            # can wait; do not lose the collected rows or retry a paid fetch.
+            logger.info("Duplicate housekeeping deferred while offers are changing")
         job_ids: list[int] = []
         inserted = 0
         updated_pending = 0
+        inserted_ids: set[int] = set()
+        updated_ids: set[int] = set()
         skipped_processed = 0
         skipped_existing = 0
         duplicate_review_ids: list[int] = []
@@ -231,7 +260,9 @@ class Ingestor:
             ))
             session.expunge_all()
         known_max = max((int(job.id) for job in known_jobs), default=0)
+        copy_index = _StrictCopyIndex(known_jobs)
         for raw in raws:
+            raw_filter_result = None
             # Matching may be expensive. It always runs on detached snapshots,
             # never while an SQLite transaction or the writer lock is held.
             while True:
@@ -245,6 +276,7 @@ class Ingestor:
                     break
                 probable = None
                 alias_target = None
+                alias_reason = None
                 if existing is None:
                     manual_match = _matching_known_job(raw, known_jobs) if source == "manual" else None
                     if manual_match is not None:
@@ -252,16 +284,34 @@ class Ingestor:
                     else:
                         exact = _matching_exact_offer_url(raw, known_jobs)
                         if exact is not None:
-                            if source == "manual":
+                            exact_root = _canonical_job(exact, known_jobs)
+                            alias_reason = (
+                                automatic_match_reason(raw, exact_root, known_jobs)
+                                if source != "manual" else None
+                            )
+                            if alias_reason is None:
                                 probable = DuplicateCandidate(
                                     job=exact, title_score=100.0, description_score=100.0,
                                     confidence=1.0, match_type="exact_url",
                                 )
                             else:
-                                alias_target = _canonical_job(exact, known_jobs)
-                if existing is None and probable is None and alias_target is None:
-                    probable = self._find_probable_duplicate(raw, known_jobs)
+                                alias_target = exact_root
+                if existing is None and alias_target is None:
+                    if source != "manual":
+                        for copy in sorted(copy_index.candidates(raw), key=_job_identity_priority):
+                            copy_root = _canonical_job(copy, known_jobs)
+                            alias_reason = automatic_match_reason(raw, copy_root, known_jobs)
+                            if alias_reason is not None:
+                                alias_target = copy_root
+                                probable = None
+                                break
+                    if alias_target is None and probable is None:
+                        probable = self._find_probable_duplicate(raw, known_jobs)
                 candidate = _canonical_job(probable.job, known_jobs) if probable else None
+                if candidate is not None and source != "manual":
+                    alias_reason = automatic_match_reason(raw, candidate, known_jobs)
+                    if alias_reason is not None:
+                        alias_target, candidate, probable = candidate, None, None
                 references = [job for job in (existing, alias_target, candidate) if job is not None]
                 components = linked_duplicate_components(known_jobs)
                 dependencies = {
@@ -271,6 +321,8 @@ class Ingestor:
                 dependencies.update(int(job.id) for job in references)
                 snapshots = {int(job.id): _ingest_snapshot_key(job) for job in known_jobs
                              if int(job.id) in dependencies}
+                if existing is None and raw_filter_result is None:
+                    raw_filter_result = self._get_job_filter().evaluate(raw)
                 refreshed = []
                 refresh_scope = set()
                 retry = False
@@ -287,17 +339,21 @@ class Ingestor:
                         session.expunge_all()
                         retry = True
                     else:
+                        live_dependencies = _current_dependency_ids(
+                            session, [int(job.id) for job in references],
+                        )
                         current_refs = list(session.scalars(
-                            select(Job).where(Job.id.in_(dependencies))
+                            select(Job).where(Job.id.in_(dependencies | live_dependencies))
                             .options(selectinload(Job.application))
                         ))
                         current_by_id = {int(job.id): job for job in current_refs}
-                        if (set(current_by_id) != dependencies or any(
+                        if (live_dependencies != dependencies
+                            or set(current_by_id) != dependencies or any(
                             _ingest_snapshot_key(job) != snapshots[int(job.id)]
                             for job in current_refs
                         )):
                             refreshed = current_refs
-                            refresh_scope = dependencies
+                            refresh_scope = dependencies | live_dependencies
                             session.expunge_all()
                             retry = True
                         else:
@@ -328,16 +384,31 @@ class Ingestor:
                                 source=raw.source, source_data=raw.source_data,
                                 published_date=raw.published_date,
                             )
+                            if needs_filter_label(job.score.components if job.score else None):
+                                result = raw_filter_result if current is None else self._get_job_filter().evaluate(job)
+                                persist_filter_label(session, job, result)
                             if current is not None and current.canonical_job_id is not None:
                                 skipped_existing += 1
                             elif alias_target is not None:
+                                from smartapply.maintenance.duplicate_reviews import (
+                                    record_automatic_review,
+                                )
+
+                                before = automatic_state(job)
                                 job.canonical_job_id = int(alias_target.id)
                                 job.possible_duplicate_of_id = None
                                 job.duplicate_review_status = JobDuplicateStatus.CONFIRMED
-                                job.duplicate_match_type = "exact_url"
+                                job.duplicate_match_type = (
+                                    "strict_content_copy" if alias_reason == "strict_content_copy"
+                                    else "exact_url"
+                                )
                                 job.duplicate_confidence = 1.0
                                 job.archived_at = job.archived_at or datetime.now(timezone.utc)
                                 job.status = JobStatus.ARCHIVED
+                                record_automatic_review(
+                                    session, job, reference_id=int(alias_target.id), action="confirm",
+                                    reason=alias_reason, before=before,
+                                )
                                 aliases_created += 1
                                 skipped_existing += 1
                             else:
@@ -360,9 +431,11 @@ class Ingestor:
                                     duplicate_review_ids.append(int(job.id))
                                 if old_status is None:
                                     inserted += 1
+                                    inserted_ids.add(int(job.id))
                                     job_ids.append(int(job.id))
                                 elif old_status == JobStatus.SCRAPED:
                                     updated_pending += 1
+                                    updated_ids.add(int(job.id))
                                     job_ids.append(int(job.id))
                                 elif source == "manual":
                                     job_ids.append(int(job.id))
@@ -373,9 +446,36 @@ class Ingestor:
                 refreshed_ids = {int(job.id) for job in refreshed} | refresh_scope
                 known_jobs = [job for job in known_jobs if int(job.id) not in refreshed_ids]
                 known_jobs.extend(refreshed)
+                copy_index.replace(refreshed, removed_ids=refreshed_ids)
                 known_max = max((int(job.id) for job in known_jobs), default=0)
                 if not retry:
                     break
+
+        if duplicate_review_ids and source != "manual":
+            try:
+                # A fresh active copy can replace an archived machine-filtered
+                # reference. Resolve that graph after its source row is saved.
+                reconcile_pending_reviews()
+            except (TaskConflictError, DuplicateReviewSnapshotChanged):
+                logger.info("New duplicate reviews deferred while offers are changing")
+            with session_scope() as session:
+                review_states = {
+                    int(row.id): row for row in session.execute(select(
+                        Job.id, Job.canonical_job_id, Job.duplicate_review_status,
+                    ).where(Job.id.in_(duplicate_review_ids)))
+                }
+            new_aliases = {
+                job_id for job_id, state in review_states.items()
+                if state.canonical_job_id is not None and state.duplicate_review_status == "confirmed"
+            }
+            job_ids = [job_id for job_id in job_ids if job_id not in new_aliases]
+            inserted -= len(inserted_ids & new_aliases)
+            updated_pending -= len(updated_ids & new_aliases)
+            aliases_created += len(new_aliases)
+            skipped_existing += len(new_aliases)
+            duplicate_review_ids = [job_id for job_id in duplicate_review_ids
+                                    if job_id in review_states
+                                    and review_states[job_id].duplicate_review_status == "pending"]
 
         return IngestReport(
             source=source,
@@ -419,6 +519,26 @@ def _ingest_snapshot_key(job: Job) -> tuple[str, str | None]:
     return job_snapshot_key(job), (
         application_snapshot_key(job.application) if job.application is not None else None
     )
+
+
+def _current_dependency_ids(session, reference_ids: list[int]) -> set[int]:
+    """Check incoming links as well as known rows while holding the writer lock.
+
+    An existing row can join the group without increasing max(Job.id). Its
+    location/date must be refreshed before an automatic identity decision.
+    """
+    if not reference_ids:
+        return set()
+    links = list(session.execute(select(
+        Job.id, Job.canonical_job_id, Job.possible_duplicate_of_id,
+    )))
+    by_id = {int(row.id): row for row in links}
+    components = linked_duplicate_components(links)
+    return {
+        int(member.id)
+        for reference_id in reference_ids if reference_id in by_id
+        for member in components[id(by_id[reference_id])]
+    }
 
 
 def _ingest_history_is_protected(job: Job) -> bool:

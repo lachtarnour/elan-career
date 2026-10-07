@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import requests
 
@@ -74,6 +75,10 @@ class _ApifyFetchResult:
 
 class _RetryableApifyReadError(Exception):
     """A transient read failure for a run whose identifier is already known."""
+
+
+class _ApifyStartUncertainError(ScraperStopError):
+    """Do not retry this POST; independent searches can still proceed."""
 
 
 class _ApifyRecoveryRequiredError(ScraperStopError):
@@ -237,6 +242,8 @@ class LinkedInJobsScraper(Scraper):
         )
         journal_path = recovery_path or settings.cache_dir / "apify_pending_runs.json"
         self.recovery_journal = ApifyRecoveryJournal(journal_path)
+        self._recovery_root = Path(journal_path).parent
+        self._fresh_search = False
         self.default_contract_type = _csv_list(settings.linkedin_contract_type)
         self.default_experience_level = _csv_list(settings.linkedin_experience_level)
         self.default_remote = _csv_list(settings.linkedin_remote)
@@ -267,6 +274,27 @@ class LinkedInJobsScraper(Scraper):
     def is_available(self) -> bool:
         return bool(self.token)
 
+    def begin_fresh_search(self) -> None:
+        """Give a user-requested fetch its own durable execution journal.
+
+        The same title searched later can return newly published offers. Old
+        reservations and datasets belong to earlier executions, so they must
+        neither block this fetch nor replace its live search results.
+        """
+
+        self.recovery_journal = ApifyRecoveryJournal(
+            self._recovery_root / "apify_searches" / f"{uuid4().hex}.json"
+        )
+        self._fresh_search = True
+
+    def _collection_error(self, error: ScraperError | None) -> ScraperError | None:
+        if self._fresh_search and isinstance(
+            error, (_ApifyStartUncertainError, _ApifyRecoveryRequiredError)
+        ):
+            # Preserve the execution journal without stopping unrelated titles.
+            return ScraperError(str(error))
+        return error
+
     def _fetch(
         self,
         payload: dict[str, Any],
@@ -285,10 +313,10 @@ class LinkedInJobsScraper(Scraper):
         try:
             pending = self.recovery_journal.claim_start(payload)
         except ApifyStartReservedError as exc:
-            raise ScraperStopError(
+            raise _ApifyStartUncertainError(
                 "LinkedIn : un démarrage Apify identique est déjà en cours ou son "
-                "résultat est incertain. Aucun second run n’a été lancé. Vérifiez "
-                f"Apify avant de libérer la réservation. {_redact_secrets(_text(exc))}"
+                "résultat est incertain. Aucun second run n’a été lancé pour cette passe. "
+                f"{_redact_secrets(_text(exc))}"
             ) from exc
         except ApifyRecoveryJournalError as exc:
             raise ScraperStopError(
@@ -314,15 +342,15 @@ class LinkedInJobsScraper(Scraper):
                 timeout=self.http_timeout,
             )
         except requests.Timeout:
-            raise ScraperStopError(
+            raise _ApifyStartUncertainError(
                 "LinkedIn : le démarrage Apify n’a pas répondu. Un run peut avoir été "
-                "créé ; vérifiez Apify avant toute relance. "
+                "créé ; son lancement reste enregistré dans le journal. "
                 "Aucune relance automatique n’a été effectuée."
             ) from None
         except requests.RequestException:
-            raise ScraperStopError(
+            raise _ApifyStartUncertainError(
                 "LinkedIn : connexion interrompue pendant le démarrage Apify. Un run "
-                "peut avoir été créé ; vérifiez Apify avant toute relance. "
+                "peut avoir été créé ; son lancement reste enregistré dans le journal. "
                 "Aucune relance automatique n’a été effectuée."
             ) from None
         if _is_apify_configuration_error(response):
@@ -331,24 +359,25 @@ class LinkedInJobsScraper(Scraper):
         if response.status_code >= 400:
             if response.status_code == 429:
                 self._release_start_reservation(payload)
-            raise ScraperStopError(_apify_http_error_message(response, token=self.token))
+                raise ScraperStopError(_apify_http_error_message(response, token=self.token))
+            raise _ApifyStartUncertainError(_apify_http_error_message(response, token=self.token))
         try:
             data = response.json()
         except ValueError:
-            raise ScraperStopError(
+            raise _ApifyStartUncertainError(
                 "LinkedIn : réponse de démarrage Apify invalide (JSON illisible). "
                 "L’état du run est inconnu ; aucune relance automatique n’a été effectuée."
             ) from None
         run = data.get("data") if isinstance(data, dict) else None
         if not isinstance(run, dict):
-            raise ScraperStopError(
+            raise _ApifyStartUncertainError(
                 "LinkedIn : réponse de démarrage Apify invalide (run attendu). "
                 "L’état du run est inconnu ; aucune relance automatique n’a été effectuée."
             )
         run_id = _text(run.get("id"))
         dataset_id = _text(run.get("defaultDatasetId"))
         if not run_id or not dataset_id:
-            raise ScraperStopError(
+            raise _ApifyStartUncertainError(
                 "LinkedIn : Apify n’a pas fourni l’identifiant du run ou de son dataset. "
                 "Aucune relance automatique n’a été effectuée."
             )
@@ -1119,6 +1148,7 @@ class LinkedInJobsScraper(Scraper):
                 else self._fetch(payload, stop_requested=session.stop_requested)
             )
         except ScraperError as error:
+            error = self._collection_error(error)
             session.done = True
             logger.error(
                 "LinkedIn Apify request failed: q=%r experience=%s elapsed=%.1fs error=%s",
@@ -1148,7 +1178,7 @@ class LinkedInJobsScraper(Scraper):
 
         if isinstance(fetched, _ApifyFetchResult):
             items = fetched.items
-            terminal_error = fetched.terminal_error
+            terminal_error = self._collection_error(fetched.terminal_error)
             audit_payload = fetched.request_payload or payload
             completed_run_ids = (
                 (fetched.run_id,) if fetched.dataset_ready and fetched.run_id else ()

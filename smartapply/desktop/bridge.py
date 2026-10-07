@@ -17,6 +17,8 @@ from PySide6.QtGui import QDesktopServices, QGuiApplication
 from smartapply.concurrency import busy_job_ids, subscribe_resource_changes
 from smartapply.database.models import JobStatus
 from smartapply.database.session import subscribe_database_changes
+from smartapply.desktop.analysis_controller import AnalysisController
+from smartapply.desktop.analysis_offer_controller import AnalysisOfferController
 from smartapply.desktop.models import OfferListModel
 from smartapply.desktop.services import DesktopService, SearchResult
 from smartapply.desktop.workers import TaskWorker
@@ -126,11 +128,10 @@ def _tone(status: str) -> str:
 
 
 def _filter_disposition_label(disposition: str) -> str:
-    return {
-        "relevant": "Relevant",
-        "uncertain": "Incertain",
-        "rejected": "Rejeté",
-    }.get(disposition, "—")
+    """Show the two current classes while persisted legacy rows are migrated."""
+    if disposition == "rejected":
+        return "Rejeté"
+    return "À classer" if disposition in {"pending_relevance", "uncertain", "relevant"} else ""
 
 
 def _enrich_rows(rows: list[Any]) -> list[dict[str, Any]]:
@@ -158,10 +159,17 @@ class DesktopBridge(QObject):
 
     dashboardChanged = Signal()
     shortlistChanged = Signal()
+    analysisOfferChanged = Signal()
+    analysisWorkspaceChanged = Signal()
+    analysisWorkspaceLoadingChanged = Signal()
+    analysisWorkspaceErrorChanged = Signal()
+    analysisWorkspaceOperationChanged = Signal()
     analysisTopKChanged = Signal()
     shortlistTopKChanged = Signal()
     jobsChanged = Signal()
-    duplicateRelevantOnlyChanged = Signal()
+    duplicatePendingOnlyChanged = Signal()
+    duplicateResolutionFinished = Signal(int, bool)
+    offersDeleted = Signal("QVariantList", "QVariantList")
     companiesChanged = Signal()
     companiesLoadingChanged = Signal()
     companiesSavingChanged = Signal()
@@ -172,6 +180,9 @@ class DesktopBridge(QObject):
     diagnosticsChanged = Signal()
     busyChanged = Signal()
     jobsLoadingChanged = Signal()
+    jobsPageChanged = Signal()
+    allMatchingJobsReady = Signal("QVariantList")
+    selectionLoadingChanged = Signal()
     jobDetailLoadingChanged = Signal()
     activityChanged = Signal()
     toastRequested = Signal(str, str, str)
@@ -209,6 +220,7 @@ class DesktopBridge(QObject):
         self._shutdown_ready = False
         self._notes_failures: dict[int, tuple[str, int]] = {}
         self._notes_latest: dict[int, int] = {}
+        self._notes_epochs: dict[int, int] = {}
         self._shortlist_intents: dict[int, Event] = {}
         self._shortlist_revisions: dict[int, int] = {}
         self._shortlist_desired: dict[int, bool] = {}
@@ -230,12 +242,17 @@ class DesktopBridge(QObject):
         self._analysis_top_k = self.service.analysis_top_k()
         self._shortlist_top_k = self.service.shortlist_top_k()
         self._jobs: list[dict[str, Any]] = []
-        self._duplicate_relevant_only = False
+        self._jobs_page = 0
+        self._jobs_total = 0
+        self._jobs_page_size = 100
+        self._selection_loading = False
+        self._duplicate_pending_only = True
         self._companies: list[dict[str, Any]] = []
         self._companies_loading = False
         self._companies_saving = False
         self._current_job: dict[str, Any] = {}
         self._selected_job_id = 0
+        self._job_selection_cleared = False
         self._profile: dict[str, Any] = {}
         self._diagnostics: dict[str, Any] = {}
         self._busy = False
@@ -249,8 +266,9 @@ class DesktopBridge(QObject):
         self._job_detail_loading = False
         self._job_search = ""
         self._job_status = JobStatus.SCRAPED
-        self._job_sort_key = "score"
+        self._job_sort_key = "default"
         self._job_sort_ascending = False
+        self._job_filter_disposition = ""
         self._activity: dict[str, Any] = {
             "title": "",
             "message": "",
@@ -263,6 +281,14 @@ class DesktopBridge(QObject):
         self.refreshShortlist()
         self.refreshProfile()
         self.refreshDiagnosticsIfStale()
+        self._analysis_offer_controller = AnalysisOfferController(self, serialize=_plain)
+        self._analysis_offer_controller.changed.connect(self.analysisOfferChanged)
+        self._analysis_controller = AnalysisController(self)
+        self._analysis_controller.changed.connect(self._analysis_offer_controller.refresh)
+        self._analysis_controller.changed.connect(self.analysisWorkspaceChanged)
+        self._analysis_controller.loadingChanged.connect(self.analysisWorkspaceLoadingChanged)
+        self._analysis_controller.errorChanged.connect(self.analysisWorkspaceErrorChanged)
+        self._analysis_controller.operationChanged.connect(self.analysisWorkspaceOperationChanged)
         if self._maintenance_pending:
             self._schedule_maintenance()
 
@@ -273,6 +299,66 @@ class DesktopBridge(QObject):
     @Property("QVariantMap", notify=shortlistChanged)
     def shortlist(self) -> dict[str, Any]:
         return self._shortlist
+
+    @Property("QVariantMap", notify=analysisOfferChanged)
+    def analysisOffer(self):  # noqa: N802
+        return self._analysis_offer_controller.offer
+
+    @Property(bool, notify=analysisOfferChanged)
+    def analysisOfferLoading(self):  # noqa: N802
+        return self._analysis_offer_controller.loading
+
+    @Property(int, notify=analysisOfferChanged)
+    def analysisOfferId(self):  # noqa: N802
+        return self._analysis_offer_controller.selected_id
+
+    @Slot(int)
+    def selectAnalysisOffer(self, job_id):  # noqa: N802
+        self._analysis_offer_controller.select(job_id)
+
+    @Property("QVariantMap", notify=analysisWorkspaceChanged)
+    def analysisWorkspace(self):  # noqa: N802
+        return self._analysis_controller.workspace
+
+    @Property(bool, notify=analysisWorkspaceLoadingChanged)
+    def analysisWorkspaceLoading(self):  # noqa: N802
+        return self._analysis_controller.loading
+
+    @Property(str, notify=analysisWorkspaceErrorChanged)
+    def analysisWorkspaceError(self):  # noqa: N802
+        return self._analysis_controller.error
+
+    @Property(str, notify=analysisWorkspaceOperationChanged)
+    def analysisWorkspaceOperation(self):  # noqa: N802
+        return self._analysis_controller.operation
+
+    @Slot()
+    def refreshAnalysisWorkspace(self):  # noqa: N802
+        self._analysis_controller.refresh()
+
+    @Slot("QVariantList")
+    def startAnalysisBatch(self, job_ids):  # noqa: N802
+        self._analysis_controller.start(self._job_ids(job_ids))
+
+    @Slot()
+    def cancelBatchStart(self):  # noqa: N802
+        self._analysis_controller.cancel_batch_start()
+
+    @Slot("QVariantList")
+    def startImmediateAnalysis(self, job_ids):  # noqa: N802
+        self._analysis_controller.start_immediate(self._job_ids(job_ids))
+
+    @Slot()
+    def cancelImmediateAnalysis(self):  # noqa: N802
+        self._analysis_controller.cancel_immediate()
+
+    @Slot(str)
+    def retryAnalysisBatch(self, run_id):  # noqa: N802
+        self._analysis_controller.retry(run_id)
+
+    @Slot(str)
+    def cancelAnalysisBatch(self, run_id):  # noqa: N802
+        self._analysis_controller.cancel(run_id)
 
     @Property(int, notify=analysisTopKChanged)
     def analysisTopK(self) -> int:  # noqa: N802
@@ -311,6 +397,22 @@ class DesktopBridge(QObject):
     @Property("QVariantList", notify=jobsChanged)
     def jobs(self) -> list[dict[str, Any]]:
         return self._jobs
+
+    @Property(int, notify=jobsPageChanged)
+    def jobsPage(self):  # noqa: N802
+        return getattr(self, "_jobs_page", 0)
+
+    @Property(int, notify=jobsPageChanged)
+    def jobsTotal(self):  # noqa: N802
+        return getattr(self, "_jobs_total", len(getattr(self, "_jobs", ())))
+
+    @Property(int, constant=True)
+    def jobsPageSize(self):  # noqa: N802
+        return getattr(self, "_jobs_page_size", 100)
+
+    @Property(bool, notify=selectionLoadingChanged)
+    def selectionLoading(self):  # noqa: N802
+        return getattr(self, "_selection_loading", False)
 
     @Property(QObject, constant=True)
     def jobsModel(self):  # noqa: N802
@@ -356,23 +458,27 @@ class DesktopBridge(QObject):
         next_route = route.split("?", 1)[0]
         if next_route != getattr(self, "_active_route", "") and hasattr(self, "_read_tokens"):
             self._read_tokens["open_application"] = self._read_tokens.get("open_application", 0) + 1
+            self._read_tokens["locate_job"] = self._read_tokens.get("locate_job", 0) + 1
+            self._reads_pending.pop("locate_job", None)
         self._active_route = next_route
+        if next_route == "analysis":
+            self._analysis_controller.refresh(sync=False)
         if self._active_route in {"search", "settings"}:
             self.refreshDiagnosticsIfStale()
         if getattr(self, "_dirty_views", None):
             self._workflow_refresh_timer.start()
 
-    @Property(bool, notify=duplicateRelevantOnlyChanged)
-    def duplicateRelevantOnly(self) -> bool:  # noqa: N802
-        return self._duplicate_relevant_only
+    @Property(bool, notify=duplicatePendingOnlyChanged)
+    def duplicatePendingOnly(self) -> bool:  # noqa: N802
+        return self._duplicate_pending_only
 
     @Slot(bool)
-    def setDuplicateRelevantOnly(self, enabled: bool) -> None:  # noqa: N802
+    def setDuplicatePendingOnly(self, enabled: bool) -> None:  # noqa: N802
         enabled = bool(enabled)
-        if enabled == self._duplicate_relevant_only:
+        if enabled == self._duplicate_pending_only:
             return
-        self._duplicate_relevant_only = enabled
-        self.duplicateRelevantOnlyChanged.emit()
+        self._duplicate_pending_only = enabled
+        self.duplicatePendingOnlyChanged.emit()
         if self._job_status == JobStatus.DUPLICATE_REVIEW:
             self.refreshJobs()
 
@@ -403,8 +509,9 @@ class DesktopBridge(QObject):
 
     def _companies_loaded(self, rows: list[dict[str, Any]]) -> None:
         getattr(self, "_dirty_views", set()).discard("companies")
-        self._companies = rows
-        self.companiesChanged.emit()
+        if rows != self._companies:
+            self._companies = rows
+            self.companiesChanged.emit()
 
     def _companies_load_finished(self) -> None:
         self._companies_loading = False
@@ -509,7 +616,7 @@ class DesktopBridge(QObject):
     def refreshAll(self) -> None:  # noqa: N802
         self.refreshDashboard()
         self.refreshShortlist()
-        self.loadJobs("", JobStatus.SCRAPED)
+        self.loadJobs("", JobStatus.ANALYZED)
         self.refreshProfile()
         self.refreshDiagnostics()
 
@@ -528,8 +635,9 @@ class DesktopBridge(QObject):
         dashboard["analysis_progress"] = min(1.0, int(dashboard.get("analyzed", 0)) / total)
         dashboard["ready_progress"] = min(1.0, int(dashboard.get("ready", 0)) / total)
         dashboard["sent_progress"] = min(1.0, int(dashboard.get("sent", 0)) / total)
-        self._dashboard = dashboard
-        self.dashboardChanged.emit()
+        if dashboard != self._dashboard:
+            self._dashboard = dashboard
+            self.dashboardChanged.emit()
 
     @Slot()
     def refreshShortlist(self) -> None:  # noqa: N802
@@ -540,37 +648,61 @@ class DesktopBridge(QObject):
         )
 
     def _shortlist_loaded(self, summary: Any) -> None:
-        self._shortlist = _plain(summary)
-        self.shortlistChanged.emit()
+        value = _plain(summary)
+        if value != self._shortlist:
+            self._shortlist = value
+            self.shortlistChanged.emit()
 
     @Slot(str, str, str, bool)
+    @Slot(str, str, str, bool, str)
+    @Slot(str, str, str, bool, str, int)
     def loadJobs(
         self,
         search: str = "",
         status: str = "",
-        sort_key: str = "score",
+        sort_key: str = "default",
         sort_ascending: bool = False,
+        filter_disposition: str = "",
+        page: int = 0,
     ) -> None:  # noqa: N802
+        page = max(0, int(page)) if status != JobStatus.DUPLICATE_REVIEW else 0
         self._job_search = search
         self._job_status = status
         self._job_sort_key = sort_key
         self._job_sort_ascending = sort_ascending
+        self._job_filter_disposition = filter_disposition if status == JobStatus.SCRAPED else ""
         duplicates_only = (
-            self._duplicate_relevant_only if status == JobStatus.DUPLICATE_REVIEW else False
+            self._duplicate_pending_only if status == JobStatus.DUPLICATE_REVIEW else False
         )
-        query = (search, status, sort_key, sort_ascending, duplicates_only)
+        query = (
+            search,
+            status,
+            sort_key,
+            sort_ascending,
+            duplicates_only,
+            self._job_filter_disposition,
+            page,
+        )
+        if query != getattr(self, "_displayed_jobs_query", None):
+            self._job_selection_cleared = False
         loading = query != getattr(self, "_displayed_jobs_query", None)
         if self._jobs_loading != loading:
             self._jobs_loading = loading
             self.jobsLoadingChanged.emit()
-        self._start_read(
-            "jobs",
-            self.service.list_jobs,
+        filters = dict(
             search=search,
             status=status or None,
             sort_key=sort_key,
             sort_ascending=sort_ascending,
-            only_relevant_duplicates=duplicates_only,
+            only_pending_duplicates=duplicates_only,
+            filter_disposition=self._job_filter_disposition,
+        )
+        paged = status != JobStatus.DUPLICATE_REVIEW and hasattr(self.service, "list_jobs_page")
+        self._start_read(
+            "jobs",
+            self.service.list_jobs_page if paged else self.service.list_jobs,
+            **filters,
+            **({"page": page, "page_size": self._jobs_page_size} if paged else {}),
             on_success=lambda rows: self._jobs_loaded(rows, query),
             on_finished=self._jobs_read_finished,
         )
@@ -583,17 +715,87 @@ class DesktopBridge(QObject):
             self._job_status,
             self._job_sort_key,
             self._job_sort_ascending,
+            self._job_filter_disposition,
+            self._jobs_page,
         )
 
-    def _jobs_loaded(self, rows: list[Any], query: tuple | None = None) -> None:
+    def _jobs_loaded(self, result: list[Any] | dict, query: tuple | None = None) -> None:
+        if isinstance(result, dict):
+            rows = result["rows"]
+            total = int(result["total"])
+            page = int(result["page"])
+            if not rows and total and page:
+                self.loadJobs(
+                    query[0], query[1], query[2], query[3], query[5],
+                    min(page, (total - 1) // self._jobs_page_size),
+                )
+                return
+        else:
+            rows = result
+            total = len(rows)
+            page = 0
+        context_changed = query != getattr(self, "_displayed_jobs_query", None)
         self._displayed_jobs_query = query
-        self._jobs = _enrich_rows(rows)
+        if (page, total) != (
+            getattr(self, "_jobs_page", 0), getattr(self, "_jobs_total", 0)
+        ):
+            self._jobs_page, self._jobs_total = page, total
+            self.jobsPageChanged.emit()
+        enriched = _enrich_rows(rows)
+        if enriched == getattr(self, "_jobs", None):
+            if (
+                context_changed and enriched and not self._selected_job_id
+                and not self._job_selection_cleared
+            ):
+                self.selectJob(int(enriched[0]["id"]))
+            return
+        self._jobs = enriched
         if getattr(self, "_jobs_model", None) is not None:
             self._jobs_model.replace(self._jobs)
         self.jobsChanged.emit()
         current_id = self._selected_job_id or int(self._current_job.get("id") or 0)
-        if self._jobs and not current_id:
+        if self._jobs and not current_id and not self._job_selection_cleared:
             self.selectJob(int(self._jobs[0]["id"]))
+
+    @Slot()
+    def selectAllMatchingJobs(self):  # noqa: N802
+        """Resolve the current filter across every page on a worker thread."""
+        if self._selection_loading or self.shutdownRequested:
+            return
+        query = (
+            self._job_search, self._job_status, self._job_sort_key,
+            self._job_sort_ascending, self._job_filter_disposition,
+        )
+        self._selection_loading = True
+        self.selectionLoadingChanged.emit()
+
+        def loaded(rows):
+            current = (
+                self._job_search, self._job_status, self._job_sort_key,
+                self._job_sort_ascending, self._job_filter_disposition,
+            )
+            if query == current:
+                self.allMatchingJobsReady.emit([
+                    {
+                        "id": row.id,
+                        "status": row.status,
+                        "application_id": row.application_id,
+                        "shortlisted": row.shortlisted,
+                        "can_generate": row.can_generate,
+                    }
+                    for row in rows
+                ])
+
+        def finished():
+            self._selection_loading = False
+            self.selectionLoadingChanged.emit()
+
+        self._start_read(
+            "all_matching_jobs", self.service.list_jobs,
+            search=query[0], status=query[1] or None, sort_key=query[2],
+            sort_ascending=query[3], filter_disposition=query[4],
+            on_success=loaded, on_finished=finished,
+        )
 
     def _jobs_read_finished(self) -> None:
         if self._jobs_loading:
@@ -603,9 +805,49 @@ class DesktopBridge(QObject):
     @Slot(int)
     def selectJob(self, job_id: int) -> None:  # noqa: N802
         self._selected_job_id = job_id
+        self._job_selection_cleared = not bool(job_id)
         if hasattr(self, "_read_tokens"):
             self._read_tokens["open_application"] = self._read_tokens.get("open_application", 0) + 1
+        if not job_id:
+            # A late detail read must not reopen the last processed pair.
+            self._read_tokens["job_detail"] = self._read_tokens.get("job_detail", 0) + 1
+            self._reads_pending.pop("job_detail", None)
+            self._read_tokens["locate_job"] = self._read_tokens.get("locate_job", 0) + 1
+            self._reads_pending.pop("locate_job", None)
+            self._job_loaded({})
+            self._job_detail_read_finished()
+            return
         self.refreshSelectedJob()
+        if getattr(self, "_active_route", "") == "jobs" and hasattr(
+            self.service, "job_page_for"
+        ):
+            displayed = getattr(self, "_displayed_jobs_query", None)
+            current = (
+                self._job_search, self._job_status, self._job_sort_key,
+                self._job_sort_ascending, False, self._job_filter_disposition,
+            )
+            if displayed is None or displayed[:6] != current or not any(
+                int(row["id"]) == job_id for row in self._jobs
+            ):
+                self._start_read(
+                    "locate_job", self.service.job_page_for, job_id,
+                    search=self._job_search, status=self._job_status or None,
+                    sort_key=self._job_sort_key,
+                    sort_ascending=self._job_sort_ascending,
+                    filter_disposition=self._job_filter_disposition,
+                    page_size=self._jobs_page_size,
+                    on_success=lambda page: self._selected_job_page_found(job_id, page),
+                )
+
+    def _selected_job_page_found(self, job_id: int, page: int | None) -> None:
+        if (
+            page is not None and self._active_route == "jobs"
+            and self._selected_job_id == job_id and page != self._jobs_page
+        ):
+            self.loadJobs(
+                self._job_search, self._job_status, self._job_sort_key,
+                self._job_sort_ascending, self._job_filter_disposition, page,
+            )
 
     @Slot()
     def refreshSelectedJob(self) -> None:  # noqa: N802
@@ -1113,6 +1355,28 @@ class DesktopBridge(QObject):
             ),
         )
 
+    @Slot(int)
+    def deleteReadyOffer(self, job_id: int) -> None:  # noqa: N802
+        def deleted(result):
+            for application_id in result.application_ids:
+                self._notes_epochs[application_id] = self._notes_epochs.get(application_id, 0) + 1
+                self._notes_failures.pop(application_id, None)
+                self._notes_latest.pop(application_id, None)
+            self.offersDeleted.emit(list(result.job_ids), list(result.application_ids))
+            if getattr(self, "_selected_job_id", 0) in result.job_ids:
+                self.selectJob(0)
+            if result.files_removed:
+                self._operation_done("Offre supprimée", "L’offre et son dossier ont été supprimés définitivement.")
+            else:
+                self._refresh_workflow()
+                self.toastRequested.emit(
+                    "Nettoyage à terminer",
+                    "L’offre a été supprimée. Certains fichiers restent à effacer ; Élan réessaiera au prochain démarrage.",
+                    "warning",
+                )
+
+        self._mutate(self.service.delete_ready_offer, job_id, on_success=deleted, requires_maintenance=True)
+
     def _update_shortlist_pending(self):
         if getattr(self, "_current_job", None):
             self._current_job = dict(self._current_job)
@@ -1212,14 +1476,20 @@ class DesktopBridge(QObject):
     @Slot(int, bool)
     def resolveDuplicate(self, job_id: int, same_offer: bool) -> None:  # noqa: N802
         """Persist the user's duplicate decision for one pending offer."""
+        def failed(message: str, trace: str) -> None:
+            self.duplicateResolutionFinished.emit(job_id, False)
+            self._task_error(message, trace)
+
         self._mutate(
             self.service.resolve_duplicate,
             job_id,
             same_offer=same_offer,
             on_success=lambda resolved: self._duplicate_resolved(job_id, same_offer, resolved),
+            on_error=failed,
         )
 
     def _duplicate_resolved(self, job_id: int, same_offer: bool, resolved: bool) -> None:
+        self.duplicateResolutionFinished.emit(job_id, bool(resolved))
         if not resolved:
             self.toastRequested.emit(
                 "Doublon déjà traité",
@@ -1351,11 +1621,14 @@ class DesktopBridge(QObject):
 
     @Slot(int, str, int)
     def saveApplicationNotes(self, application_id: int, notes: str, revision: int) -> None:  # noqa: N802
+        epoch = self._notes_epochs.get(application_id, 0)
         self._notes_latest[application_id] = max(
             revision, self._notes_latest.get(application_id, -1)
         )
 
         def saved(ok):
+            if epoch != self._notes_epochs.get(application_id, 0):
+                return
             if not ok:
                 failed("La candidature n’est plus disponible.", "")
                 return
@@ -1365,12 +1638,16 @@ class DesktopBridge(QObject):
             self.applicationNotesSaved.emit(application_id, revision)
 
         def failed(message, trace):
+            if epoch != self._notes_epochs.get(application_id, 0):
+                return
             if revision >= self._notes_latest[application_id]:
                 self._notes_failures[application_id] = (notes, revision)
             self.applicationNotesSaveFailed.emit(application_id, revision, message)
             self.toastRequested.emit("Notes non enregistrées", message, "danger")
 
         def persist_latest():
+            if epoch != self._notes_epochs.get(application_id, 0):
+                return False
             if revision < self._notes_latest.get(application_id, revision):
                 return True
             return self.service.save_application_notes(application_id, notes)
@@ -1641,6 +1918,7 @@ class DesktopBridge(QObject):
         self._shutdown_requested = True
         self.shutdownRequestedChanged.emit()
         self._workflow_refresh_timer.stop()
+        self._analysis_controller.stop()
         self.cancelCurrentTask()
         self._reads_pending.clear()
         self._maintenance_mutations.clear()
@@ -1743,6 +2021,9 @@ class DesktopBridge(QObject):
             self._dirty_views.add("dashboard")
         if "companies" in tables:
             self._dirty_views.add("companies")
+        if set(tables) & {"jobs", "job_scores", "job_analyses", "applications",
+                          "analysis_batch_runs", "analysis_batch_items", "analysis_batch_waves"}:
+            self._dirty_views.add("analysis")
         if self._dirty_views:
             self._workflow_refresh_timer.start()
 
@@ -1755,6 +2036,9 @@ class DesktopBridge(QObject):
     def _flush_refresh(self):
         if self.shutdownRequested:
             return
+        if self._active_route == "analysis" and "analysis" in self._dirty_views:
+            self._dirty_views.discard("analysis")
+            self._analysis_controller.refresh(sync=False)
         if "shortlist" in self._dirty_views:
             self._dirty_views.discard("shortlist")
             self.refreshShortlist()

@@ -1,5 +1,9 @@
 """Tests for archive audit separation and product-facing labels."""
 
+from smartapply.filtering.hard_reject.role_families import (
+    TITLE_FAMILIES,
+    TitleFamilyPolicy,
+)
 from smartapply.jobsearch.archive_reasons import (
     archive_reason_labels,
     decisive_rejection_reasons,
@@ -37,3 +41,28 @@ def test_decisive_reason_filter_keeps_business_signals() -> None:
     assert decisive_rejection_reasons(
         ["role_relevance_score:0.08", "pure_data_engineering_role"]
     ) == ["pure_data_engineering_role"]
+
+
+def test_every_hard_role_family_has_a_human_readable_archive_label() -> None:
+    hard_families = {
+        family.name
+        for family in TITLE_FAMILIES
+        if family.policy is TitleFamilyPolicy.HARD_REJECT
+    }
+
+    labels = {
+        family: archive_reason_labels(
+            [f"off_target_role_family:{family}"],
+            archived=True,
+        )[0]
+        for family in hard_families
+    }
+
+    assert all(not label.startswith("Motif de filtrage") for label in labels.values())
+
+
+def test_mandatory_doctorate_has_a_human_readable_archive_label() -> None:
+    assert archive_reason_labels(
+        ["qualification_required:doctorate"],
+        archived=True,
+    ) == ("Doctorat obligatoire non compatible avec le profil actuel",)

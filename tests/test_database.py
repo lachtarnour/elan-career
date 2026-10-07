@@ -273,6 +273,7 @@ def test_top_jobs_can_exclude_already_prepared_applications() -> None:
     from smartapply.database import session_scope
     from smartapply.database.repository import (
         create_or_get_application,
+        mark_archived,
         set_score,
         top_jobs_by_score,
         upsert_job,
@@ -295,8 +296,18 @@ def test_top_jobs_can_exclude_already_prepared_applications() -> None:
             description="desc",
             source="manual",
         )
+        archived = upsert_job(
+            session,
+            external_id="rank:archived",
+            title="Archived",
+            company="Acme",
+            description="desc",
+            source="manual",
+        )
         set_score(session, prepared.id, final_score=0.99)
         set_score(session, available.id, final_score=0.75)
+        set_score(session, archived.id, final_score=1.0)
+        mark_archived(session, archived.id)
         create_or_get_application(session, prepared.id)
 
     with session_scope() as session:
@@ -305,6 +316,40 @@ def test_top_jobs_can_exclude_already_prepared_applications() -> None:
 
         assert [job.id for job in all_top] == [prepared.id]
         assert [job.id for job in unapplied_top] == [available.id]
+
+
+def test_audit_component_update_preserves_score_computation_time() -> None:
+    from datetime import datetime
+
+    from smartapply.database import session_scope
+    from smartapply.database.repository import set_score, upsert_job
+
+    original_time = datetime(2000, 1, 1)
+    with session_scope() as session:
+        job = upsert_job(
+            session,
+            external_id="score:audit-only",
+            title="ML Engineer",
+            company="Acme",
+            description="Machine learning.",
+            source="manual",
+        )
+        score = set_score(
+            session,
+            job.id,
+            final_score=0.8,
+            components={"ranking": {"final": 0.8}},
+            computed_at=original_time,
+        )
+        session.flush()
+        score = set_score(
+            session,
+            job.id,
+            components={"ranking": {"final": 0.8}, "manual_audit": True},
+        )
+        session.flush()
+
+        assert score.computed_at == original_time
 
 
 def test_usage_attribution_backfills_stable_reference_for_legacy_rows() -> None:
@@ -410,12 +455,11 @@ def test_auto_migrate_adds_missing_columns(tmp_path, monkeypatch) -> None:
     get_settings.cache_clear()
 
 
-def test_rescue_archived_job_resets_state_and_pins_max_scores() -> None:
+def test_rescue_archived_job_resets_state_without_fabricating_scores() -> None:
     """The macOS offers view lets the user override a wrong filter
-    rejection by re-injecting the offer with maxed-out synthetic scores.
-    The repository helper must reset the archive markers, return the job to
-    the analysis queue and persist a full ``components.manual_rescue`` audit
-    block so the rescue stays traceable.
+    rejection by re-injecting the offer into the pending relevance queue.
+    The repository helper must reset the archive markers, clear stale numeric
+    scores and preserve a full ``components.manual_rescue`` audit block.
     """
     from datetime import datetime, timezone
 
@@ -451,6 +495,7 @@ def test_rescue_archived_job_resets_state_and_pins_max_scores() -> None:
                     "contract_visible_text:apprentissage",
                 ],
                 "rejection_summary": "contract_visible_text:apprentissage",
+                "hard_reject": {"ruleset_version": "hard-reject-v2", "rejected": True},
             },
         )
         mark_archived(s, job.id)
@@ -466,8 +511,8 @@ def test_rescue_archived_job_resets_state_and_pins_max_scores() -> None:
         assert rescued is not None
         assert rescued.id == job_id
 
-    # Assert: archive cleared, status FILTERED, all numeric scores at
-    # 1.0 and the audit block preserves the previous rejection reasons.
+    # Assert: archive cleared, status FILTERED, no score is fabricated and the
+    # audit block preserves the previous rejection reasons.
     with session_scope() as s:
         job = s.get(Job, job_id)
         assert job is not None
@@ -475,7 +520,7 @@ def test_rescue_archived_job_resets_state_and_pins_max_scores() -> None:
         assert job.archived_at is None
         assert job.analyzed_at is None
         assert job.filtered_at is not None
-        assert job.ranked_at is not None
+        assert job.ranked_at is None
         assert job.shortlisted_at is None
         # SQLite drops the tz on read — coerce to UTC before subtracting.
         filtered_at = job.filtered_at
@@ -495,12 +540,16 @@ def test_rescue_archived_job_resets_state_and_pins_max_scores() -> None:
             "domain_score",
             "final_score",
         ):
-            assert getattr(score, component) == 1.0, component
+            assert getattr(score, component) is None, component
 
         comps = score.components
-        assert comps["manual_rescue"] is True
-        assert comps["justification"].startswith("filtre trop strict")
-        assert comps["previous_rejection"]["stage"] == "local_filter"
+        assert comps["filter_disposition"] == "pending_relevance"
+        assert "hard_reject" not in comps
+        rescue = comps["manual_rescue"]
+        assert rescue["schema_version"] == 3
+        assert rescue["justification"].startswith("filtre trop strict")
+        assert rescue["previous_hard_reject"]["rejected"] is True
+        assert rescue["previous_rejection"]["stage"] == "local_filter"
         assert "contract_visible_text:apprentissage" in (
-            comps["previous_rejection"]["reasons"] or []
+            rescue["previous_rejection"]["reasons"] or []
         )

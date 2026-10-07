@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+import pytest
+
 from smartapply.profile import get_profile
+from smartapply.profile.schema import SkillCategory, Skills
 from smartapply.ranking import (
     WEIGHTS,
     JobScorer,
@@ -19,6 +22,16 @@ class FakeJob:
     title: str
     description: str
     location: str | None = None
+
+
+def _scorer_with_allowed_skills(*skills: str) -> JobScorer:
+    profile = get_profile().model_copy(deep=True)
+    profile.skills = Skills(
+        categories=[
+            SkillCategory(id="test", name="Test skills", skills=list(skills))
+        ]
+    )
+    return JobScorer(profile, embeddings=MockEmbeddingsProvider())
 
 
 # ----------------- Embeddings -----------------
@@ -119,6 +132,44 @@ def test_score_components_final_uses_documented_weights() -> None:
     assert abs(sum(WEIGHTS.values()) - 1.0) < 1e-9
 
 
+@pytest.mark.parametrize(
+    ("skill", "description"),
+    [
+        ("R", "Statistical modelling in R, with reproducible reports."),
+        ("C++", "Build low-latency services in C++17."),
+        (".NET", "Maintain .NET 8 services and APIs."),
+        ("Machine learning", "Deploy machine-learning pipelines."),
+    ],
+)
+def test_skills_score_matches_lexical_skill_terms(
+    skill: str, description: str
+) -> None:
+    scorer = _scorer_with_allowed_skills(skill)
+
+    score = scorer._skills_score(FakeJob("Engineer", description))
+
+    assert score == 1 / 8
+
+
+@pytest.mark.parametrize(
+    ("skill", "description"),
+    [
+        ("R", "Research on Transformers and R&D tooling."),
+        ("C++", "Maintain C and C# services."),
+        (".NET", "Operate internet and network services."),
+        ("Machine learning", "Combine machine vision with a learning culture."),
+    ],
+)
+def test_skills_score_rejects_fragments_and_split_phrases(
+    skill: str, description: str
+) -> None:
+    scorer = _scorer_with_allowed_skills(skill)
+
+    score = scorer._skills_score(FakeJob("Engineer", description))
+
+    assert score == 0.0
+
+
 def test_scorer_uses_selected_location_neutrally() -> None:
     profile = get_profile()
     provider = MockEmbeddingsProvider()
@@ -173,3 +224,97 @@ def test_scorer_seniority_penalizes_15_years() -> None:
     s = scorer.score(senior_only)
     # seniority component should be small
     assert s.seniority < 0.3
+
+
+def test_seniority_ranking_uses_candidate_requirements_not_raw_tokens() -> None:
+    scorer = JobScorer(get_profile(), embeddings=MockEmbeddingsProvider())
+    neutral_descriptions = (
+        "Previous internship experience is accepted.",
+        "Our company has 20 years of experience in machine learning.",
+        "Five years of experience would be preferred.",
+        "You may grow into a team lead role in the future.",
+    )
+
+    scores = [
+        scorer.score(FakeJob("Data Scientist", description, "Paris")).seniority
+        for description in neutral_descriptions
+    ]
+
+    assert scores == [0.7, 0.7, 0.7, 0.7]
+
+
+def test_seniority_ranking_still_penalizes_real_mandatory_requirement() -> None:
+    scorer = JobScorer(get_profile(), embeddings=MockEmbeddingsProvider())
+    score = scorer.score(
+        FakeJob(
+            "Data Scientist",
+            "Candidates must have at least 4 years of professional experience.",
+            "Paris",
+        )
+    )
+
+    assert score.seniority == 0.4
+
+
+def test_ranking_replaces_scores_and_preserves_audit_namespaces(isolated_db) -> None:
+    from datetime import datetime, timezone
+
+    from smartapply.database import session_scope
+    from smartapply.database.models import Job
+    from smartapply.pipeline import Pipeline
+
+    pipeline = Pipeline(embeddings=MockEmbeddingsProvider())
+    ingested = pipeline.ingest_text(
+        text=(
+            "Construire des modèles de machine learning avec Python. "
+            "Deux ans d'expérience. CDI à Paris."
+        ),
+        title="Machine Learning Engineer",
+        company="TraceCo",
+        location="Paris",
+    )
+    job_id = ingested.job_ids[0]
+    pipeline.filter_pending(job_ids=[job_id])
+
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        assert job is not None and job.score is not None
+        components = dict(job.score.components)
+        components.update(
+            {
+                "rule_based": -1.0,
+                "semantic": -1.0,
+                "final": -1.0,
+                "cap": 0.1,
+                "hard_reject_backfill": {"schema_version": 1},
+                "confirmed_false_rejection_recovery": {"schema_version": 1},
+                "future_audit_namespace": {"source": "test"},
+            }
+        )
+        job.score.components = components
+        job.score.rule_based_score = 0.7
+        job.score.computed_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+    report = pipeline.rank_pending(job_ids=[job_id])
+
+    assert report.ranked_ids == [job_id]
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        assert job is not None and job.score is not None
+        assert job.score.rule_based_score is None
+        computed_at = job.score.computed_at
+        if computed_at.tzinfo is None:
+            computed_at = computed_at.replace(tzinfo=timezone.utc)
+        assert computed_at > datetime(2000, 1, 1, tzinfo=timezone.utc)
+        components = job.score.components
+        assert "rule_based" not in components
+        assert components["semantic"] != -1.0
+        assert components["final"] != -1.0
+        assert "cap" not in components
+        assert components["hard_reject_backfill"] == {"schema_version": 1}
+        assert components["confirmed_false_rejection_recovery"] == {
+            "schema_version": 1
+        }
+        assert components["future_audit_namespace"] == {"source": "test"}
+        assert components["filter_disposition"] == "pending_relevance"
+        assert components["hard_reject"]["rejected"] is False

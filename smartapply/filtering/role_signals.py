@@ -4,11 +4,6 @@ from __future__ import annotations
 
 import re
 
-from smartapply.filtering.relevance import (
-    RoleRelevanceDisposition,
-    assess_role_relevance,
-)
-
 REPORTING_BI_TOKENS = (
     "business intelligence",
     "dashboard",
@@ -301,7 +296,7 @@ def should_skip_configured_title_hard_reject(title: str, blocker: str) -> bool:
     if normalized == "expert":
         return bool(
             re.search(
-                r"(?<![a-z0-9])(?:ai|data|ia|intelligence\s+artificielle|llm|"
+                r"(?<![a-z0-9])(?:ai|data|genai|ia|intelligence\s+artificielle|llm|"
                 r"machine\s+learning|ml)(?![a-z0-9])",
                 title,
             )
@@ -319,19 +314,3 @@ def has_analytics_title_scope(title: str) -> bool:
             title,
         )
     )
-
-
-def has_role_relevance_signal(
-    *,
-    title: str,
-    description: str,
-    positive_title_keywords: tuple[str, ...],
-    target_roles: list[str],
-) -> bool:
-    assessment = assess_role_relevance(
-        title=title,
-        description=description,
-        positive_title_keywords=positive_title_keywords,
-        target_roles=target_roles,
-    )
-    return assessment.disposition is RoleRelevanceDisposition.RELEVANT

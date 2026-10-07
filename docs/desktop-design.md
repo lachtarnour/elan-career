@@ -16,8 +16,11 @@ vert pour l’envoi, ambre pour l’archivage et les avertissements.
 - Contrôles standard : 40 px ; contrôles compacts conservés dans la page Offres.
 - Offres : partage 50/50, marge réservée au défilement, recherche extensible limitée à son panneau.
 - Tableau Offres : grille commune aux en-têtes et aux cellules, proportions calculées sur la largeur du panneau, postes et lieux sur deux lignes au maximum. Scores IA/Match neutres sans contour, sélection légère et lignes sans séparateurs décoratifs.
-- Dans la vue Nouvelle, la colonne `Filtre` remplace IA/Match, place les offres pertinentes avant les incertaines et l'action `Analyser (N)` ne traite que la sélection sans créer de shortlist persistante.
-- Doublons : le filtre `Pertinents` conserve uniquement les paires dont les deux offres ont passé le filtre local. Une republication confirmée devient principale, tandis que le dossier envoyé, les documents et l'historique des anciennes sources restent liés au groupe.
+- Dans la vue Nouvelle, la colonne `Décision` remplace IA/Match. Le rejet déterministe produit seulement `Rejeté` ou `À classer`; la future classification de pertinence reste une étape séparée. L'action `Analyser (N)` ne traite que la sélection sans créer de shortlist persistante.
+- Le filtre de classe de Nouvelle propose `Toutes les classes`, `Rejeté` et `À classer`. Il s'applique à la liste complète du statut choisi, avant le tri. Le détail explique la décision enregistrée, sans recalculer la classification. Les anciennes décisions `Pertinent` et `Incertain` sont migrées vers ces deux états ; elles restent seulement dans l'historique d'audit.
+- Doublons : le filtre `Deux offres à classer` conserve uniquement les paires dont les deux offres sont `À classer`. Ce statut indique l'absence de rejet déterministe, avant l'évaluation de pertinence. Une republication confirmée devient principale, tandis que le dossier envoyé, les documents et l'historique des anciennes sources restent liés au groupe.
+- Les copies de contenu peuvent être regroupées dans une carte dépliable, sans confirmation ni modification des offres. L'interrupteur `Regrouper les copies` restaure immédiatement la liste par rapprochement. Chaque décision indique les deux offres concernées ; les compteurs distinguent rapprochements et cartes. Voir [les règles de dédoublonnage](duplicate-review.md).
+- Analyse : tableau à gauche, offre à droite, suivi transparent en bas avec un simple séparateur. Les détails des Batch restent sans carte ni bordure. Les libellés utilisent « analyse en cours », « Analyse n° » et « Offres de l’analyse ».
 - Zoom de l’offre : sans déplacement du titre, effet immédiat et valeur initiale de 1,15 à chaque lancement.
 - Notifications : toasts superposés en haut et tâche active en bas à droite, sans modifier la géométrie du contenu.
 - Profil, descriptions, diagnostics : retour à la ligne et hauteur adaptée au contenu.
@@ -35,7 +38,8 @@ non analysée reste une intention annulable jusqu’au succès de l’analyse.
 
 Les changements enregistrés regroupent les actualisations sur 200 ms ; la progression
 ne recharge pas les listes. Chaque vue conserve une seule lecture active et la dernière
-demande suivante. Les listes conservent leur limite, leur sélection et leur défilement.
+demande suivante. Les listes affichent toutes les offres du statut choisi, sans plafond
+de 500, et conservent leur sélection et leur défilement.
 Une actualisation du même contexte garde la liste et le détail utilisables ; le masque
 de chargement reste réservé au premier affichage et aux changements de requête ou
 d’offre. Au retour sur Offres, la recherche, le filtre, le tri, les sélections et le
@@ -85,6 +89,13 @@ la vue se positionne sur la nouvelle fiche à son rang. Voir le
 [référentiel et les règles de synchronisation](company-targeting.md).
 
 ## Avant distribution
+
+Dans Offres, la colonne « Analysée le » affiche la date d’achèvement de l’analyse,
+et « Prête le » la date de la dernière préparation réussie du dossier. Ces dates
+sont affichées en heure locale et leur tri s’applique à tous les résultats avant
+pagination. La préparation utilise `applications.ready_at`, sans dépendre des
+modifications de notes. Pour les anciens dossiers sans ce champ, la date de
+création des documents sert de repère historique ; une date inconnue reste « — ».
 
 Compléter les contrôles automatiques par une recette de l’application macOS empaquetée :
 rendu Metal/Retina, plein écran natif, lecteurs d’écran, signature/notarisation,

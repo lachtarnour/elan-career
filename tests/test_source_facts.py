@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import pytest
+
 from smartapply.filtering import JobFilter, ruleset_from_preferences
 from smartapply.filtering.source_facts import (
     build_filter_facts,
@@ -49,6 +51,19 @@ def test_francetravail_smart_experience_min_years_is_used() -> None:
     assert "experience_min_years:3" in facts.facts_used
 
 
+@pytest.mark.parametrize(
+    ("band", "minimum"),
+    [("LESS_THAN_6_MONTHS", 0.0), ("4_TO_5_YEARS", 4.0)],
+)
+def test_wttj_eligible_experience_bands_preserve_the_lower_bound(
+    band: str, minimum: float,
+) -> None:
+    facts = build_wttj_filter_facts({"experience_level": band})
+
+    assert facts.experience_min_years == minimum
+    assert facts.experience_required is True
+
+
 def test_francetravail_alternance_contract_rejected_from_structured_facts() -> None:
     job = FakeJob(
         contract_type=None,
@@ -65,6 +80,50 @@ def test_francetravail_alternance_contract_rejected_from_structured_facts() -> N
     assert not result.kept
     assert any(
         reason.startswith("blocked_contract_structured:apprenticeship") for reason in result.reasons
+    )
+
+
+def test_francetravail_professionalization_contract_is_apprenticeship() -> None:
+    facts = build_francetravail_filter_facts(
+        {
+            "typeContrat": "CDD",
+            "typeContratLibelle": "Contrat de professionnalisation",
+            "natureContrat": "Cont. professionnalisation",
+        }
+    )
+
+    assert facts.structured_contract_type == "Apprenticeship"
+    assert facts.structured_contract_source == "francetravail:natureContrat"
+
+
+@pytest.mark.parametrize(
+    "source_data",
+    [
+        {"dureeTravailLibelle": "1H/semaine"},
+        {
+            "dureeTravailLibelle": "Temps partiel - 1H/semaine\nTravail en journée",
+            "dureeTravailLibelleConverti": "Temps partiel",
+        },
+    ],
+)
+def test_francetravail_one_hour_week_is_flagged_as_implausible(
+    source_data: dict[str, Any],
+) -> None:
+    facts = build_francetravail_filter_facts(source_data)
+
+    assert facts.structured_work_time == "Temps partiel"
+    assert "structured_work_time_implausible_weekly_hours:1" in facts.warnings
+
+
+def test_francetravail_plausible_part_time_hours_remain_trusted() -> None:
+    facts = build_francetravail_filter_facts(
+        {"dureeTravailLibelle": "20H/semaine"}
+    )
+
+    assert facts.structured_work_time == "Temps partiel"
+    assert not any(
+        warning.startswith("structured_work_time_implausible_weekly_hours:")
+        for warning in facts.warnings
     )
 
 
@@ -165,7 +224,7 @@ def test_serpapi_schedule_type_prestataire_is_contractor_like_when_corroborated(
     job = FakeJob(
         source="serpapi",
         contract_type=None,
-        application_url="https://www.free-work.com/fr/tech-it/data/job-mission/1",
+        description="Mission freelance avec un TJM de 550 euros par jour.",
         source_data={"detected_extensions": {"schedule_type": "Prestataire"}},
     )
 

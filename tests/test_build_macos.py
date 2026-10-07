@@ -62,3 +62,25 @@ def test_build_refuses_to_replace_a_running_bundle(monkeypatch: pytest.MonkeyPat
 
     with pytest.raises(RuntimeError, match="Quit the application before rebuilding"):
         _assert_bundle_not_running()
+
+
+def test_alternate_build_writes_only_to_the_guarded_destination(monkeypatch, tmp_path):
+    destination = tmp_path / "staged" / "Elan.app"
+    original = tmp_path / "live" / "Elan.app"
+    original.mkdir(parents=True)
+    (original / "sentinel").write_text("running bundle")
+    monkeypatch.setattr(build_macos, "DIST_APP", destination)
+    monkeypatch.setattr(build_macos, "BUILD_DIR", tmp_path / "build")
+    monkeypatch.setattr(build_macos, "_render_icon", lambda path: path / "Elan.icns")
+    monkeypatch.setattr(build_macos, "_finalize_bundle_metadata", lambda: None)
+    guarded = []
+    monkeypatch.setattr(build_macos, "_running_bundle_pids", lambda path: guarded.append(path) or [])
+
+    def build(command, **kwargs):
+        output = Path(command[command.index("--distpath") + 1]) / "Elan.app"
+        output.mkdir(parents=True)
+
+    monkeypatch.setattr(build_macos.subprocess, "run", build)
+    assert build_macos.build_bundle(smoke_test=False) == destination
+    assert guarded == [destination / "Contents" / "MacOS" / "Elan"]
+    assert (original / "sentinel").read_text() == "running bundle"

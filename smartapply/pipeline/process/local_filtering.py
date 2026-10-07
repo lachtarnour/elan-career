@@ -12,45 +12,124 @@ from smartapply.database.repository import (
     set_score,
     update_status,
 )
-from smartapply.filtering.types import FilterDisposition, FilterResult
+from smartapply.filtering.hard_reject.types import (
+    HardRejectDisposition,
+    HardRejectResult,
+)
 from smartapply.pipeline.process.audit import _rejection_audit_components
+from smartapply.pipeline.process.filter_state import MANUAL_KEEP_OVERRIDE_REASON
+from smartapply.pipeline.process.score_components import (
+    replace_filter_components,
+    replace_filter_state_components,
+)
 from smartapply.pipeline.reports import LocalFilterReport
 from smartapply.pipeline.snapshots import check_cancelled, job_snapshot_key
 
 
 class LocalFilterMixin:
-    """Apply deterministic filters and persist rejection audit data."""
+    """Apply deterministic rejection gates and persist their evidence."""
 
     @staticmethod
-    def _persist_filter_result(
+    def _filter_decision_components(
+        result: HardRejectResult,
+        *,
+        force_keep: bool = False,
+    ) -> tuple[bool, dict[str, object]]:
+        reasons = list(result.reasons)
+        kept = result.kept or force_keep
+        if force_keep and not result.kept:
+            reasons.append(MANUAL_KEEP_OVERRIDE_REASON)
+
+        if kept:
+            disposition = (
+                HardRejectDisposition.PENDING_RELEVANCE
+                if force_keep
+                else result.disposition
+            )
+            components = {
+                "reasons": reasons,
+                "filter_disposition": disposition.value,
+                "hard_reject": result.audit_payload(),
+            }
+        else:
+            components = _rejection_audit_components(
+                "local_filter",
+                result.blocking_reasons,
+            )
+            # Preserve diagnostics for investigation without presenting clear
+            # or unresolved gates as causes of the rejection.
+            components["reasons"] = reasons
+            components["filter_disposition"] = "rejected"
+            components["hard_reject"] = result.audit_payload()
+        return kept, components
+
+    @classmethod
+    def _persist_filter_state_only(
+        cls,
         session,
         job: Job,
-        result: FilterResult,
+        result: HardRejectResult,
+        *,
+        force_keep: bool = False,
+    ) -> bool:
+        """Repair filter metadata without rewriting protected workflow history."""
+
+        kept, current_components = cls._filter_decision_components(
+            result,
+            force_keep=force_keep,
+        )
+        previous_components = (
+            dict(job.score.components) if job.score is not None and job.score.components else {}
+        )
+        set_score(
+            session,
+            job.id,
+            components=replace_filter_state_components(
+                previous_components,
+                current_components,
+            ),
+        )
+        if kept and job.filtered_at is None:
+            mark_filtered(session, job.id)
+        return kept
+
+    @classmethod
+    def _persist_filter_result(
+        cls,
+        session,
+        job: Job,
+        result: HardRejectResult,
         *,
         force_keep: bool = False,
         update_pipeline_status: bool = False,
     ) -> bool:
         """Persist one filter decision and return whether the job was kept."""
-        reasons = list(result.reasons)
-        kept = result.kept or force_keep
-        if force_keep and not result.kept:
-            reasons.append("Manual override: kept by user")
 
-        if kept:
-            components = {
-                "reasons": reasons,
-                "filter_disposition": (
-                    result.disposition.value if result.disposition is not None else "rejected"
-                ),
-            }
-        else:
-            components = _rejection_audit_components("local_filter", reasons)
-            components["filter_disposition"] = "rejected"
+        kept, current_components = cls._filter_decision_components(
+            result,
+            force_keep=force_keep,
+        )
 
+        previous_components = (
+            dict(job.score.components) if job.score is not None and job.score.components else {}
+        )
+        components = replace_filter_components(previous_components, current_components)
+        # Filtering invalidates every downstream ranking/selection artifact.
+        # A later rank pass must compute a fresh score from this filter result.
+        job.ranked_at = None
+        job.shortlisted_at = None
+        job.shortlist_origin = None
         set_score(
             session,
             job.id,
-            rule_based_score=result.score,
+            rule_based_score=None,
+            semantic_score=None,
+            skill_score=None,
+            title_score=None,
+            seniority_score=None,
+            location_score=None,
+            domain_score=None,
+            final_score=None,
             components=components,
         )
         if kept:
@@ -108,7 +187,7 @@ class LocalFilterMixin:
             check_cancelled(stop_requested)
             results.append((int(job.id), self.filter.evaluate(job)))
         kept_ids: list[int] = []
-        uncertain_ids: list[int] = []
+        pending_relevance_ids: list[int] = []
         rejected_ids: list[int] = []
         with write_session_scope() as session:
             current_by_id = {int(job.id): job for job in session.scalars(
@@ -120,12 +199,13 @@ class LocalFilterMixin:
                     continue
                 if self._persist_filter_result(session, job, result):
                     kept_ids.append(job_id)
-                    if result.disposition is FilterDisposition.UNCERTAIN:
-                        uncertain_ids.append(job_id)
+                    if result.disposition is HardRejectDisposition.PENDING_RELEVANCE:
+                        pending_relevance_ids.append(job_id)
                 else:
                     rejected_ids.append(job_id)
         return LocalFilterReport(
             total=len(pending), kept=len(kept_ids), rejected=len(rejected_ids),
             duplicates_removed=0, kept_ids=kept_ids, rejected_ids=rejected_ids,
-            uncertain=len(uncertain_ids), uncertain_ids=uncertain_ids,
+            pending_relevance=len(pending_relevance_ids),
+            pending_relevance_ids=pending_relevance_ids,
         )

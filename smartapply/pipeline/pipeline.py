@@ -2,7 +2,7 @@
 
 Phases:
 - Phase 1: ``Ingestor``  → scrape and persist raw jobs.
-- Phase 2: ``Processor`` → dedup + filter + rank + LLM analysis on top-K.
+- Phase 2: ``Processor`` → dedup + hard rejection + rank + LLM analysis on top-K.
 - Phase 3: ``Applier``   → adapt and render the CV and motivation letter.
 """
 
@@ -18,7 +18,11 @@ from smartapply.database import session_scope
 from smartapply.database.models import Job
 from smartapply.database.repository import top_jobs_by_score
 from smartapply.dedup import Deduplicator
-from smartapply.filtering import JobFilter, ruleset_from_preferences
+from smartapply.filtering import (
+    CandidateQualifications,
+    DeterministicRejector,
+    ruleset_from_preferences,
+)
 from smartapply.llm import get_llm_provider
 from smartapply.logging_setup import get_logger
 from smartapply.offers import ManualOfferInput
@@ -101,14 +105,17 @@ class Pipeline:
 
         # Shared building blocks
         self.deduplicator = Deduplicator()
-        self.filter = JobFilter(ruleset_from_preferences(self.profile.preferences))
+        self.filter = DeterministicRejector(
+            ruleset_from_preferences(self.profile.preferences),
+            qualifications=CandidateQualifications.from_profile(self.profile),
+        )
         self.scorer = JobScorer(self.profile, embeddings=self.embeddings)
         self.adapter = CvAdapter(self.profile, llm=self.llm, embeddings=self.embeddings)
         self.validator = CvValidator(self.profile)
         self.renderer = ApplicationDocumentRenderer(self.profile)
 
         # Phase modules
-        self._ingestor = Ingestor()
+        self._ingestor = Ingestor(job_filter=self.filter)
         self._processor = Processor(
             profile=self.profile,
             deduplicator=self.deduplicator,
@@ -233,9 +240,15 @@ class Pipeline:
                     job.possible_duplicate_of_id if job is not None else None,
                 )
 
-        process = self.analyze_jobs(job_ids)
+        prepared = self.prepare_analysis(
+            job_ids=job_ids,
+            local_filter_override_ids=job_ids,
+            include_analyzed=True,
+            exclude_applications=False,
+        )
+        process = self.analyze_jobs(prepared.kept_ids, exclude_applications=False)
         applications: list[ApplyReport] = []
-        for job_id in job_ids:
+        for job_id in prepared.kept_ids:
             applications.append(
                 self.apply_to(
                     job_id,
@@ -297,8 +310,25 @@ class Pipeline:
             persist_shortlist=persist_shortlist,
         )
 
-    def analyze_jobs(self, job_ids: list[int]) -> AnalyzeReport:
-        return self._processor.analyze_jobs(job_ids)
+    def analyze_jobs(
+        self,
+        job_ids: list[int],
+        *,
+        force_reanalyze: bool = False,
+        exclude_applications: bool = True,
+    ) -> AnalyzeReport:
+        return self._processor.analyze_jobs(
+            job_ids,
+            force_reanalyze=force_reanalyze,
+            exclude_applications=exclude_applications,
+        )
+
+    def prepare_analysis(self, **kwargs):
+        """Prepare deterministic survivors without ranking or embedding calls."""
+        return self._processor.prepare_analysis(**kwargs)
+
+    def analysis_candidates(self, job_ids=None, **kwargs):
+        return self._processor.analysis_candidates(job_ids, **kwargs)
 
     def filter_pending(self, *, job_ids: list[int] | None = None):
         return self._processor.filter_pending(job_ids=job_ids)

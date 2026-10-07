@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from smartapply.database import Job, session_scope
 from smartapply.offers import RawJob
 from smartapply.pipeline.ingest import IngestCollection, collect_round_robin
+from smartapply.pipeline.ingest.queries import build_source_query_plan
 from smartapply.pipeline.ingestor import Ingestor
 from smartapply.scrapers.apify_recovery import (
     ApifyRecoveryJournal,
@@ -152,6 +153,135 @@ def _collection(scraper, result) -> IngestCollection:  # noqa: ANN001
         completed_source_run_ids=result.completed_source_run_ids,
         source_run_journal_path=str(scraper.recovery_journal.path),
     )
+
+
+def test_fresh_ingest_runs_entire_plan_despite_old_reservation_and_dataset(
+    isolated_db, monkeypatch, tmp_path
+) -> None:
+    path = tmp_path / "apify_pending_runs.json"
+    journal = ApifyRecoveryJournal(path)
+    scraper = LinkedInJobsScraper(token="fake", recovery_path=path)
+    scraper.default_experience_level = []
+    # Match the real search filters; changing only the limit used to keep this
+    # old reservation blocking Computer Vision Engineer and the rest of the plan.
+    old_payload = {
+        "keywords": "Computer Vision Engineer", "location": "France",
+        "datePosted": "r604800", "urlPath": "/jobs/search", "limit": 100,
+        "urlParam": [{"key": "f_JT", "value": "F,T,C"},
+                     {"key": "f_WT", "value": "1,2,3"}],
+    }
+    journal.claim_start(old_payload)
+    journal.record_started(
+        payload={**old_payload, "keywords": "Data Scientist"},
+        run_id="old-run", dataset_id="old-dataset", actor_status="SUCCEEDED",
+    )
+    journal.mark_dataset_ready("old-run", dataset_id="old-dataset", actor_status="SUCCEEDED")
+    before = path.read_bytes()
+    monkeypatch.setattr("smartapply.pipeline.ingestor.get_scraper", lambda source: scraper)
+    posts = []
+
+    def post(url, **kwargs):
+        posts.append(kwargs["json"])
+        return _response({"data": {
+            "id": f"fresh-{len(posts)}", "defaultDatasetId": "fresh-dataset",
+            "status": "SUCCEEDED",
+        }})
+
+    monkeypatch.setattr("smartapply.scrapers.linkedin.requests.post", post)
+    monkeypatch.setattr("smartapply.scrapers.linkedin.requests.get", lambda *a, **kw: _response([]))
+    query = " OR ".join([
+        "Data Scientist", "Machine Learning Engineer", "AI Engineer", "Research Engineer",
+        "Applied Scientist", "Computer Vision Engineer", "Speech AI Engineer", "NLP Engineer",
+    ])
+    expected = build_source_query_plan("linkedin", query, include_research_cdd=True)
+    result = Ingestor().collect_source(
+        "linkedin", query, "France", max_results=1, include_research_cdd=True
+    )
+    assert len(posts) == len(expected.all_queries) == 360
+    assert {p["keywords"] for p in posts} == set(expected.all_queries)
+    assert len(result.completed_source_run_ids) == 360
+    assert path.read_bytes() == before
+    assert result.source_run_journal_path != str(path)
+    assert not result.warnings
+
+
+def test_repeated_fresh_fetch_finds_new_offer_and_skips_existing_locally(
+    isolated_db, monkeypatch, tmp_path
+) -> None:
+    path = tmp_path / "apify_pending_runs.json"
+
+    def factory(source):
+        scraper = LinkedInJobsScraper(token="fake", recovery_path=path)
+        scraper.default_experience_level = []
+        return scraper
+
+    posts = []
+
+    def post(url, **kwargs):
+        posts.append(kwargs["json"])
+        return _response({"data": {
+            "id": f"run-{len(posts)}", "defaultDatasetId": f"dataset-{len(posts)}",
+            "status": "SUCCEEDED",
+        }})
+
+    def get(url, **kwargs):
+        return _response([_actor_job("old")] if "dataset-1" in url else [
+            _actor_job("old"), {**_actor_job("new"), "postedDate": "2026-10-05T15:30:00Z"},
+        ])
+
+    monkeypatch.setattr("smartapply.pipeline.ingestor.get_scraper", factory)
+    monkeypatch.setattr("smartapply.scrapers.linkedin.requests.post", post)
+    monkeypatch.setattr("smartapply.scrapers.linkedin.requests.get", get)
+    ingestor = Ingestor()
+    first = ingestor.collect_source("linkedin", "Rare role", "France", max_results=2)
+    ingestor.persist_collection(first)
+    second = ingestor.collect_source("linkedin", "Rare role", "France", max_results=2)
+    assert len(posts) == 2
+    assert first.source_run_journal_path != second.source_run_journal_path
+    assert [job.source_data["id"] for job in second.raw_jobs] == ["new"]
+    assert second.skipped_known_during_collect == 1
+    assert second.raw_jobs[0].published_date is not None
+
+
+@pytest.mark.parametrize("failure", ["start", "read"])
+def test_fresh_fetch_continues_after_one_uncertain_request(
+    monkeypatch, tmp_path, failure
+) -> None:
+    scraper = LinkedInJobsScraper(
+        token="fake", recovery_path=tmp_path / "runs.json", read_max_attempts=1
+    )
+    scraper.begin_fresh_search()
+    posts = []
+
+    def post(url, **kwargs):
+        query = kwargs["json"]["keywords"]
+        posts.append(query)
+        if query == "broken" and failure == "start":
+            raise requests.ReadTimeout("uncertain POST")
+        return _response({"data": {
+            "id": query, "defaultDatasetId": query,
+            "status": "RUNNING" if query == "broken" else "SUCCEEDED",
+        }})
+
+    def get(url, **kwargs):
+        if "actor-runs/broken" in url:
+            raise requests.ReadTimeout("cannot read known run")
+        return _response([])
+
+    monkeypatch.setattr("smartapply.scrapers.linkedin.requests.post", post)
+    monkeypatch.setattr("smartapply.scrapers.linkedin.requests.get", get)
+    result = collect_round_robin(
+        scraper=scraper, source="linkedin", queries=["broken", *[f"next-{n}" for n in range(6)]],
+        location="France", max_results=1, search_kwargs={"experience_level": []},
+    )
+    assert set(posts) == {"broken", *[f"next-{n}" for n in range(6)]}
+    assert posts.count("broken") == 1
+    assert result.warnings
+    assert len(result.completed_source_run_ids) == 6
+    if failure == "start":
+        assert scraper.recovery_journal.list_start_reservations()[0].query == "broken"
+    else:
+        assert any(run.run_id == "broken" for run in scraper.recovery_journal.list_pending())
 
 
 @pytest.mark.parametrize("crash_at", ["before_commit", "after_commit", "after_ack"])

@@ -7,6 +7,8 @@ Dialog {
     objectName: "confirmDialog"
     property string heading: "Confirmer l’action"
     property string message: ""
+    property bool confirmEnabled: true
+    property string dismissText: "Annuler"
     property string confirmText: "Confirmer"
     property string kind: "primary"
     property url iconSource: Theme.icon(kind === "danger" ? "alert-circle" : "check")
@@ -17,7 +19,6 @@ Dialog {
     focus: true
     padding: 24
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-    Accessible.name: heading
     background: Rectangle {
         radius: Theme.radiusLarge
         color: Theme.surfaceRaised
@@ -26,6 +27,8 @@ Dialog {
     Overlay.modal: Rectangle { color: Theme.scrim }
     contentItem: ColumnLayout {
         id: dialogContent
+        Accessible.name: root.heading
+        Accessible.role: Accessible.Dialog
         spacing: 20
         RowLayout {
             Layout.fillWidth: true
@@ -59,8 +62,8 @@ Dialog {
             Layout.fillWidth: true
             spacing: 8
             Item { Layout.fillWidth: true }
-            AppButton { text: "Annuler"; onClicked: root.reject() }
-            AppButton { text: root.confirmText; kind: root.kind; onClicked: root.accept() }
+            AppButton { text: root.dismissText; onClicked: root.reject() }
+            AppButton { text: root.confirmText; kind: root.kind; enabled: root.confirmEnabled; onClicked: root.accept() }
         }
     }
     enter: Transition {

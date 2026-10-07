@@ -192,11 +192,13 @@ def _wttj_experience_min_years(value: str | None) -> float | None:
     normalized = norm(value).replace(" ", "_").upper()
     mapping = {
         "NO_EXPERIENCE": 0.0,
+        "LESS_THAN_6_MONTHS": 0.0,
         "LESS_THAN_1_YEAR": 0.0,
         "6_MONTHS_TO_1_YEAR": 0.5,
         "1_TO_2_YEARS": 1.0,
         "2_TO_3_YEARS": 2.0,
         "3_TO_4_YEARS": 3.0,
+        "4_TO_5_YEARS": 4.0,
         "5_TO_10_YEARS": 5.0,
         "MORE_THAN_10_YEARS": 10.0,
     }

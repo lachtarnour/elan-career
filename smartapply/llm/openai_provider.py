@@ -174,6 +174,7 @@ class OpenAIProvider(LLMProvider):
                         cost_usd=0.0,
                         cached=True,
                         job_id=job_id,
+                        cache_key=cache_key,
                     )
             except Exception as e:
                 logger.warning("Cache-hit usage recording failed (continuing): %s", e)
@@ -248,6 +249,7 @@ class OpenAIProvider(LLMProvider):
             completion_tokens=completion_tokens,
             cost_usd=cost,
             job_id=job_id,
+            cache_key=cache_key if use_cache else None,
         )
         if use_cache:
             try:
@@ -286,6 +288,7 @@ class OpenAIProvider(LLMProvider):
         completion_tokens: int,
         cost_usd: float,
         job_id: int | None,
+        cache_key: str | None = None,
     ) -> None:
         try:
             with write_session_scope(notify=False) as s:
@@ -300,6 +303,7 @@ class OpenAIProvider(LLMProvider):
                     cost_usd=cost_usd,
                     cached=False,
                     job_id=job_id,
+                    cache_key=cache_key,
                 )
         except Exception as e:
             logger.warning("Usage recording failed (continuing): %s", e)

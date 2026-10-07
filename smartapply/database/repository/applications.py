@@ -89,6 +89,7 @@ def update_application_tracking(
         if app.status == JobStatus.SENT:
             job.shortlisted_at = None
             job.shortlist_origin = None
-        if app.status == JobStatus.SENT or job.status != JobStatus.SHORTLISTED:
-            job.status = app.status
+        from smartapply.database.repository.offer_state import synchronize_offer_state
+
+        synchronize_offer_state(job)
     return app

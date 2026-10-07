@@ -14,6 +14,7 @@ Item {
     property real savedListScrollY: 0
     property bool returningToOffers: false
     property bool restoreListScroll: false
+    property bool pageResetRequested: false
     // A generated application is displayed as part of its offer. This keeps
     // the offer list and the application tracking state in one workspace.
     property var applicationData: AppBridge.currentJob.application || ({})
@@ -26,15 +27,32 @@ Item {
     readonly property bool selectedJobBusy: (AppBridge.busyJobIds || []).indexOf(Number(selectedId)) >= 0
     readonly property bool duplicateCandidateBusy: (AppBridge.busyJobIds || []).indexOf(Number((AppBridge.currentJob.duplicate_candidate || {}).id || 0)) >= 0
     property bool documentReviewDetailsExpanded: false
+    ConfirmDialog {
+        id: deleteOfferDialog
+        objectName: "deleteReadyOfferDialog"
+        anchors.centerIn: parent
+        property int targetJobId: 0
+        property string targetTitle: ""
+        property string targetCompany: ""
+        heading: "Supprimer cette offre ?"
+        message: targetTitle + " · " + targetCompany
+            + "\n\nL’offre, ses copies confirmées et son dossier de candidature seront effacés définitivement. Cette action est irréversible."
+        confirmText: "Supprimer définitivement"
+        kind: "danger"
+        confirmEnabled: !AppBridge.shutdownRequested && (AppBridge.busyJobIds || []).indexOf(targetJobId) < 0
+        onAccepted: AppBridge.deleteReadyOffer(targetJobId)
+    }
     readonly property var documentDiagnostics: applicationData.warnings || []
     readonly property int documentReviewPointCount: documentDiagnostics.filter(function(item) {
         return !root.isReviewInformation(String(item))
     }).length
-    property string sortKey: "filter_disposition"
-    property bool sortAscending: true
-    property string filterStatus: "scraped"
-    property string requestedFilter: "scraped"
+    property string sortKey: "llm_score"
+    property bool sortAscending: false
+    property string filterStatus: "analyzed"
+    property string requestedFilter: "analyzed"
+    property string filterDisposition: ""
     property var selectedJobs: ({})
+    property var selectedOrder: []
     readonly property int tableScrollGutter: Theme.scrollGutter
     // Header and rows share one measured content width and the same grid.
     readonly property real tableContentWidth: Math.max(0, tableSurface.width - 24 - tableScrollGutter)
@@ -46,11 +64,13 @@ Item {
     readonly property int llmScoreWidth: scoreWidth
     readonly property int publishedDateWidth: Math.round(76 + 12 * tableScale)
     readonly property bool isNewOffersFilter: filterStatus === "scraped"
+    readonly property bool showsLifecycleDate: filterStatus === "analyzed" || filterStatus === "ready_for_form_submission"
+    readonly property string lifecycleDateKey: filterStatus === "ready_for_form_submission" ? "ready_at" : "analyzed_at"
     // Nouvelle shows the source publication date beside the local-filter
     // disposition. Unknown publication dates remain explicit instead of
     // falling back to the import date.
     readonly property int filterDispositionWidth: scoreWidth + llmScoreWidth + columnGap
-    readonly property int rightColumnsWidth: isNewOffersFilter ? publishedDateWidth + columnGap + filterDispositionWidth : scoreWidth + llmScoreWidth + columnGap
+    readonly property int rightColumnsWidth: isNewOffersFilter ? publishedDateWidth + columnGap + filterDispositionWidth : scoreWidth + llmScoreWidth + columnGap + (showsLifecycleDate ? publishedDateWidth + columnGap : 0)
     readonly property int visibleColumnGapCount: isNewOffersFilter ? 5 : 6
     readonly property real textColumnsWidth: Math.max(0, tableContentWidth - selectWidth - experienceWidth - rightColumnsWidth - columnGap * visibleColumnGapCount)
     readonly property int companyWidth: Math.round(textColumnsWidth * 0.26)
@@ -75,11 +95,12 @@ Item {
     readonly property color warningCardBorder: Theme.warningLine
     readonly property color warningIconSurface: "#3A2A18"
     readonly property bool hasMatchInsights: (AppBridge.currentJob.match_reasons || []).length > 0
+    readonly property bool hasClassificationInsight: Boolean(AppBridge.currentJob.classification_summary)
     readonly property bool hasRiskInsights: (AppBridge.currentJob.risks || []).length > 0
     readonly property bool hasDuplicateInsight: AppBridge.currentJob.duplicate_review_status === "pending"
     readonly property bool hasArchiveInsight: AppBridge.currentJob.status === "archived"
         && (AppBridge.currentJob.archive_reasons || []).length > 0
-    readonly property bool hasInsightCards: hasMatchInsights || hasRiskInsights || hasDuplicateInsight || hasArchiveInsight
+    readonly property bool hasInsightCards: hasClassificationInsight || hasMatchInsights || hasRiskInsights || hasDuplicateInsight || hasArchiveInsight
         || documentDiagnostics.length > 0
 
     function isReviewInformation(message) {
@@ -193,7 +214,8 @@ Item {
 
     function companyX() { return selectWidth + columnGap }
     function titleX() { return companyX() + companyWidth + columnGap }
-    function scoreX(contentWidth) { return contentWidth - scoreWidth }
+    function lifecycleDateX(contentWidth) { return contentWidth - publishedDateWidth }
+    function scoreX(contentWidth) { return contentWidth - scoreWidth - (showsLifecycleDate ? publishedDateWidth + columnGap : 0) }
     function llmScoreX(contentWidth) { return scoreX(contentWidth) - columnGap - llmScoreWidth }
     function filterDispositionX(contentWidth) { return contentWidth - filterDispositionWidth }
     function publishedDateX(contentWidth) { return filterDispositionX(contentWidth) - columnGap - publishedDateWidth }
@@ -228,55 +250,47 @@ Item {
         return raw.length > 0 ? raw : "—"
     }
 
-    function descriptionForDisplay(description) {
-        var content = String(description || "").replace(/\r\n?/g, "\n").trim()
-        if (content.length === 0) return "Description indisponible"
-        var lines = content.split("\n")
-        if (lines.length > 1) {
-            var firstLine = lines[0].trim().toLowerCase()
-            if (firstLine === "description" || firstLine === "description du poste" || firstLine === "job description")
-                lines.shift()
-        }
-        return lines.join("\n").replace(/\n[ \t]*\n[ \t]*\n+/g, "\n\n").trim()
-    }
 
-    property var sortedJobs: {
-        var rowsDependency = AppBridge.jobs
-        var keyDependency = sortKey
-        var directionDependency = sortAscending
-        return (AppBridge.jobs || []).slice()
-    }
+    readonly property var sortedJobs: AppBridge.jobs || []
     property var selectedRows: {
-        var selectionDependency = selectedJobs
-        var rows = AppBridge.jobs || []
-        var result = []
-        for (var i = 0; i < rows.length; ++i) {
-            if (selectionDependency[String(rows[i].id)]) result.push(rows[i])
-        }
-        return result
+        return selectedOrder.map(function(id) { return selectedJobs[String(id)] })
+            .filter(function(row) { return Boolean(row) })
     }
     property var selectedIds: selectedRows.map(function(row) { return Number(row.id) })
     property var topLabelIds: selectedRows.filter(function(row) { return row.status !== "archived" && !row.application_id && !row.shortlisted }).map(function(row) { return Number(row.id) })
     property var generationIds: selectedRows.filter(function(row) { return Boolean(row.can_generate) }).map(function(row) { return Number(row.id) })
     property var rescueIds: selectedRows.filter(function(row) { return row.status === "archived" }).map(function(row) { return Number(row.id) })
     property int selectedCount: selectedIds.length
-    property bool allVisibleSelected: {
+    readonly property bool allVisibleSelected: {
         if (sortedJobs.length === 0) return false
         for (var i = 0; i < sortedJobs.length; ++i) {
             if (!selectedJobs[String(sortedJobs[i].id)]) return false
         }
         return true
     }
+    readonly property bool allFilteredSelected: AppBridge.jobsTotal > 0
+        && selectedCount === AppBridge.jobsTotal
 
     function isSelected(jobId) { return Boolean(selectedJobs[String(jobId)]) }
     function setSelected(jobId, checked) {
         var next = {}
         for (var key in selectedJobs) next[key] = selectedJobs[key]
-        if (checked) next[String(jobId)] = true
-        else delete next[String(jobId)]
+        var order = selectedOrder.slice()
+        if (checked) {
+            var row = sortedJobs.find(function(item) { return Number(item.id) === Number(jobId) })
+            if (row) {
+                next[String(jobId)] = row
+                if (order.indexOf(Number(jobId)) < 0) order.push(Number(jobId))
+            }
+        }
+        else {
+            delete next[String(jobId)]
+            order = order.filter(function(id) { return id !== Number(jobId) })
+        }
         selectedJobs = next
+        selectedOrder = order
     }
-    function clearSelection() { selectedJobs = ({}) }
+    function clearSelection() { selectedJobs = ({}); selectedOrder = [] }
     function selectedIndex() {
         var rows = sortedJobs || []
         for (var i = 0; i < rows.length; ++i) {
@@ -298,31 +312,69 @@ Item {
     function selectAllVisible() {
         var next = {}
         for (var key in selectedJobs) next[key] = selectedJobs[key]
-        for (var i = 0; i < sortedJobs.length; ++i) next[String(sortedJobs[i].id)] = true
+        var order = selectedOrder.slice()
+        for (var i = 0; i < sortedJobs.length; ++i) {
+            var row = sortedJobs[i]
+            if (allVisibleSelected) {
+                delete next[String(row.id)]
+                order = order.filter(function(id) { return id !== Number(row.id) })
+            } else {
+                next[String(row.id)] = row
+                if (order.indexOf(Number(row.id)) < 0) order.push(Number(row.id))
+            }
+        }
         selectedJobs = next
+        selectedOrder = order
     }
+    function selectAllFiltered() { AppBridge.selectAllMatchingJobs() }
     function sortBy(key) {
         restoreListScroll = false
+        jobsTable.contentY = 0
         if (sortKey === key) sortAscending = !sortAscending
         else {
             sortKey = key
-            sortAscending = key === "score" || key === "published_date" ? false : true
+            sortAscending = ["score", "llm_score", "published_date", "analyzed_at", "ready_at"].indexOf(key) < 0
         }
-        AppBridge.loadJobs(searchField.text, statusFilter.currentValue || "", sortKey, sortAscending)
+        loadOffers(0)
+    }
+
+    function loadOffers(page) {
+        var targetPage = page === undefined ? AppBridge.jobsPage : Math.max(0, Number(page))
+        if (targetPage !== AppBridge.jobsPage) {
+            restoreListScroll = false
+            savedListScrollY = 0
+            jobsTable.contentY = 0
+            AppBridge.selectJob(0)
+        }
+        AppBridge.loadJobs(searchField.text, filterStatus, sortKey, sortAscending,
+            isNewOffersFilter ? filterDisposition : "", targetPage)
+    }
+
+    function selectDisposition(disposition) {
+        searchTimer.stop()
+        filterDisposition = disposition
+        restoreListScroll = false
+        savedListScrollY = 0
+        jobsTable.contentY = 0
+        clearSelection()
+        loadOffers(0)
     }
 
     function useDefaultSortForStatus(status) {
-        sortKey = status === "scraped" ? "filter_disposition" : "score"
+        sortKey = status === "scraped" ? "filter_disposition"
+            : (status === "analyzed" || status === "ready_for_form_submission") ? "llm_score" : "score"
         sortAscending = status === "scraped"
     }
 
     function applyRequestedFilter() {
         if (!statusFilter) return
         var index = statusFilter.indexOfValue(requestedFilter)
-        if (index < 0) return
-        if (filterStatus !== requestedFilter) {
-            filterStatus = requestedFilter
-            useDefaultSortForStatus(requestedFilter)
+        var nextStatus = index < 0 ? "analyzed" : requestedFilter
+        index = statusFilter.indexOfValue(nextStatus)
+        if (filterStatus !== nextStatus) {
+            filterStatus = nextStatus
+            useDefaultSortForStatus(nextStatus)
+            pageResetRequested = true
             clearSelection()
             savedListScrollY = 0
             restoreListScroll = false
@@ -335,8 +387,11 @@ Item {
         searchTimer.stop()
         restoreListScroll = returningToOffers && !jobId
         returningToOffers = false
-        AppBridge.loadJobs(searchField.text, filterStatus, sortKey, sortAscending)
-        var target = Number(jobId || displayedJobId)
+        var resetPage = pageResetRequested
+        pageResetRequested = false
+        if (resetPage && !jobId) AppBridge.selectJob(0)
+        loadOffers(resetPage ? 0 : undefined)
+        var target = Number(jobId || (resetPage ? 0 : displayedJobId))
         if (target) AppBridge.selectJob(target)
         else updateSelectedDetail()
     }
@@ -363,7 +418,8 @@ Item {
         onTriggered: {
             if (root.activeView) {
                 root.clearSelection()
-                AppBridge.loadJobs(searchField.text, statusFilter.currentValue || "", root.sortKey, root.sortAscending)
+                jobsTable.contentY = 0
+                root.loadOffers(0)
             }
         }
     }
@@ -376,7 +432,28 @@ Item {
 
     Connections {
         target: AppBridge
+        function onOffersDeleted(jobIds, applicationIds) {
+            var drafts = {}
+            for (var key in root.noteDrafts) {
+                if (applicationIds.indexOf(Number(key)) < 0) drafts[key] = root.noteDrafts[key]
+            }
+            root.noteDrafts = drafts
+            var selected = {}
+            for (var jobKey in root.selectedJobs) {
+                if (jobIds.indexOf(Number(jobKey)) < 0) selected[jobKey] = root.selectedJobs[jobKey]
+            }
+            root.selectedJobs = selected
+            root.selectedOrder = root.selectedOrder.filter(function(id) {
+                return jobIds.indexOf(Number(id)) < 0
+            })
+        }
         function onJobSelectionClearRequested() { root.clearSelection() }
+        function onAllMatchingJobsReady(rows) {
+            var next = ({})
+            rows.forEach(function(row) { next[String(row.id)] = row })
+            root.selectedJobs = next
+            root.selectedOrder = rows.map(function(row) { return Number(row.id) })
+        }
         function onCurrentJobChanged() { if (root.activeView) root.updateSelectedDetail() }
         function onJobsChanged() {
             if (!root.activeView || !root.restoreListScroll) return
@@ -448,10 +525,36 @@ Item {
                             root.restoreListScroll = false
                             root.filterStatus = currentValue
                             root.useDefaultSortForStatus(currentValue)
+                            root.pageResetRequested = false
                             root.filterChanged(currentValue)
                             root.clearSelection()
-                            AppBridge.loadJobs(searchField.text, currentValue, root.sortKey, root.sortAscending)
+                            AppBridge.selectJob(0)
+                            jobsTable.contentY = 0
+                            root.loadOffers(0)
                         }
+                    }
+                    AppSelect {
+                        id: dispositionFilter
+                        objectName: "offerDispositionFilter"
+                        visible: root.isNewOffersFilter
+                        Layout.minimumWidth: visible ? 160 : 0
+                        Layout.preferredWidth: visible ? 160 : 0
+                        implicitHeight: 34
+                        leftPadding: 12
+                        rightPadding: 34
+                        fontPixelSize: 12
+                        indicatorSize: 14
+                        indicatorMargin: 12
+                        textRole: "label"
+                        valueRole: "value"
+                        Accessible.name: "Filtrer par classe"
+                        model: [
+                            {value: "", label: "Toutes les classes"},
+                            {value: "rejected", label: "Rejeté"},
+                            {value: "pending_relevance", label: "À classer"}
+                        ]
+                        currentIndex: Math.max(0, indexOfValue(root.filterDisposition))
+                        onActivated: root.selectDisposition(currentValue)
                     }
                     Item {
                         id: searchControl
@@ -462,6 +565,7 @@ Item {
                         // The toolbar must never push into the adjacent offer.
                         Layout.preferredWidth: expanded ? Math.min(260, Math.max(34,
                             toolbarRow.width - statusFilter.Layout.preferredWidth - shortlistControls.Layout.preferredWidth
+                            - dispositionFilter.Layout.preferredWidth
                             - (generationAction.visible ? generationAction.implicitWidth + toolbarRow.spacing : 0)
                             - toolbarRow.spacing * 3)) : 34
                         Layout.maximumWidth: Layout.preferredWidth
@@ -621,7 +725,7 @@ Item {
                     Rectangle {
                         Layout.preferredWidth: 28; Layout.preferredHeight: 28; radius: 9
                         color: Theme.accentSoft; border.color: Theme.accentLine
-                        Text { anchors.centerIn: parent; text: root.selectedCount; color: Theme.accentDark; font.pixelSize: 11; font.weight: Font.Bold }
+                        Text { anchors.centerIn: parent; text: root.selectedCount > 999 ? "999+" : root.selectedCount; color: Theme.accentDark; font.pixelSize: 11; font.weight: Font.Bold }
                     }
                     ColumnLayout {
                         spacing: 1
@@ -648,18 +752,6 @@ Item {
                         implicitHeight: 30
                         enabled: root.topLabelIds.length > 0 && !root.anyJobBusy(root.topLabelIds) && !AppBridge.shutdownRequested
                         onClicked: AppBridge.labelJobsAsTop(root.topLabelIds)
-                    }
-                    AppButton {
-                        visible: root.isNewOffersFilter && root.selectedCount > 0
-                        text: "Analyser (" + root.selectedCount + ")"
-                        iconSource: Theme.icon("sparkle")
-                        kind: "primary"
-                        refined: true
-                        iconSize: 13
-                        fontPixelSize: 11
-                        implicitHeight: 30
-                        enabled: !AppBridge.shutdownRequested
-                        onClicked: AppBridge.analyzeSelectedJobs(root.selectedIds)
                     }
                     AppButton {
                         visible: root.rescueIds.length > 0
@@ -719,9 +811,11 @@ Item {
                                     x: 0
                                     width: root.selectWidth
                                     anchors.verticalCenter: parent.verticalCenter
-                                    checked: root.allVisibleSelected
-                                    partial: root.selectedCount > 0 && !root.allVisibleSelected
-                                    onToggled: function(checked) { if (checked) root.selectAllVisible(); else root.clearSelection() }
+                                    checked: root.allFilteredSelected
+                                    partial: root.selectedCount > 0 && !root.allFilteredSelected
+                                    enabled: !AppBridge.selectionLoading && !AppBridge.jobsLoading
+                                    Accessible.name: "Sélectionner tous les résultats du filtre"
+                                    onToggled: function(checked) { if (checked) root.selectAllFiltered(); else root.clearSelection() }
                                 }
                                 SortHeader { objectName: "offerCompanyHeader"; x: root.companyX(); width: root.companyWidth; anchors.verticalCenter: parent.verticalCenter; title: "Entreprise"; sortKey: "company"; active: root.sortKey === sortKey; ascending: root.sortAscending; onSortRequested: function(key) { root.sortBy(key) } }
                                 SortHeader { objectName: "offerTitleHeader"; x: root.titleX(); width: root.titleWidthFor(parent.width); anchors.verticalCenter: parent.verticalCenter; title: "Poste"; sortKey: "title"; active: root.sortKey === sortKey; ascending: root.sortAscending; onSortRequested: function(key) { root.sortBy(key) } }
@@ -729,8 +823,22 @@ Item {
                                 SortHeader { x: root.locationX(parent.width); width: root.locationWidth; anchors.verticalCenter: parent.verticalCenter; title: "Lieu"; sortKey: "location"; active: root.sortKey === sortKey; ascending: root.sortAscending; onSortRequested: function(key) { root.sortBy(key) } }
                                 SortHeader { visible: !root.isNewOffersFilter; x: root.llmScoreX(parent.width); width: root.llmScoreWidth; anchors.verticalCenter: parent.verticalCenter; title: "IA"; sortKey: "llm_score"; active: root.sortKey === sortKey; ascending: root.sortAscending; centered: true; onSortRequested: function(key) { root.sortBy(key) } }
                                 SortHeader { objectName: "offerMatchHeader"; visible: !root.isNewOffersFilter; x: root.scoreX(parent.width); width: root.scoreWidth; anchors.verticalCenter: parent.verticalCenter; title: "Match"; sortKey: "score"; active: root.sortKey === sortKey; ascending: root.sortAscending; centered: true; onSortRequested: function(key) { root.sortBy(key) } }
+                                SortHeader {
+                                    objectName: "offerLifecycleDateHeader"
+                                    visible: root.showsLifecycleDate
+                                    x: root.lifecycleDateX(parent.width)
+                                    width: root.publishedDateWidth
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    title: root.filterStatus === "ready_for_form_submission" ? "Prête le" : "Analysée le"
+                                    Accessible.name: root.filterStatus === "ready_for_form_submission" ? "Trier par date de préparation" : "Trier par date d’analyse"
+                                    sortKey: root.lifecycleDateKey
+                                    active: root.sortKey === sortKey
+                                    ascending: root.sortAscending
+                                    centered: true
+                                    onSortRequested: function(key) { root.sortBy(key) }
+                                }
                                 SortHeader { objectName: "offerPublishedDateHeader"; visible: root.isNewOffersFilter; x: root.publishedDateX(parent.width); width: root.publishedDateWidth; anchors.verticalCenter: parent.verticalCenter; title: "Date"; sortKey: "published_date"; active: root.sortKey === sortKey; ascending: root.sortAscending; centered: true; onSortRequested: function(key) { root.sortBy(key) } }
-                                SortHeader { objectName: "offerFilterHeader"; visible: root.isNewOffersFilter; x: root.filterDispositionX(parent.width); width: root.filterDispositionWidth; anchors.verticalCenter: parent.verticalCenter; title: "Filtre"; sortKey: "filter_disposition"; active: root.sortKey === sortKey; ascending: root.sortAscending; centered: true; onSortRequested: function(key) { root.sortBy(key) } }
+                                SortHeader { objectName: "offerFilterHeader"; visible: root.isNewOffersFilter; x: root.filterDispositionX(parent.width); width: root.filterDispositionWidth; anchors.verticalCenter: parent.verticalCenter; title: "Décision"; sortKey: "filter_disposition"; active: root.sortKey === sortKey; ascending: root.sortAscending; centered: true; onSortRequested: function(key) { root.sortBy(key) } }
                             }
                         }
                         Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: "#2C2836" }
@@ -848,14 +956,25 @@ Item {
                                             font.pixelSize: root.tableTextSize - 1
                                         }
                                         Text {
+                                            objectName: "offerLifecycleDate-" + modelData.id
+                                            visible: root.showsLifecycleDate
+                                            x: root.lifecycleDateX(parent.width)
+                                            width: root.publishedDateWidth
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            horizontalAlignment: Text.AlignHCenter
+                                            text: modelData[root.lifecycleDateKey] || "—"
+                                            color: text === "—" ? Theme.inkFaint : Theme.inkMuted
+                                            font.pixelSize: root.tableTextSize - 1
+                                        }
+                                        Text {
                                             objectName: "offerFilter-" + modelData.id
                                             visible: root.isNewOffersFilter
                                             x: root.filterDispositionX(parent.width)
                                             width: root.filterDispositionWidth
                                             anchors.verticalCenter: parent.verticalCenter
                                             horizontalAlignment: Text.AlignHCenter
-                                            text: modelData.filter_disposition_label || "—"
-                                            color: modelData.filter_disposition === "uncertain" ? Theme.warning : modelData.filter_disposition === "relevant" ? Theme.success : Theme.inkFaint
+                                            text: modelData.filter_disposition_label || "À classer"
+                                            color: modelData.filter_disposition === "pending_relevance" ? Theme.accentBright : Theme.inkFaint
                                             font.pixelSize: root.tableTextSize - 1
                                             font.weight: Font.DemiBold
                                         }
@@ -890,6 +1009,56 @@ Item {
                             }
                         }
                     }
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 34
+                spacing: 8
+                AppButton {
+                    objectName: "offerSelectPageAction"
+                    text: root.allVisibleSelected ? "Retirer cette page" : "Sélectionner cette page"
+                    refined: true
+                    fontPixelSize: 11
+                    implicitHeight: 30
+                    enabled: root.sortedJobs.length > 0 && !AppBridge.jobsLoading
+                    onClicked: root.selectAllVisible()
+                }
+                Text {
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    text: AppBridge.jobsTotal > 0
+                        ? (AppBridge.jobsPage * AppBridge.jobsPageSize + 1) + "–"
+                            + Math.min(AppBridge.jobsTotal, (AppBridge.jobsPage + 1) * AppBridge.jobsPageSize)
+                            + " / " + AppBridge.jobsTotal
+                        : "0 offre"
+                    color: Theme.inkMuted
+                    font.pixelSize: 11
+                }
+                AppButton {
+                    objectName: "offerPreviousPageAction"
+                    text: "‹"
+                    refined: true
+                    implicitWidth: 32
+                    implicitHeight: 30
+                    enabled: AppBridge.jobsPage > 0 && !AppBridge.jobsLoading
+                    onClicked: root.loadOffers(AppBridge.jobsPage - 1)
+                }
+                Text {
+                    text: (AppBridge.jobsPage + 1) + " / "
+                        + Math.max(1, Math.ceil(AppBridge.jobsTotal / AppBridge.jobsPageSize))
+                    color: Theme.inkSoft
+                    font.pixelSize: 11
+                }
+                AppButton {
+                    objectName: "offerNextPageAction"
+                    text: "›"
+                    refined: true
+                    implicitWidth: 32
+                    implicitHeight: 30
+                    enabled: (AppBridge.jobsPage + 1) * AppBridge.jobsPageSize < AppBridge.jobsTotal
+                        && !AppBridge.jobsLoading
+                    onClicked: root.loadOffers(AppBridge.jobsPage + 1)
                 }
             }
         }
@@ -1045,6 +1214,47 @@ Item {
                                     Layout.preferredHeight: 1
                                     Layout.bottomMargin: root.hasInsightCards ? 8 : 0
                                     color: Theme.line
+                                }
+                                Rectangle {
+                                    objectName: "offerClassificationCard"
+                                    visible: root.hasClassificationInsight
+                                    Layout.fillWidth: true
+                                    implicitHeight: classificationContent.implicitHeight + 24
+                                    radius: 16
+                                    color: Theme.surfaceMuted
+                                    border.color: Theme.line
+                                    ColumnLayout {
+                                        id: classificationContent
+                                        anchors.fill: parent
+                                        anchors.margins: 12
+                                        spacing: 8
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: "Motif de la classification"
+                                            color: Theme.ink
+                                            font.pixelSize: root.detailMetaFontSize
+                                            font.weight: Font.Bold
+                                        }
+                                        Text {
+                                            objectName: "offerClassificationSummary"
+                                            Layout.fillWidth: true
+                                            text: AppBridge.currentJob.classification_summary || ""
+                                            textFormat: Text.PlainText
+                                            color: Theme.inkSoft
+                                            font.pixelSize: root.detailMetaFontSize
+                                            wrapMode: Text.WordWrap
+                                        }
+                                        Text {
+                                            objectName: "offerClassificationReasons"
+                                            visible: (AppBridge.currentJob.classification_reasons || []).length > 0
+                                            Layout.fillWidth: true
+                                            text: "• " + (AppBridge.currentJob.classification_reasons || []).join("\n• ")
+                                            textFormat: Text.PlainText
+                                            color: Theme.inkMuted
+                                            font.pixelSize: root.detailSmallFontSize
+                                            wrapMode: Text.WordWrap
+                                        }
+                                    }
                                 }
                                 Rectangle {
                                     objectName: "documentReviewCard"
@@ -1305,22 +1515,11 @@ Item {
                                     Item { Layout.fillWidth: true }
                                     Text { Layout.maximumWidth: detailContent.width * 0.42; text: AppBridge.currentJob.role_type || AppBridge.currentJob.domain || ""; color: Theme.inkFaint; font.pixelSize: root.detailSmallFontSize; elide: Text.ElideRight }
                                 }
-                                Item {
+                                OfferDescription {
                                     Layout.fillWidth: true
-                                    Layout.preferredHeight: Math.max(180, descriptionText.implicitHeight + 6)
-                                    Text {
-                                        id: descriptionText
-                                        anchors.left: parent.left
-                                        anchors.right: parent.right
-                                        anchors.top: parent.top
-                                        anchors.topMargin: 2
-                                        text: root.descriptionForDisplay(AppBridge.currentJob.description)
-                                        color: Theme.inkSoft
-                                        font.pixelSize: root.detailBodyFontSize
-                                        wrapMode: Text.WordWrap
-                                        lineHeight: 1.32
-                                        textFormat: Text.PlainText
-                                    }
+                                    Layout.preferredHeight: implicitHeight
+                                    description: AppBridge.currentJob.description || ""
+                                    fontPixelSize: root.detailBodyFontSize
                                 }
                                 AppTextArea {
                                     id: applicationNotes
@@ -1451,6 +1650,27 @@ Item {
                                     onClicked: AppBridge.archiveApplication(Number(root.applicationData.id))
                                 }
                                 AppButton {
+                                    objectName: "offerDeleteAction"
+                                    visible: AppBridge.currentJob.status === "ready_for_form_submission"
+                                    Layout.minimumWidth: root.detailActionButtonWidth
+                                    Layout.preferredWidth: root.detailActionButtonWidth
+                                    Layout.maximumWidth: root.detailActionButtonWidth
+                                    text: "Supprimer"
+                                    iconSource: Theme.icon("trash")
+                                    kind: "danger"
+                                    fontPixelSize: root.detailButtonFontSize
+                                    refined: true
+                                    iconSize: 13
+                                    implicitHeight: root.detailActionButtonHeight
+                                    enabled: !AppBridge.shutdownRequested && !root.selectedJobBusy
+                                    onClicked: {
+                                        deleteOfferDialog.targetJobId = Number(AppBridge.currentJob.id)
+                                        deleteOfferDialog.targetTitle = String(AppBridge.currentJob.title || "")
+                                        deleteOfferDialog.targetCompany = String(AppBridge.currentJob.company || "")
+                                        deleteOfferDialog.open()
+                                    }
+                                }
+                                AppButton {
                                     Layout.minimumWidth: root.detailActionButtonWidth
                                     Layout.preferredWidth: root.detailActionButtonWidth
                                     Layout.maximumWidth: root.detailActionButtonWidth
@@ -1476,7 +1696,7 @@ Item {
                                     text: AppBridge.currentJob.status === "duplicate_review" ? "Décision requise"
                                         : AppBridge.currentJob.related_application_id ? "Voir le dossier #" + AppBridge.currentJob.related_application_id
                                         : Boolean(AppBridge.currentJob.can_generate) ? "Créer"
-                                        : "Analyser"
+                                        : "Ouvrir l’analyse"
                                     iconSource: Theme.icon("sparkle")
                                     kind: "primary"
                                     fontPixelSize: root.detailButtonFontSize
@@ -1487,7 +1707,7 @@ Item {
                                         if (AppBridge.currentJob.status === "duplicate_review") return
                                         if (AppBridge.currentJob.related_application_id) AppBridge.openApplication(AppBridge.currentJob.related_application_id)
                                         else if (AppBridge.currentJob.can_generate) AppBridge.generateApplication(AppBridge.currentJob.id)
-                                        else AppBridge.analyzeJob(AppBridge.currentJob.id)
+                                        else root.navigateRequested("analysis")
                                     }
                                 }
                                 Item { Layout.fillWidth: true }
@@ -1589,6 +1809,7 @@ Item {
                                         anchors.margins: 1
                                         spacing: 0
                                         AppButton {
+                                            objectName: "offerRefreshAction"
                                             Layout.preferredWidth: 28
                                             Layout.preferredHeight: 28
                                             text: ""
@@ -1597,7 +1818,7 @@ Item {
                                             quiet: true
                                             iconSize: 12
                                             Accessible.name: "Actualiser les offres"
-                                            onClicked: AppBridge.loadJobs(searchField.text, statusFilter.currentValue || "", root.sortKey, root.sortAscending)
+                                            onClicked: root.loadOffers()
                                         }
                                         AppButton {
                                             visible: root.sortedJobs.length > 1

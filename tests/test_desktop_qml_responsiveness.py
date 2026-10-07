@@ -10,7 +10,7 @@ import pytest
 _HARNESS = r"""
 import sys
 from pathlib import Path
-from PySide6.QtCore import QObject, Property, Signal, Slot, QUrl, QElapsedTimer, QEventLoop, QMetaObject, Q_ARG, Qt
+from PySide6.QtCore import QObject, Property, Signal, Slot, QUrl, QElapsedTimer, QEventLoop, QMetaObject, Q_ARG, Q_RETURN_ARG, Qt, QPointF
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine, QQmlComponent
 from PySide6.QtQuick import QQuickItem, QQuickWindow
@@ -25,6 +25,9 @@ class Bridge(QObject):
     shutdownRequestedChanged = Signal()
     shutdownReadyChanged = Signal()
     jobsChanged = Signal()
+    allMatchingJobsReady = Signal("QVariantList")
+    duplicatePendingOnlyChanged = Signal()
+    duplicateResolutionFinished = Signal(int, bool)
     loadingChanged = Signal()
     toastRequested = Signal(str, str, str)
     navigationRequested = Signal(str, int)
@@ -32,6 +35,10 @@ class Bridge(QObject):
     notesFlushRequested = Signal()
     applicationNotesSaved = Signal(int, int)
     applicationNotesSaveFailed = Signal(int, int, str)
+    analysisOfferChanged = Signal()
+    analysisWorkspaceChanged = Signal()
+    analysisWorkspaceLoadingChanged = Signal()
+    analysisWorkspaceOperationChanged = Signal()
 
     def __init__(self):
         super().__init__()
@@ -45,17 +52,40 @@ class Bridge(QObject):
         self.routes = []
         self.queries = []
         self.selections = []
+        self.duplicate_decisions = []
         self.rows = [offer(42, 7), offer(43, 8)]
+        self.matching_rows = self.rows
+        self.page_index = 0
+        self.total = len(self.rows)
         self.list_loading = self.detail_loading = False
+        self.analysis_offer = {}
+        self.analysis_offer_id = 0
+        self.analysis_workspace = {"candidates": [], "runs": [], "active_run_id": ""}
+        self.analysis_loading = False
+        self.analysis_operation = ""
+        self.analysis_error = ""
+        self.analysis_refreshes = 0
+        self.analysis_starts = []
+        self.analysis_immediate = []
+        self.analysis_immediate_cancellations = 0
+        self.analysis_start_cancellations = 0
+        self.analysis_retries = []
+        self.analysis_cancellations = []
 
     currentJob = Property("QVariantMap", lambda self: self.job, notify=currentJobChanged)
     busyJobIds = Property("QVariantList", lambda self: self.protected, notify=busyJobIdsChanged)
     shutdownRequested = Property(bool, lambda self: self.closing, notify=shutdownRequestedChanged)
     shutdownReady = Property(bool, lambda self: self.ready, notify=shutdownReadyChanged)
     jobs = Property("QVariantList", lambda self: self.rows, notify=jobsChanged)
+    jobsPage = Property(int, lambda self: self.page_index, notify=jobsChanged)
+    jobsTotal = Property(int, lambda self: self.total, notify=jobsChanged)
+    jobsPageSize = Property(int, lambda self: 2, constant=True)
+    selectionLoading = Property(bool, lambda self: False, constant=True)
     jobsModel = Property(QObject, lambda self: None, constant=True)
     jobStatuses = Property("QVariantList", lambda self: [
-        {"value": "scraped", "label": "Nouvelle"}, {"value": "archived", "label": "Archivées"}
+        {"value": "analyzed", "label": "Analysée"},
+        {"value": "ready_for_form_submission", "label": "Prête"},
+        {"value": "archived", "label": "Archivées"}
     ], constant=True)
     shortlist = Property("QVariantMap", lambda self: {"ready_to_generate": 0}, constant=True)
     busy = Property(bool, lambda self: self.working, notify=busyChanged)
@@ -67,7 +97,7 @@ class Bridge(QObject):
     jobDetailLoading = Property(bool, lambda self: self.detail_loading, notify=loadingChanged)
     shortlistTopK = Property(int, lambda self: 5, constant=True)
     analysisTopK = Property(int, lambda self: 5, constant=True)
-    duplicateRelevantOnly = Property(bool, lambda self: True, constant=True)
+    duplicatePendingOnly = Property(bool, lambda self: True, notify=duplicatePendingOnlyChanged)
     profile = Property("QVariantMap", lambda self: {}, constant=True)
     dashboard = Property("QVariantMap", lambda self: {}, constant=True)
     activity = Property("QVariantMap", lambda self: {}, constant=True)
@@ -75,6 +105,47 @@ class Bridge(QObject):
     companies = Property("QVariantList", lambda self: [], constant=True)
     companiesLoading = Property(bool, lambda self: False, constant=True)
     companiesSaving = Property(bool, lambda self: False, constant=True)
+    analysisOffer = Property("QVariantMap", lambda self: self.analysis_offer, notify=analysisOfferChanged)
+    analysisOfferId = Property(int, lambda self: self.analysis_offer_id, notify=analysisOfferChanged)
+    analysisOfferLoading = Property(bool, lambda self: False, notify=analysisOfferChanged)
+    analysisWorkspace = Property("QVariantMap", lambda self: self.analysis_workspace, notify=analysisWorkspaceChanged)
+    analysisWorkspaceLoading = Property(bool, lambda self: self.analysis_loading, notify=analysisWorkspaceLoadingChanged)
+    analysisWorkspaceOperation = Property(str, lambda self: self.analysis_operation, notify=analysisWorkspaceOperationChanged)
+    analysisWorkspaceError = Property(str, lambda self: self.analysis_error, notify=analysisWorkspaceLoadingChanged)
+
+    @Slot(int)
+    def selectAnalysisOffer(self, job_id):
+        self.analysis_offer_id = job_id
+        self.analysis_offer = {**offer(job_id, 0), "application": {}}
+        self.analysisOfferChanged.emit()
+
+    @Slot()
+    def refreshAnalysisWorkspace(self):
+        self.analysis_refreshes += 1
+
+    @Slot("QVariantList")
+    def startAnalysisBatch(self, job_ids):
+        self.analysis_starts.append(job_ids)
+
+    @Slot("QVariantList")
+    def startImmediateAnalysis(self, job_ids):
+        self.analysis_immediate.append(job_ids)
+
+    @Slot()
+    def cancelImmediateAnalysis(self):
+        self.analysis_immediate_cancellations += 1
+
+    @Slot()
+    def cancelBatchStart(self):
+        self.analysis_start_cancellations += 1
+
+    @Slot(str)
+    def retryAnalysisBatch(self, run_id):
+        self.analysis_retries.append(run_id)
+
+    @Slot(str)
+    def cancelAnalysisBatch(self, run_id):
+        self.analysis_cancellations.append(run_id)
 
     @Slot(int, str, int)
     def saveApplicationNotes(self, application_id, text, revision):
@@ -102,14 +173,25 @@ class Bridge(QObject):
         self.routes.append(route)
 
     @Slot(str, str, str, bool)
+    @Slot(str, str, str, bool, str)
+    @Slot(str, str, str, bool, str, int)
     def loadJobs(self, *args):
         self.queries.append(args)
+
+    @Slot()
+    def selectAllMatchingJobs(self):
+        self.allMatchingJobsReady.emit(self.matching_rows)
 
     @Slot(int)
     def selectJob(self, job_id):
         self.selections.append(job_id)
-        self.job = offer(job_id, 7 if job_id == 42 else 8)
+        self.job = next((row for row in self.rows if row["id"] == job_id),
+            offer(job_id, 7 if job_id == 42 else 8)) if job_id else {}
         self.currentJobChanged.emit()
+
+    @Slot(int, bool)
+    def resolveDuplicate(self, job_id, same_offer):
+        self.duplicate_decisions.append((job_id, same_offer))
 
     @Slot()
     def refreshDiagnosticsIfStale(self):
@@ -166,6 +248,561 @@ assert notes is not None
 """
 
 _SCENARIOS = {
+    "lifecycle_dates_follow_the_filter_and_keep_columns_aligned": r"""
+host = QQuickWindow()
+host.resize(1400, 850)
+page.setParentItem(host.contentItem())
+host.show()
+def visual_item(item, name):
+    if item.objectName() == name:
+        return item
+    for child in item.childItems():
+        found = visual_item(child, name)
+        if found is not None:
+            return found
+    return None
+bridge.rows = [{**row, "analyzed_at": "03/10/2026", "ready_at": "06/10/2026"}
+               for row in bridge.rows]
+bridge.jobsChanged.emit()
+date_header = page.findChild(QQuickItem, "offerLifecycleDateHeader")
+match_header = page.findChild(QQuickItem, "offerMatchHeader")
+wait_until(lambda: visual_item(page, "offerLifecycleDate-42") is not None)
+date_cell = visual_item(page, "offerLifecycleDate-42")
+assert date_header and date_cell
+for status, key, title, value in [
+    ("analyzed", "analyzed_at", "Analysée le", "03/10/2026"),
+    ("ready_for_form_submission", "ready_at", "Prête le", "06/10/2026"),
+]:
+    page.setProperty("filterStatus", status)
+    app.processEvents()
+    assert date_header.property("visible") and date_cell.property("visible")
+    assert date_header.property("title") == title
+    assert date_header.property("sortKey") == key
+    assert date_cell.property("text") == value
+    for width in (1400, 1100):
+        page.setProperty("width", width)
+        app.processEvents()
+        assert date_header.x() >= match_header.x() + match_header.width()
+        assert date_header.x() + date_header.width() <= date_header.parentItem().width() + 1
+        assert abs(date_header.x() - date_cell.x()) <= 1
+        assert visual_item(page, "offerTitle-42").width() > 0
+    assert QMetaObject.invokeMethod(date_header, "clicked", Qt.DirectConnection)
+    assert page.property("sortKey") == key and page.property("sortAscending") is False
+page.setProperty("filterStatus", "archived")
+app.processEvents()
+assert not date_header.property("visible") and not date_cell.property("visible")
+host.hide()
+page.setParentItem(None)
+host.deleteLater()
+""",
+    "analysis_multiple_runs_keep_one_timeline_per_selected_run": r"""
+def run(run_id, sequence, count, batches):
+    return {"id": run_id, "sequence": sequence, "phase": "extraction",
+        "status": "in_progress", "status_label": "Traitement en cours", "is_active": True,
+        "total": count, "analyzed": 0, "failed": 0, "skipped": 0,
+        "created_at": "2026-10-06T10:00:00Z", "updated_at": "2026-10-06T10:00:00Z",
+        "items": [{"id": i, "title": "AI Engineer", "company": "Example"}
+            for i in range(sequence * 10, sequence * 10 + count)],
+        "phase_batches": [{"phase": "extraction", "status": "in_progress",
+            "status_label": "Traitement en cours", "total": sum(b["total"] for b in batches),
+            "completed": sum(b["completed"] for b in batches), "failed": 0,
+            "batch_count": len(batches), "batches": batches},
+            {"phase": "evaluation", "status": "waiting", "status_label": "En attente",
+             "total": 0, "completed": 0, "failed": 0, "batch_count": 0, "batches": []}]}
+first = run("run-a", 1, 3, [
+    {"number": 1, "status": "completed", "status_label": "Terminé", "offers": 1,
+     "total": 1, "completed": 1, "failed": 0},
+    {"number": 2, "status": "in_progress", "status_label": "Traitement en cours",
+     "offers": 2, "total": 2, "completed": 0, "failed": 0}])
+second = run("run-b", 2, 1, [
+    {"number": 1, "status": "in_progress", "status_label": "Traitement en cours",
+     "offers": 1, "total": 1, "completed": 0, "failed": 0}])
+bridge.analysis_workspace = {"candidates": [{"id": 99, "title": "AI Engineer"}],
+    "runs": [second, first], "active_run_id": "run-b", "active_run_count": 2}
+analysis = load_page("AnalysisPage.qml")
+assert analysis.findChild(QQuickItem, "analysisRunSelector").property("visible")
+assert analysis.findChild(QQuickItem, "analysisRunTitle").property("text") == "Analyse de 1 offre"
+assert len(analysis.findChild(QQuickItem, "analysisExtractionBatches").property("batches")) == 1
+analysis.setProperty("selectedRunId", "run-a")
+app.processEvents()
+assert analysis.findChild(QQuickItem, "analysisRunTitle").property("text") == "Analyse de 3 offres"
+assert len(analysis.findChild(QQuickItem, "analysisExtractionBatches").property("batches")) == 2
+# The table stays usable at supported sizes, including with Batch details open.
+card = analysis.findChild(QQuickItem, "analysisRunCard")
+table = analysis.findChild(QQuickItem, "analysisOfferTable")
+details = analysis.findChild(QQuickItem, "analysisRunDetails")
+assert analysis.findChild(QQuickItem, "analysisRefreshAction") is not None
+assert analysis.findChild(QQuickItem, "analysisViewOffer_99") is None
+assert analysis.findChild(QQuickItem, "analysisQueuePanel").property("surfaceColor").alpha() == 0
+assert analysis.findChild(QQuickItem, "analysisTableSurface").property("surfaceColor").name() == "#121119"
+assert analysis.findChild(QQuickItem, "analysisTableSurface").property("radiusValue") == 16
+assert not details.property("visible")
+assert card.property("surfaceColor").alpha() == 0
+assert card.property("strokeColor").alpha() == 0
+assert card.property("padding") == 0
+assert analysis.findChild(QQuickItem, "analysisTrackingDivider").height() == 1
+assert "Parcours" not in analysis.findChild(QQuickItem, "analysisRunSummary").property("text")
+assert analysis.findChild(QQuickItem, "analysisLotTab").property("text").startswith("Offres de l’analyse")
+host = QQuickWindow()
+analysis.setParentItem(host.contentItem())
+host.show()
+for width, height in [(1100, 720), (1320, 740), (1700, 820), (2400, 820)]:
+    host.resize(width, height)
+    analysis.setProperty("width", width)
+    analysis.setProperty("height", height)
+    reading = analysis.findChild(QQuickItem, "analysisReadingWorkspace")
+    preview = analysis.findChild(QQuickItem, "analysisOfferDetail")
+    tracking = analysis.findChild(QQuickItem, "analysisTrackingBand")
+    wait_until(lambda: abs(reading.width() - width) < 1 and table.width() > 480)
+    assert preview.mapToItem(analysis, QPointF()).x() > table.mapToItem(analysis, QPointF()).x()
+    assert tracking.mapToItem(analysis, QPointF()).y() >= reading.y() + reading.height()
+    assert table.width() >= 480
+    wait_until(lambda: table.height() >= 230)
+    assert table.height() >= 230, (width, height, table.height(), reading.height(), tracking.height())
+    invoke(analysis.findChild(QQuickItem, "analysisToggleDetails"), "clicked")
+    app.processEvents()
+    assert details.property("visible")
+    assert table.height() >= 160
+    assert analysis.findChild(QQuickItem, "analysisCancelAction").property("visible") == bool(first.get("can_cancel"))
+    invoke(analysis.findChild(QQuickItem, "analysisToggleDetails"), "clicked")
+    app.processEvents()
+# Passive updates preserve the disclosure state; changing runs closes it.
+invoke(analysis.findChild(QQuickItem, "analysisToggleDetails"), "clicked")
+bridge.analysisWorkspaceChanged.emit()
+app.processEvents()
+assert details.property("visible")
+analysis.setProperty("selectedRunId", "run-b")
+app.processEvents()
+assert not details.property("visible")
+analysis.setProperty("selectedRunId", "run-a")
+app.processEvents()
+invoke(analysis.findChild(QQuickItem, "analysisLotTab"), "clicked")
+assert analysis.findChild(QQuickItem, "analysisCandidateList").property("count") == 3
+invoke(analysis.findChild(QQuickItem, "analysisAvailableTab"), "clicked")
+assert not analysis.findChild(QQuickItem, "analysisStartBatchAction").property("enabled")
+invoke(analysis, "setSelected", 99, True)
+assert analysis.findChild(QQuickItem, "analysisStartBatchAction").property("enabled")
+invoke(analysis.findChild(QQuickItem, "analysisStartBatchAction"), "clicked")
+assert bridge.analysis_starts == [[99]]
+""",
+    "analysis_selection_is_exhaustive_and_keeps_offers_independent": r"""
+bridge.analysis_workspace = {"candidates": [
+    {"id": i, "title": "AI Engineer", "company": "Example", "location": "Paris"}
+    for i in range(1, 702)
+], "runs": [], "active_run_id": ""}
+analysis = load_page("AnalysisPage.qml")
+view = analysis.findChild(QQuickItem, "analysisCandidateList")
+assert view.property("count") == 701
+assert not bridge.analysis_starts
+assert bridge.queries == [] and bridge.selections == []
+assert analysis.findChild(QQuickItem, "analysisCompanyHeader") is not None
+assert analysis.findChild(QQuickItem, "analysisTitleHeader") is not None
+assert not analysis.findChild(QQuickItem, "analysisStartBatchAction").property("enabled")
+assert not analysis.findChild(QQuickItem, "analysisStartImmediateAction").property("enabled")
+invoke(analysis, "setSelected", 1, True)
+invoke(analysis, "setSelected", 701, True)
+invoke(analysis.findChild(QQuickItem, "analysisStartBatchAction"), "clicked")
+assert bridge.analysis_starts == [[1, 701]]
+current_offer = dict(bridge.job)
+table = analysis.findChild(QQuickItem, "analysisOfferTable")
+assert QMetaObject.invokeMethod(table, "offerOpened", Qt.DirectConnection,
+    Q_ARG("int", 701), Q_ARG("QString", "scraped"))
+assert bridge.analysis_offer_id == 701
+assert bridge.job == current_offer
+assert analysis.property("selectedIds").toVariant() == [1, 701]
+assert analysis.findChild(QQuickItem, "analysisOfferTitle").property("text") == "ML Engineer"
+assert analysis.findChild(QQuickItem, "analysisOfferDescription").property("description").startswith("A meaningful")
+viewport = analysis.findChild(QQuickItem, "analysisOfferDetailViewport")
+viewport.setProperty("contentY", 50)
+bridge.analysisWorkspaceChanged.emit()
+app.processEvents()
+assert viewport.property("contentY") == 50
+invoke(analysis.findChild(QQuickItem, "analysisStartImmediateAction"), "clicked")
+app.processEvents()
+assert bridge.analysis_immediate == []
+bridge.analysis_operation = "immediate"
+bridge.analysis_loading = True
+bridge.analysisWorkspaceOperationChanged.emit()
+bridge.analysisWorkspaceLoadingChanged.emit()
+app.processEvents()
+assert analysis.findChild(QQuickItem, "analysisCancelImmediateAction").property("visible")
+invoke(analysis.findChild(QQuickItem, "analysisCancelImmediateAction"), "clicked")
+assert bridge.analysis_immediate_cancellations == 1
+bridge.analysis_operation = ""
+bridge.analysis_loading = False
+bridge.analysisWorkspaceOperationChanged.emit()
+bridge.analysisWorkspaceLoadingChanged.emit()
+search = analysis.findChild(QQuickItem, "analysisSearchField")
+search.setProperty("text", "701")
+app.processEvents()
+assert view.property("count") == 1
+assert len(analysis.property("selectedIds").toVariant()) == 2
+bridge.analysis_workspace = {**bridge.analysis_workspace,
+    "candidates": bridge.analysis_workspace["candidates"][1:]}
+bridge.analysisWorkspaceChanged.emit()
+app.processEvents()
+assert analysis.property("selectedIds").toVariant() == [701]
+assert search.property("text") == "701"
+assert bridge.queries == [] and bridge.selections == []
+""",
+    "analysis_tracks_both_phases_recovery_and_errors": r"""
+run = {"id": "run-1", "phase": "evaluation", "phase_label": "Étape 2/2 · Évaluation",
+    "status": "in_progress", "status_label": "Traitement en cours", "total": 100,
+    "completed": 20, "failed": 3, "analyzed": 20, "created_at": "2026-10-06T10:00:00Z",
+    "updated_at": "2026-10-06T12:00:00Z", "expires_at": "2026-10-07T10:00:00Z",
+    "is_active": True, "can_retry": False, "can_cancel": True,
+    "phase_batches": [{"phase": "extraction", "status": "completed", "total": 100, "completed": 97, "failed": 3},
+        {"phase": "evaluation", "status": "in_progress", "total": 97, "completed": 20, "failed": 0}]}
+bridge.analysis_workspace = {"candidates": [], "runs": [run], "active_run_id": "run-1"}
+analysis = load_page("AnalysisPage.qml")
+assert analysis.findChild(QQuickItem, "analysisRunTitle").property("text") == "Analyse de 100 offres"
+assert analysis.findChild(QQuickItem, "analysisPhaseMarker_1").property("finished")
+assert analysis.findChild(QQuickItem, "analysisPhaseMarker_2").property("active")
+assert analysis.findChild(QQuickItem, "analysisPhaseGlow_2").property("visible")
+assert not analysis.findChild(QQuickItem, "analysisPhaseMarker_3").property("active")
+assert analysis.findChild(QQuickItem, "analysisPhaseStatus_3").property("text") == "En attente"
+assert analysis.findChild(QQuickItem, "analysisPhaseStatus_1").property("text") == "Terminé"
+assert analysis.findChild(QQuickItem, "analysisPhaseStatus_2").property("text") == "En cours"
+assert analysis.findChild(QQuickItem, "analysisPhaseCounts_1").property("text") == "97 / 100 demandes réussies · 3 en échec"
+assert analysis.findChild(QQuickItem, "analysisPhaseCounts_2").property("text") == "20 / 97 demandes traitées"
+assert not analysis.findChild(QQuickItem, "analysisRetryAction").property("visible")
+assert analysis.findChild(QQuickItem, "analysisCancelAction").property("enabled")
+run.update(status="attention", status_label="Reprise nécessaire", is_active=True,
+    can_retry=True, can_cancel=False, skipped=2, last_error="Connexion interrompue <b>à reprendre</b>",
+    errors=[{"job_id": 42, "title": "ML Engineer", "message": "Le profil a changé."}])
+bridge.analysis_workspace = {**bridge.analysis_workspace, "runs": [run]}
+bridge.analysisWorkspaceChanged.emit()
+app.processEvents()
+assert "L’envoi doit être vérifié" in analysis.findChild(QQuickItem, "analysisRunError").property("text")
+assert not analysis.findChild(QQuickItem, "analysisPhaseGlow_2").property("visible")
+assert analysis.findChild(QQuickItem, "analysisPhaseStatus_2").property("text") == "Reprise nécessaire"
+assert "2 ignorées" in analysis.findChild(QQuickItem, "analysisRunResult").property("text")
+assert analysis.findChild(QQuickItem, "analysisFailedOffers").property("count") == 1
+run.update(status="blocked", status_label="Connexion à rétablir", is_active=False,
+    can_retry=True, can_cancel=True, last_error="Permission api.files.write requise")
+bridge.analysis_workspace = {**bridge.analysis_workspace, "runs": [run]}
+bridge.analysisWorkspaceChanged.emit()
+app.processEvents()
+assert analysis.findChild(QQuickItem, "analysisPhaseStatus_2").property("text") == "Connexion à rétablir"
+assert analysis.findChild(QQuickItem, "analysisPhaseStatus_3").property("text") == "En attente"
+assert not analysis.findChild(QQuickItem, "analysisPhaseGlow_2").property("visible")
+assert analysis.findChild(QQuickItem, "analysisRetryAction").property("text") == "Reprendre"
+assert analysis.findChild(QQuickItem, "analysisQueuePanel").property("visible")
+assert analysis.findChild(QQuickItem, "analysisRunError").property("text").find("api.files.write") < 0
+assert analysis.findChild(QQuickItem, "analysisCancelAction").property("enabled")
+invoke(analysis.findChild(QQuickItem, "analysisRetryAction"), "clicked")
+assert bridge.analysis_retries == ["run-1"]
+bridge.analysis_loading = True
+bridge.analysis_error = "Réseau indisponible"
+bridge.analysisWorkspaceLoadingChanged.emit()
+assert not analysis.findChild(QQuickItem, "analysisRefreshAction").property("enabled")
+assert not analysis.findChild(QQuickItem, "analysisRetryAction").property("enabled")
+assert analysis.findChild(QQuickItem, "analysisWorkspaceError").property("text") == "Réseau indisponible"
+assert analysis.findChild(QQuickItem, "analysisRunTitle").property("text") == "Analyse de 100 offres"
+run.update(status="completed", status_label="Terminé", phase="done", is_active=False,
+    phase_batches=[run["phase_batches"][0],
+        {"phase": "evaluation", "status": "completed", "total": 97, "completed": 97, "failed": 0}])
+bridge.analysis_workspace = {**bridge.analysis_workspace, "runs": [run]}
+bridge.analysisWorkspaceChanged.emit()
+app.processEvents()
+assert analysis.findChild(QQuickItem, "analysisPhaseMarker_3").property("finished")
+assert not analysis.findChild(QQuickItem, "analysisPhaseGlow_2").property("visible")
+assert not analysis.findChild(QQuickItem, "analysisRunError").property("visible")
+run.update(status="cancelled", status_label="Annulé", last_error="Permission api.files.write requise")
+bridge.analysis_workspace = {**bridge.analysis_workspace, "runs": [run]}
+bridge.analysisWorkspaceChanged.emit()
+app.processEvents()
+assert not analysis.findChild(QQuickItem, "analysisRunError").property("visible")
+""",
+    "analysis_launch_is_visible_before_the_first_run_is_saved": r"""
+bridge.analysis_workspace = {"candidates": [
+    {"id": 42, "title": "AI Engineer", "company": "Example", "location": "Paris"}
+], "runs": [], "active_run_id": ""}
+analysis = load_page("AnalysisPage.qml")
+bridge.analysis_operation = "start"
+bridge.analysis_loading = True
+bridge.analysisWorkspaceOperationChanged.emit()
+bridge.analysisWorkspaceLoadingChanged.emit()
+app.processEvents()
+assert analysis.findChild(QQuickItem, "analysisLaunchCard").property("visible")
+assert not analysis.findChild(QQuickItem, "analysisStartBatchAction").property("enabled")
+invoke(analysis.findChild(QQuickItem, "analysisCancelLaunchAction"), "clicked")
+assert bridge.analysis_start_cancellations == 1
+assert analysis.findChild(QQuickItem, "analysisQueuePanel").property("visible")
+bridge.analysis_workspace = {"candidates": [], "runs": [{
+    "id": "run-1", "phase": "extraction", "status": "in_progress",
+    "status_label": "Traitement en cours", "total": 1, "is_active": True,
+    "phase_batches": [{"phase": "extraction", "status": "in_progress", "total": 1}]
+}], "active_run_id": "run-1"}
+bridge.analysis_loading = False
+bridge.analysis_operation = ""
+bridge.analysisWorkspaceChanged.emit()
+bridge.analysisWorkspaceLoadingChanged.emit()
+bridge.analysisWorkspaceOperationChanged.emit()
+app.processEvents()
+assert not analysis.findChild(QQuickItem, "analysisLaunchCard").property("visible")
+assert analysis.findChild(QQuickItem, "analysisRunCard").property("visible")
+assert analysis.findChild(QQuickItem, "analysisQueuePanel").property("visible")
+""",
+    "analysis_navigation_follows_duplicates_and_moves_launch_actions": r"""
+engine.load(QUrl.fromLocalFile(str(qml / "Main.qml")))
+window = engine.rootObjects()[0]
+actions = window.property("actions").toVariant()
+routes = [action["route"] for action in actions]
+assert routes.index("analysis") == routes.index("duplicates") + 1
+invoke(window, "navigate", "analysis", 0)
+def analysis_page_ready():
+    item = window.findChild(QQuickItem, "analysisPage")
+    # An asynchronous Loader exposes the root object before all bindings and
+    # children are initialized. Wait for the workspace property and list too.
+    return (item is not None and item.property("selectedIds") is not None
+        and item.findChild(QQuickItem, "analysisCandidateList") is not None)
+wait_until(analysis_page_ready)
+assert bridge.analysis_refreshes == 1
+assert bridge.queries == []
+analysis = window.findChild(QQuickItem, "analysisPage")
+assert analysis.property("selectedIds").toVariant() == []
+assert not bridge.analysis_starts
+routes_from_offers = []
+page.navigateRequested.connect(routes_from_offers.append)
+bridge.job = {**offer(42, 0), "application": {}, "status": "filtered", "can_generate": False}
+bridge.currentJobChanged.emit()
+action = page.findChild(QQuickItem, "offerPrimaryAction")
+assert action.property("text") == "Ouvrir l’analyse"
+invoke(action, "clicked")
+assert routes_from_offers == ["analysis"]
+search = load_page("SearchPage.qml")
+search_routes = []
+search.navigateRequested.connect(search_routes.append)
+invoke(search.findChild(QQuickItem, "searchOpenAnalysisAction"), "clicked")
+assert search_routes == ["analysis"]
+""",
+    "duplicate_versions_only_display_the_two_current_class_labels": r"""
+duplicates = load_page("DuplicatesPage.qml")
+for disposition, expected in (
+    ("rejected", "Rejeté"),
+    ("pending_relevance", "À classer"),
+    ("relevant", "À classer"),
+    ("uncertain", "À classer"),
+    ("", ""),
+):
+    result = QMetaObject.invokeMethod(duplicates, "classificationLabel", Qt.DirectConnection,
+        Q_RETURN_ARG("QVariant"), Q_ARG("QVariant", disposition))
+    assert result == expected
+""",
+    "duplicate_copy_groups_keep_individual_pairs_and_refresh_state": r"""
+versions = [
+    {"id": job_id, "source": source, "title": "ML Engineer", "company": "Example",
+        "location": "Paris", "published_date": "06/10/2026", "scraped_at": "06/10/2026",
+        "status_label": "Doublon à vérifier", "filter_disposition": "pending_relevance"}
+    for job_id, source in ((44, "francetravail"), (42, "serpapi"), (43, "linkedin"))
+]
+def pair(job_id):
+    return {**offer(job_id, 7), "source": "serpapi", "status": "duplicate_review",
+        "duplicate_candidate": offer(43, 8), "possible_duplicate_of_id": 43,
+        "strict_copy_group_ids": [44, 42, 43], "strict_copy_versions": versions}
+bridge.rows = [pair(42), pair(44)] + [
+    {**offer(job_id, 7), "possible_duplicate_of_id": 43} for job_id in range(100, 140)
+]
+bridge.job = bridge.rows[0]
+bridge.currentJobChanged.emit()
+bridge.jobsChanged.emit()
+duplicates = load_page("DuplicatesPage.qml")
+window = QQuickWindow()
+window.resize(1400, 850)
+duplicates.setParentItem(window.contentItem())
+window.show()
+app.processEvents()
+def visual_child(item, name):
+    if item.objectName() == name:
+        return item
+    for child in item.childItems():
+        found = visual_child(child, name)
+        if found is not None:
+            return found
+view = duplicates.findChild(QQuickItem, "duplicateGroupList")
+assert view.property("count") == 41
+assert duplicates.property("selectedId") == 42
+action = visual_child(duplicates, "duplicatePairAction_44")
+assert action is not None
+QMetaObject.invokeMethod(action, "clicked")
+assert bridge.selections[-1] == 44
+confirm = duplicates.findChild(QQuickItem, "duplicateConfirmAction")
+QMetaObject.invokeMethod(confirm, "clicked")
+assert bridge.duplicate_decisions == [(44, True)]
+toggle = visual_child(duplicates, "duplicateCopiesToggle_44")
+QMetaObject.invokeMethod(toggle, "clicked")
+app.processEvents()
+assert "Afficher" in toggle.property("text")
+view.setProperty("contentY", 120)
+bridge.rows = [bridge.rows[1], bridge.rows[0], *bridge.rows[2:]]
+bridge.jobsChanged.emit()
+app.processEvents()
+assert duplicates.property("selectedId") == 44
+assert view.property("contentY") == 120
+toggle = visual_child(duplicates, "duplicateCopiesToggle_44")
+assert "Afficher" in toggle.property("text")
+duplicates.setProperty("query", "LinkedIn")
+app.processEvents()
+assert view.property("count") == 1
+assert duplicates.findChild(QQuickItem, "duplicateRelationCount").property("text") == "2 / 42"
+duplicates.setProperty("query", "")
+duplicates.setProperty("groupCopies", False)
+app.processEvents()
+assert view.property("count") == 42
+assert duplicates.property("selectedId") == 44
+duplicates.setProperty("groupCopies", True)
+app.processEvents()
+assert view.property("count") == 41
+assert bridge.duplicate_decisions == [(44, True)]
+""",
+    "duplicate_decisions_advance_through_filtered_copy_pairs_after_refresh": r"""
+def pair(job_id, company="Visible"):
+    return {**offer(job_id, 7), "company": company, "status": "duplicate_review",
+        "duplicate_candidate": offer(43, 8), "possible_duplicate_of_id": 43}
+copies = [pair(44), pair(42)]
+for row in copies:
+    row.update(strict_copy_group_ids=[44, 42, 43], strict_copy_versions=[pair(43)])
+bridge.rows = [*copies, pair(45), pair(46), pair(99, "Hidden")]
+bridge.job = bridge.rows[0]
+bridge.currentJobChanged.emit()
+bridge.jobsChanged.emit()
+duplicates = load_page("DuplicatesPage.qml")
+duplicates.setProperty("query", "Visible")
+confirm = duplicates.findChild(QQuickItem, "duplicateConfirmAction")
+distinct = duplicates.findChild(QQuickItem, "duplicateDistinctAction")
+QMetaObject.invokeMethod(confirm, "clicked")
+assert bridge.duplicate_decisions == [(44, True)]
+assert not confirm.property("enabled") and not distinct.property("enabled")
+bridge.duplicateResolutionFinished.emit(44, True)
+app.processEvents()
+assert bridge.selections == [], "Wait until the resolved pair leaves the refreshed list"
+bridge.rows = bridge.rows[1:]
+bridge.jobsChanged.emit()
+wait_until(lambda: bridge.selections == [42])
+assert duplicates.property("query") == "Visible"
+QMetaObject.invokeMethod(distinct, "clicked")
+# A database notification may arrive before the worker's confirmation.
+bridge.rows = [row for row in bridge.rows if row["id"] not in (42, 45)]
+bridge.jobsChanged.emit()
+app.processEvents()
+assert bridge.selections == [42]
+bridge.duplicateResolutionFinished.emit(42, True)
+wait_until(lambda: bridge.selections == [42, 46])
+assert bridge.duplicate_decisions == [(44, True), (42, False)]
+QMetaObject.invokeMethod(distinct, "clicked")
+bridge.duplicateResolutionFinished.emit(46, True)
+bridge.rows = [pair(99, "Hidden")]
+bridge.jobsChanged.emit()
+wait_until(lambda: bridge.selections == [42, 46, 0])
+assert not duplicates.property("hasSelection")
+assert duplicates.property("visibleRelationCount") == 0
+""",
+    "duplicate_advancement_respects_errors_manual_navigation_and_end_of_list": r"""
+def pair(job_id):
+    return {**offer(job_id, 7), "status": "duplicate_review", "duplicate_candidate": offer(43, 8)}
+bridge.rows = [pair(42), pair(44), pair(45)]
+bridge.job = bridge.rows[1]
+bridge.currentJobChanged.emit()
+bridge.jobsChanged.emit()
+duplicates = load_page("DuplicatesPage.qml")
+confirm = duplicates.findChild(QQuickItem, "duplicateConfirmAction")
+QMetaObject.invokeMethod(confirm, "clicked")
+bridge.duplicateResolutionFinished.emit(44, False)
+app.processEvents()
+assert bridge.selections == [] and confirm.property("enabled")
+QMetaObject.invokeMethod(confirm, "clicked")
+bridge.selectJob(45)
+bridge.duplicateResolutionFinished.emit(44, True)
+bridge.rows = [pair(42), pair(45)]
+bridge.jobsChanged.emit()
+app.processEvents()
+assert bridge.selections == [45]
+QMetaObject.invokeMethod(confirm, "clicked")
+bridge.duplicateResolutionFinished.emit(45, True)
+bridge.rows = [pair(42)]
+bridge.jobsChanged.emit()
+wait_until(lambda: bridge.selections == [45, 42])
+# Leaving the page while persistence is running must not steal selection.
+QMetaObject.invokeMethod(confirm, "clicked")
+duplicates.setVisible(False)
+bridge.duplicateResolutionFinished.emit(42, True)
+bridge.rows = []
+bridge.jobsChanged.emit()
+app.processEvents()
+assert bridge.selections == [45, 42]
+""",
+    "classification_card_displays_recorded_reason_as_plain_text": r"""
+card = page.findChild(QQuickItem, "offerClassificationCard")
+assert not card.property("visible")
+bridge.job["classification_summary"] = "Aucune incompatibilité explicite n’a été prouvée."
+bridge.job["classification_reasons"] = ["Contrat à vérifier", "Métier à vérifier"]
+bridge.currentJobChanged.emit()
+app.processEvents()
+assert card.property("visible")
+summary = page.findChild(QQuickItem, "offerClassificationSummary")
+reasons = page.findChild(QQuickItem, "offerClassificationReasons")
+assert summary.property("text") == bridge.job["classification_summary"]
+assert reasons.property("text") == "• Contrat à vérifier\n• Métier à vérifier"
+assert reasons.property("visible")
+bridge.job["classification_reasons"] = []
+bridge.currentJobChanged.emit()
+app.processEvents()
+assert not reasons.property("visible") and card.property("visible")
+""",
+    "new_offers_are_confined_to_analysis": r"""
+control = page.findChild(QQuickItem, "offerDispositionFilter")
+assert control is not None and not control.property("visible")
+assert page.property("filterStatus") == "analyzed"
+status_control = page.findChild(QQuickItem, "offerStatusFilter")
+assert "scraped" not in [row["value"] for row in status_control.property("model")]
+invoke(page.findChild(QQuickItem, "offerRefreshAction"), "clicked")
+assert bridge.queries[-1] == ("", "analyzed", "llm_score", False, "", 0)
+search = page.findChild(QQuickItem, "offerSearchField")
+search.setProperty("text", "Paris")
+wait_until(lambda: bridge.queries[-1][0] == "Paris")
+assert bridge.queries[-1][-2] == ""
+invoke(page, "sortBy", "published_date")
+assert bridge.queries[-1] == ("Paris", "analyzed", "published_date", False, "", 0)
+page.setProperty("activeView", False)
+page.setProperty("activeView", True)
+invoke(page, "refreshOffers", 0)
+assert bridge.queries[-1][-2] == ""
+page.setProperty("requestedFilter", "archived")
+invoke(page, "refreshOffers", 0)
+assert not control.property("visible")
+assert bridge.queries[-1] == ("Paris", "archived", "score", False, "", 0)
+page.setProperty("requestedFilter", "ready_for_form_submission")
+invoke(page, "refreshOffers", 0)
+assert bridge.queries[-1] == ("Paris", "ready_for_form_submission", "llm_score", False, "", 0)
+page.setProperty("requestedFilter", "scraped")
+invoke(page, "refreshOffers", 0)
+assert not control.property("visible")
+assert bridge.queries[-1] == ("Paris", "analyzed", "llm_score", False, "", 0)
+""",
+    "offer_pages_keep_global_and_page_selection_distinct": r"""
+bridge.matching_rows = [offer(100 + i, 0) for i in range(5)]
+bridge.rows = bridge.matching_rows[:2]
+bridge.total = 5
+bridge.jobsChanged.emit()
+assert page.property("selectedCount") == 0
+invoke(page.findChild(QQuickItem, "offerSelectPageAction"), "clicked")
+assert page.property("selectedCount") == 2
+invoke(page.findChild(QQuickItem, "offerNextPageAction"), "clicked")
+assert bridge.queries[-1] == ("", "analyzed", "llm_score", False, "", 1)
+bridge.page_index = 1
+bridge.rows = bridge.matching_rows[2:4]
+bridge.jobsChanged.emit()
+invoke(page.findChild(QQuickItem, "offerSelectPageAction"), "clicked")
+assert page.property("selectedCount") == 4
+assert set(page.property("selectedIds").toVariant()) == {100, 101, 102, 103}
+invoke(page, "selectAllFiltered")
+assert page.property("selectedCount") == 5
+assert page.property("allFilteredSelected") is True
+invoke(page.findChild(QQuickItem, "offerSelectPageAction"), "clicked")
+assert set(page.property("selectedIds").toVariant()) == {100, 101, 104}
+assert page.property("allFilteredSelected") is False
+""",
     "late_restore_respects_new_search_and_scroll": r"""
 bridge.rows = [offer(42 + i, 7 + i) for i in range(80)]
 bridge.jobsChanged.emit()
@@ -213,7 +850,7 @@ window = engine.rootObjects()[0]
 invoke(window, "navigate", "jobs", 0)
 wait_until(lambda: window.findChild(QQuickItem, "jobsPage") is not None and bridge.queries)
 offers = window.findChild(QQuickItem, "jobsPage")
-assert bridge.queries[-1] == ("", "scraped", "filter_disposition", True)
+assert bridge.queries[-1] == ("", "analyzed", "llm_score", False, "", 0)
 search = offers.findChild(QQuickItem, "offerSearchField")
 table = offers.findChild(QQuickItem, "offerListViewport")
 viewport = offers.findChild(QQuickItem, "offerDetailViewport")
@@ -223,7 +860,7 @@ bridge.rows = original_rows
 bridge.jobsChanged.emit()
 wait_until(lambda: table.property("contentHeight") > table.property("height"))
 
-for route in ("search", "duplicates"):
+for route in ("analysis", "search", "duplicates"):
     search.setProperty("text", "Paris " + route)
     offers.setProperty("sortKey", "published_date")
     offers.setProperty("sortAscending", False)
@@ -244,7 +881,7 @@ for route in ("search", "duplicates"):
         assert viewport.property("contentY") == 200
     invoke(window, "navigate", "jobs", 0)
     wait_until(lambda: window.property("currentRoute") == "jobs" and bridge.queries[-1][0] == "Paris " + route)
-    assert bridge.queries[-1] == ("Paris " + route, "scraped", "published_date", False)
+    assert bridge.queries[-1] == ("Paris " + route, "analyzed", "published_date", False, "", 0)
     bridge.rows = original_rows
     bridge.jobsChanged.emit()
     wait_until(lambda: table.property("contentY") == 180)
@@ -260,8 +897,10 @@ bridge.selectJob(77)
 wait_until(lambda: window.property("currentRoute") == "jobs" and bridge.queries[-1][1] == "archived")
 assert bridge.job["id"] == 77 and offers.property("selectedId") == 77
 assert offers.property("filterStatus") == "archived"
-assert bridge.queries[-1] == ("Paris duplicates", "archived", "score", False)
+assert bridge.queries[-1] == ("Paris duplicates", "archived", "score", False, "", 0)
 assert offers.property("selectedCount") == 0
+invoke(window, "navigate", "jobs?status=scraped", 0)
+wait_until(lambda: window.property("currentRoute") == "analysis")
 """,
     "switch_before_debounce_and_late_results": r"""
 notes.setProperty("text", "first draft")
@@ -371,6 +1010,23 @@ assert retry.property("visible") is False
 """,
 }
 
+_SCENARIOS["analysis_state_and_numeric_experience_sort"] = r"""
+bridge.analysis_workspace = {"candidates": [
+    {"id": 1, "title": "AI Engineer", "company": "A", "experience": "10+ ans", "state_label": "À évaluer"},
+    {"id": 2, "title": "AI Engineer", "company": "B", "experience": "2+ ans", "state_label": "À extraire"},
+], "runs": []}
+analysis = load_page("AnalysisPage.qml")
+table = analysis.findChild(QQuickItem, "analysisOfferTable")
+assert table.findChild(QQuickItem, "analysisStateHeader").property("title") == "État"
+table.setProperty("sortKey", "experience")
+table.setProperty("ascending", True)
+app.processEvents()
+assert [row["id"] for row in table.property("sortedOffers").toVariant()] == [2, 1]
+table.setProperty("ascending", False)
+app.processEvents()
+assert [row["id"] for row in table.property("sortedOffers").toVariant()] == [1, 2]
+"""
+
 _TEARDOWN = r"""
 from PySide6.QtCore import QEvent
 for created_page in pages:
@@ -397,6 +1053,160 @@ def test_qml_remains_usable_and_preserves_notes(scenario):
         capture_output=True,
         text=True,
         timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_analysis_qml_uses_real_bridge_with_isolated_runtime():
+    """Exercise Qt property/slot wiring using the real service and local journal."""
+    qml = Path(__file__).resolve().parent.parent / "smartapply/desktop/qml"
+    script = r'''
+import os
+import socket
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+runtime = tempfile.TemporaryDirectory(prefix="elan-analysis-qml-")
+runtime_path = Path(runtime.name)
+os.environ.update(ELAN_HOME=str(runtime_path), ELAN_ENV_FILE=str(runtime_path / ".env"),
+    DATABASE_URL=f"sqlite:///{runtime_path / 'test.db'}", OUTPUT_DIR=str(runtime_path / "output"),
+    CACHE_DIR=str(runtime_path / "cache"), PROFILE_DIR=str(Path("tests/fixtures/profile").resolve()),
+    LLM_PROVIDER="mock", EMBEDDINGS_PROVIDER="mock", OPENAI_API_KEY="", APIFY_TOKEN="",
+    SERPAPI_API_KEY="", FRANCETRAVAIL_CLIENT_ID="", FRANCETRAVAIL_CLIENT_SECRET="", WTTJ_COOKIE="")
+def deny_network(*args, **kwargs):
+    raise AssertionError("The Qt wiring smoke test must not use the network")
+socket.create_connection = deny_network
+socket.socket.connect = deny_network
+
+from PySide6.QtCore import Q_ARG, QElapsedTimer, QEvent, QEventLoop, QMetaObject, QUrl, Qt
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtQuick import QQuickItem
+from smartapply.database import init_db, session_scope
+from smartapply.database.analysis_batches import AnalysisBatchItem, AnalysisBatchRun, AnalysisBatchWave
+from smartapply.database.models import Job, JobScore, JobStatus
+from smartapply.desktop.bridge import DesktopBridge
+from smartapply.desktop.services import DesktopService
+from smartapply.filtering.hard_reject.types import HardRejectResult
+
+app = QGuiApplication([])
+init_db()
+now = datetime.now(timezone.utc)
+with session_scope() as session:
+    jobs = [Job(external_id=f"qml-mock-{i}", title="Machine Learning Engineer", company="Example AI",
+        location="Paris", description="Build machine learning systems using Python.", source="manual",
+        status=JobStatus.FILTERED, filtered_at=now,
+        score=JobScore(components={"filter_disposition": "pending_relevance",
+            "hard_reject": HardRejectResult(decisions=()).audit_payload()})) for i in range(31)]
+    session.add_all(jobs)
+    session.flush()
+    session.add(AnalysisBatchRun(id="mock-run", state="active", model="mock", profile_data={}))
+    session.flush()
+    for job in jobs[:2]:
+        session.add(AnalysisBatchItem(run_id="mock-run", job_id=job.id, job_snapshot="mock-snapshot",
+            title=job.title, company=job.company, analyzer_input={}, state="evaluation_pending"))
+    session.add_all([
+        AnalysisBatchWave(id="mock-extraction", run_id="mock-run", phase="extraction", state="imported",
+            provider_batch_id="provider-extraction",
+            provider_data={"status": "completed", "total": 2, "completed": 2, "failed": 0}),
+        AnalysisBatchWave(id="mock-evaluation", run_id="mock-run", phase="evaluation", state="in_progress",
+            provider_batch_id="provider-evaluation",
+            provider_data={"status": "in_progress", "total": 2, "completed": 1, "failed": 0}),
+    ])
+
+service = DesktopService()
+# The progress fixture is local; the actual controller, worker, presentation and
+# DesktopBridge still run. A remote coordinator cannot touch this fake journal.
+service.sync_analysis_batches = service.analysis_workspace
+bridge = DesktopBridge(service)
+engine = QQmlApplicationEngine()
+warnings = []
+engine.warnings.connect(lambda errors: warnings.extend(error.toString() for error in errors))
+engine.rootContext().setContextProperty("AppBridge", bridge)
+engine.load(QUrl.fromLocalFile(str(Path(sys.argv[1]) / "Main.qml")))
+assert engine.rootObjects(), warnings
+window = engine.rootObjects()[0]
+window.resize(1320, 820)
+
+def wait_until(predicate):
+    timer = QElapsedTimer()
+    timer.start()
+    while not predicate():
+        app.processEvents(QEventLoop.AllEvents, 10)
+        assert timer.elapsed() < 8000, "Real bridge condition did not become ready"
+
+assert QMetaObject.invokeMethod(window, "navigate", Qt.DirectConnection,
+    Q_ARG("QVariant", "analysis"), Q_ARG("QVariant", 0))
+def ready():
+    page = window.findChild(QQuickItem, "analysisPage")
+    view = page.findChild(QQuickItem, "analysisCandidateList") if page is not None else None
+    counts = page.findChild(QQuickItem, "analysisPhaseCounts_2") if page is not None else None
+    return (page is not None and page.property("selectedIds") is not None
+        and view is not None and view.property("count") == 29
+        and counts is not None and counts.property("text") == "1 / 2 demandes traitées"
+        and not bridge.analysisWorkspaceLoading and len(bridge.analysisWorkspace["candidates"]) == 29)
+wait_until(ready)
+analysis = window.findChild(QQuickItem, "analysisPage")
+assert analysis.findChild(QQuickItem, "analysisCandidateList").property("count") == 29
+assert len(bridge.analysisWorkspace["runs"][0]["items"]) == 2
+assert analysis.findChild(QQuickItem, "analysisCompanyHeader") is not None
+assert not analysis.findChild(QQuickItem, "analysisStartBatchAction").property("enabled")
+assert QMetaObject.invokeMethod(analysis.findChild(QQuickItem, "analysisLotTab"),
+    "clicked", Qt.DirectConnection)
+app.processEvents()
+assert analysis.findChild(QQuickItem, "analysisCandidateList").property("count") == 2
+if os.environ.get("ELAN_ANALYSIS_LOT_SCREENSHOT"):
+    wait_until(lambda: window.property("pageOffset") == 0)
+    window.grabWindow().save(os.environ["ELAN_ANALYSIS_LOT_SCREENSHOT"])
+assert QMetaObject.invokeMethod(analysis.findChild(QQuickItem, "analysisAvailableTab"),
+    "clicked", Qt.DirectConnection)
+app.processEvents()
+assert analysis.findChild(QQuickItem, "analysisCandidateList").property("count") == 29
+assert not analysis.findChild(QQuickItem, "analysisStartBatchAction").property("enabled")
+first_available = bridge.analysisWorkspace["candidates"][0]["id"]
+analysis.setProperty("selectedOffers", {str(first_available): True})
+app.processEvents()
+assert analysis.findChild(QQuickItem, "analysisStartBatchAction").property("enabled")
+assert analysis.findChild(QQuickItem, "analysisStartImmediateAction").property("enabled")
+assert analysis.findChild(QQuickItem, "analysisExtractionBatches").property("batches")[0]["completed"] == 2
+assert analysis.findChild(QQuickItem, "analysisEvaluationBatches").property("batches")[0]["completed"] == 1
+assert analysis.findChild(QQuickItem, "analysisPhaseCounts_1").property("text") == "2 / 2 demandes réussies"
+assert analysis.findChild(QQuickItem, "analysisPhaseCounts_2").property("text") == "1 / 2 demandes traitées"
+assert analysis.findChild(QQuickItem, "analysisCancelAction").property("enabled")
+wait_until(lambda: bool(bridge.analysisOffer.get("description")))
+assert bridge.analysisOfferId == analysis.findChild(QQuickItem, "analysisOfferTable").property("sortedOffers").toVariant()[0]["id"]
+assert bridge.currentJob == {} and bridge._jobs == []
+assert analysis.findChild(QQuickItem, "analysisRunTitle").property("text") == "Analyse de 2 offres"
+assert not [warning for warning in warnings if "TypeError" in warning or "ReferenceError" in warning], warnings
+if os.environ.get("ELAN_ANALYSIS_SMOKE_SCREENSHOT"):
+    wait_until(lambda: window.property("pageOffset") == 0)
+    window.grabWindow().save(os.environ["ELAN_ANALYSIS_SMOKE_SCREENSHOT"])
+if os.environ.get("ELAN_ANALYSIS_DETAILS_SCREENSHOT"):
+    QMetaObject.invokeMethod(analysis.findChild(QQuickItem, "analysisToggleDetails"), "clicked")
+    app.processEvents()
+    window.grabWindow().save(os.environ["ELAN_ANALYSIS_DETAILS_SCREENSHOT"])
+bridge.requestShutdown()
+wait_until(lambda: bridge.shutdownReady)
+engine.deleteLater()
+app.sendPostedEvents(None, QEvent.DeferredDelete)
+app.processEvents()
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(qml)],
+        cwd=qml.parents[2],
+        env={
+            **os.environ,
+            "QT_QPA_PLATFORM": "offscreen",
+            "QT_QUICK_BACKEND": "software",
+            "QSG_RHI_BACKEND": "software",
+            "QT_QUICK_CONTROLS_STYLE": "Basic",
+        },
+        capture_output=True,
+        text=True,
+        timeout=25,
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr

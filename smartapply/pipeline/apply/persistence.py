@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from contextlib import nullcontext
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -19,6 +19,8 @@ from smartapply.database.repository import (
     update_status,
     upsert_document,
 )
+from smartapply.jobsearch.offer_state import STALE_RESERVATION_AFTER as _STALE_RESERVATION_AFTER
+from smartapply.jobsearch.offer_state import reservation_is_stale
 from smartapply.llm import MotivationLetter
 from smartapply.pipeline.errors import (
     ApplicationAlreadyExistsError,
@@ -27,23 +29,6 @@ from smartapply.pipeline.errors import (
 )
 from smartapply.pipeline.reports import ApplyReport
 from smartapply.pipeline.snapshots import job_is_active
-
-_STALE_RESERVATION_AFTER = timedelta(minutes=30)
-
-
-def reservation_is_stale(application: Application) -> bool:
-    """Return whether an unfinished reservation can safely be reused."""
-    if (
-        application.documents
-        or application.cv_json
-        or application.cv_docx_path
-        or application.cv_pdf_path
-    ):
-        return False
-    timestamp = application.updated_at or application.created_at
-    if timestamp.tzinfo is None:
-        timestamp = timestamp.replace(tzinfo=timezone.utc)
-    return datetime.now(timezone.utc) - timestamp >= _STALE_RESERVATION_AFTER
 
 
 class ApplicationPersistenceMixin:
@@ -170,6 +155,8 @@ class ApplicationPersistenceMixin:
                 *(f"validation_error:{error}" for error in report.validation_errors),
             ]
             application.status = status
+            if status == JobStatus.READY_FOR_FORM_SUBMISSION:
+                application.ready_at = datetime.now(timezone.utc)
             application.form_submission_url = form_url
 
             self.renderer.add_document_rows(session, application.id, report)
@@ -193,9 +180,5 @@ class ApplicationPersistenceMixin:
                 content=json.dumps(report.document_review, ensure_ascii=False),
                 extra={"scope": "cv_title_professional_summary_and_motivation_letter"},
             )
-            # Keep a selected offer in the first-class ``shortlisted`` state;
-            # the application itself carries the review/sent lifecycle.
-            job = session.get(Job, report.job_id)
-            if job is None or job.status != JobStatus.SHORTLISTED:
-                update_status(session, report.job_id, status)
+            update_status(session, report.job_id, status)
             report.application_id = application.id

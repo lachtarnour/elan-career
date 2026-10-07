@@ -6,7 +6,7 @@ import pytest
 from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtTest import QAbstractItemModelTester
 
-from smartapply.desktop.bridge import DesktopBridge
+from smartapply.desktop.bridge import DesktopBridge, _enrich_rows
 from smartapply.desktop.models import OfferListModel
 
 
@@ -19,6 +19,41 @@ class ControlledPool:
 
     def finish_next(self):
         self.pending.pop(0).run()
+
+
+def test_deletion_clears_detail_and_failed_note_drafts(bridge, monkeypatch):
+    from smartapply.desktop.offer_deletion import OfferDeletionResult
+
+    bridge.service.delete_ready_offer = lambda job_id: OfferDeletionResult((42, 43), (7,), True)
+    bridge._selected_job_id = 42
+    bridge._current_job = {"id": 42, "application": {"id": 7}}
+    bridge._notes_failures[7] = ("old draft", 1)
+    bridge._notes_latest[7] = 1
+    notifications = []
+    bridge.offersDeleted.connect(lambda *args: notifications.append(args))
+    monkeypatch.setattr(bridge, "_refresh_workflow", lambda: None)
+    bridge.deleteReadyOffer(42)
+    bridge._mutation_pool.finish_next()
+    assert not bridge.currentJob.get("id") and bridge._selected_job_id == 0
+    assert 7 not in bridge._notes_failures and 7 not in bridge._notes_latest
+    assert notifications == [([42, 43], [7])]
+
+
+def test_notes_queued_before_deletion_cannot_write_into_a_reused_id(bridge, monkeypatch):
+    from smartapply.desktop.offer_deletion import OfferDeletionResult
+
+    writes = []
+    bridge.service.save_application_notes = lambda *args: writes.append(args) or True
+    bridge.service.delete_ready_offer = lambda job_id: OfferDeletionResult((42,), (7,), True)
+    monkeypatch.setattr(bridge, "_refresh_workflow", lambda: None)
+    bridge.deleteReadyOffer(42)
+    bridge.saveApplicationNotes(7, "old draft", 1)
+    bridge._mutation_pool.finish_next()
+    bridge._mutation_pool.finish_next()
+    assert writes == [] and not bridge._notes_failures
+    bridge.saveApplicationNotes(7, "new dossier draft", 1)
+    bridge._mutation_pool.finish_next()
+    assert writes == [(7, "new dossier draft")]
 
 
 @pytest.fixture
@@ -46,6 +81,82 @@ def bridge(monkeypatch):
     value._unsubscribe_database()
     value._workflow_refresh_timer.stop()
     application.processEvents()
+
+
+@pytest.mark.parametrize(
+    ("disposition", "label"),
+    [
+        ("rejected", "Rejeté"),
+        ("pending_relevance", "À classer"),
+        ("relevant", "À classer"),
+        ("uncertain", "À classer"),
+        ("", ""),
+        (None, ""),
+    ],
+)
+def test_offer_rows_only_display_the_two_current_class_labels(disposition, label):
+    row = {"id": 42, "title": "ML Engineer", "filter_disposition": disposition}
+
+    enriched = _enrich_rows([row])[0]
+
+    assert enriched["filter_disposition_label"] == label
+    # Labels do not change the stored decision or make decisions in the UI.
+    assert enriched["filter_disposition"] == disposition
+    assert row["filter_disposition"] == disposition
+
+
+@pytest.mark.parametrize("same_offer", [True, False])
+@pytest.mark.parametrize("outcome", [True, False, "error"])
+def test_duplicate_completion_reports_only_persisted_success(bridge, monkeypatch, same_offer, outcome):
+    completions, refreshed = [], []
+
+    def resolve(job_id, *, same_offer):
+        if outcome == "error":
+            raise RuntimeError("Persistence failed")
+        return outcome
+
+    bridge.service.resolve_duplicate = resolve
+    bridge.duplicateResolutionFinished.connect(lambda *args: completions.append(args))
+    monkeypatch.setattr(bridge, "_refresh_workflow", lambda: refreshed.append("list"))
+    monkeypatch.setattr(bridge, "_refresh_selected", lambda job: refreshed.append(job))
+
+    bridge.resolveDuplicate(42, same_offer)
+    assert completions == []
+    bridge._mutation_pool.finish_next()
+
+    assert completions == [(42, outcome is True)]
+    assert refreshed == (["list", 42] if outcome is True else [])
+
+
+def test_clearing_last_duplicate_selection_discards_late_detail(bridge):
+    bridge.service.get_job = lambda job: {"id": job}
+    bridge.selectJob(42)
+    assert bridge.jobDetailLoading
+
+    bridge.selectJob(0)
+    bridge._read_pool.finish_next()
+
+    assert bridge._selected_job_id == 0
+    assert not bridge.currentJob.get("id") and not bridge.jobDetailLoading
+
+
+def test_passive_refresh_preserves_explicitly_cleared_duplicate_selection(bridge):
+    bridge.service.get_job = lambda job: {"id": job}
+    bridge.service.list_jobs = lambda **kwargs: [{"id": 99, "title": "Outside the page filter"}]
+    bridge._selected_job_id = 42
+    bridge.loadJobs("", "duplicate_review", "duplicate_confidence", False)
+    bridge._read_pool.finish_next()
+    bridge.selectJob(0)
+
+    bridge.refreshJobs()
+    bridge._read_pool.finish_next()
+
+    assert not bridge.currentJob.get("id") and not bridge._read_pool.pending
+    # Explicit navigation to a different list can select its first offer.
+    bridge.loadJobs("", "scraped", "title", False)
+    bridge._read_pool.finish_next()
+    bridge._read_pool.finish_next()
+    assert bridge.currentJob["id"] == 99
 
 
 def test_long_fifo_deduplicates_while_short_action_on_b_completes(bridge):
@@ -302,12 +413,12 @@ def test_refresh_of_loaded_query_keeps_content_visible_even_when_empty(bridge, r
 def test_loading_tracks_applied_query_until_new_context_is_displayed(bridge, changed):
     bridge.service.list_jobs = lambda **kwargs: [{"id": 1, "title": repr(kwargs)}]
     bridge._selected_job_id = 1
-    bridge._duplicate_relevant_only = True
+    bridge._duplicate_pending_only = True
     bridge.loadJobs("A", "duplicate_review", "duplicate_confidence", False)
     bridge._read_pool.finish_next()
     displayed = bridge.jobs.copy()
-    search, status, sort_key, ascending, relevant_only = changed
-    bridge._duplicate_relevant_only = relevant_only
+    search, status, sort_key, ascending, pending_only = changed
+    bridge._duplicate_pending_only = pending_only
 
     bridge.loadJobs(search, status, sort_key, ascending)
     bridge.refreshJobs()
@@ -335,6 +446,34 @@ def test_return_to_displayed_query_ignores_late_other_list_result(bridge):
     assert not bridge.jobsLoading and bridge.jobs == displayed
     bridge._read_pool.finish_next()
     assert not bridge.jobsLoading and bridge.jobs == displayed
+
+
+def test_classification_filter_is_preserved_on_refresh_and_ignores_stale_result(bridge):
+    seen = []
+
+    def read(**kwargs):
+        seen.append(kwargs)
+        return [{"id": 1, "title": kwargs["filter_disposition"]}]
+
+    bridge.service.list_jobs = read
+    bridge._selected_job_id = 1
+    bridge.loadJobs("Paris", "scraped", "title", True, "pending_relevance")
+    bridge._read_pool.finish_next()
+    assert bridge.jobs[0]["title"] == "pending_relevance"
+    bridge.loadJobs("Paris", "scraped", "title", True, "rejected")
+    bridge.loadJobs("Paris", "scraped", "title", True, "pending_relevance")
+    bridge._read_pool.finish_next()
+    assert bridge.jobs[0]["title"] == "pending_relevance"
+    bridge._read_pool.finish_next()
+    assert bridge.jobs[0]["title"] == "pending_relevance"
+
+    bridge.refreshJobs()
+    assert not bridge.jobsLoading
+    bridge._read_pool.finish_next()
+    assert seen[-1]["filter_disposition"] == "pending_relevance"
+    bridge.loadJobs("Paris", "archived", "title", True, "pending_relevance")
+    bridge._read_pool.finish_next()
+    assert seen[-1]["filter_disposition"] == ""
 
 
 def test_offer_loading_compares_displayed_id_and_ignores_late_other_offer(bridge):

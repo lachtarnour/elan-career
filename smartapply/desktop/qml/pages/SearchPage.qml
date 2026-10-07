@@ -196,9 +196,13 @@ Item {
                             Text { Layout.fillWidth: true; text: modelData.label; color: Theme.inkMuted; font.pixelSize: 12 }
                         }
                     }
-                    Text { text: "Offres à retenir"; color: Theme.inkMuted; font.pixelSize: 12 }
-                    AppSpinBox { id: topK; from: 1; to: 100; value: AppBridge.analysisTopK; Layout.preferredWidth: 132; onUserValueModified: function(value) { AppBridge.setAnalysisTopK(Number(value)) } }
-                    AppButton { text: "Analyser"; iconSource: Theme.icon("sparkle"); kind: "primary"; enabled: !AppBridge.shutdownRequested; onClicked: { topK.commitInput(); AppBridge.processPending(topK.value) } }
+                    AppButton {
+                        objectName: "searchOpenAnalysisAction"
+                        text: "Ouvrir l’analyse"
+                        iconSource: Theme.icon("analysis")
+                        kind: "primary"
+                        onClicked: root.navigateRequested("analysis")
+                    }
                 }
             }
         }

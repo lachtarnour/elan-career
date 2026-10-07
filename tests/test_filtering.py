@@ -7,12 +7,14 @@ from dataclasses import dataclass
 import pytest
 
 from smartapply.filtering import (
-    FilterDisposition,
+    HardRejectDisposition,
     JobFilter,
-    RoleRelevanceDisposition,
     RuleSet,
-    assess_role_relevance,
     ruleset_from_preferences,
+)
+from smartapply.filtering.relevance import (
+    RoleRelevanceDisposition,
+    assess_role_relevance,
 )
 from smartapply.profile import get_profile
 
@@ -31,7 +33,7 @@ def _real_rules() -> RuleSet:
     return ruleset_from_preferences(get_profile().preferences)
 
 
-def test_target_role_in_paris_kept_high_score() -> None:
+def test_target_role_in_paris_passes_deterministic_rejection() -> None:
     rules = _real_rules()
     f = JobFilter(rules)
     job = FakeJob(
@@ -44,8 +46,8 @@ def test_target_role_in_paris_kept_high_score() -> None:
     )
     res = f.evaluate(job)
     assert res.kept
-    assert res.score >= 0.7
-    assert "target_role:data scientist" in res.reasons
+    assert not hasattr(res, "score")
+    assert res.disposition is HardRejectDisposition.PENDING_RELEVANCE
     assert not any(reason.startswith("location_") for reason in res.reasons)
 
 
@@ -367,10 +369,6 @@ def test_bilingual_emerging_ai_and_statistical_terms_are_relevant(
             "Data Center Operations Engineer",
             "Maintain critical facilities and electrical infrastructure.",
         ),
-        (
-            "Operations Coordinator",
-            "Our company is a market leader in agentic AI. Coordinate vendor schedules.",
-        ),
     ],
 )
 def test_bilingual_non_technical_ai_and_literal_data_contexts_are_rejected(
@@ -380,7 +378,26 @@ def test_bilingual_non_technical_ai_and_literal_data_contexts_are_rejected(
     result = JobFilter(_real_rules()).evaluate(FakeJob(title, "Acme", description, "Paris", "CDI"))
 
     assert not result.kept
-    assert result.disposition is FilterDisposition.REJECTED
+    assert result.disposition is HardRejectDisposition.REJECTED
+
+
+def test_business_operations_role_is_deferred_to_relevance() -> None:
+    result = JobFilter(_real_rules()).evaluate(
+        FakeJob(
+            "Operations Coordinator",
+            "Acme",
+            "Our company is a market leader in agentic AI. Coordinate vendor schedules.",
+            "Paris",
+            "CDI",
+        )
+    )
+
+    assert result.kept
+    assert result.disposition is HardRejectDisposition.PENDING_RELEVANCE
+    assert any(
+        "role_family_requires_relevance:business_analysis_operations" in reason
+        for reason in result.reasons
+    )
 
 
 @pytest.mark.parametrize(
@@ -396,14 +413,18 @@ def test_bilingual_non_technical_ai_and_literal_data_contexts_are_rejected(
         ),
     ],
 )
-def test_bilingual_tracking_only_roles_are_rejected(
+def test_bilingual_tracking_only_roles_are_deferred_to_relevance(
     title: str,
     description: str,
 ) -> None:
     result = JobFilter(_real_rules()).evaluate(FakeJob(title, "Acme", description, "Paris", "CDI"))
 
-    assert not result.kept
-    assert "web_analytics_tracking_focus" in result.reasons
+    assert result.kept
+    assert result.disposition is HardRejectDisposition.PENDING_RELEVANCE
+    assert any(
+        "role_family_requires_relevance:web_analytics_tracking" in reason
+        for reason in result.reasons
+    )
 
 
 @pytest.mark.parametrize(
@@ -442,14 +463,15 @@ def test_bilingual_product_analytics_with_ownership_is_kept(
         ),
     ],
 )
-def test_bilingual_reporting_without_analytical_ownership_is_rejected(
+def test_bilingual_reporting_without_explicit_exclusion_is_deferred(
     title: str,
     description: str,
 ) -> None:
     result = JobFilter(_real_rules()).evaluate(FakeJob(title, "Acme", description, "Paris", "CDI"))
 
-    assert not result.kept
-    assert "reporting_bi_without_analytical_ownership" in result.reasons
+    assert result.kept
+    assert result.disposition is HardRejectDisposition.PENDING_RELEVANCE
+    assert any("role_family_requires_relevance:reporting_bi" in reason for reason in result.reasons)
 
 
 @pytest.mark.parametrize(
@@ -461,15 +483,16 @@ def test_bilingual_reporting_without_analytical_ownership_is_rejected(
         "Tableaux de bord décisionnels sans SQL.",
     ],
 )
-def test_bilingual_reporting_with_explicitly_missing_data_tech_is_rejected(
+def test_bilingual_reporting_technology_absence_is_deferred_to_relevance(
     description: str,
 ) -> None:
     result = JobFilter(_real_rules()).evaluate(
         FakeJob("Reporting Analyst", "Acme", description, "Paris", "CDI")
     )
 
-    assert not result.kept
-    assert "reporting_without_core_data_tech" in result.reasons
+    assert result.kept
+    assert result.disposition.value == "pending_relevance"
+    assert "reporting_without_core_data_tech" not in result.reasons
 
 
 @pytest.mark.parametrize(
@@ -485,14 +508,17 @@ def test_bilingual_reporting_with_explicitly_missing_data_tech_is_rejected(
         ),
     ],
 )
-def test_bilingual_pure_data_engineering_is_rejected(
+def test_bilingual_pure_data_engineering_is_deferred_to_relevance(
     title: str,
     description: str,
 ) -> None:
     result = JobFilter(_real_rules()).evaluate(FakeJob(title, "Acme", description, "Paris", "CDI"))
 
-    assert not result.kept
-    assert "pure_data_engineering_role" in result.reasons
+    assert result.kept
+    assert result.disposition is HardRejectDisposition.PENDING_RELEVANCE
+    assert any(
+        "role_family_requires_relevance:data_platform" in reason for reason in result.reasons
+    )
 
 
 def test_data_engineering_with_statistical_learning_scope_is_kept() -> None:
@@ -582,7 +608,7 @@ def test_senior_colleague_mention_is_not_a_candidate_seniority_false_positive() 
     assert "seniority_or_leadership_in_description" not in result.reasons
 
 
-def test_unknown_vocabulary_is_kept_as_uncertain_for_semantic_ranking() -> None:
+def test_unknown_vocabulary_remains_pending_for_future_relevance_classification() -> None:
     result = JobFilter(_real_rules()).evaluate(
         FakeJob(
             "Ingénieur en systèmes décisionnels avancés",
@@ -594,8 +620,8 @@ def test_unknown_vocabulary_is_kept_as_uncertain_for_semantic_ranking() -> None:
     )
 
     assert result.kept
-    assert result.disposition is FilterDisposition.UNCERTAIN
-    assert "role_relevance:uncertain_kept_for_semantic_ranking" in result.reasons
+    assert result.disposition is HardRejectDisposition.PENDING_RELEVANCE
+    assert not any(reason.startswith("role_relevance:") for reason in result.reasons)
 
 
 def test_incidental_statistical_knowledge_is_not_treated_as_a_data_mission() -> None:
@@ -626,10 +652,18 @@ def test_business_data_analyst_is_not_rejected_for_the_word_business() -> None:
     assert not any(reason == "title_hard_reject:business" for reason in result.reasons)
 
 
-def test_filter_rejects_clear_off_target_it_or_adjacent_titles() -> None:
+def test_filter_separates_clear_off_target_from_adjacent_titles() -> None:
     f = JobFilter(_real_rules())
-    titles = (
-        "Ingénieure Pédagogique Digital Learning",
+    rejected = f.evaluate(
+        FakeJob(
+            title="Ingénieure Pédagogique Digital Learning",
+            company="Acme",
+            description="Former les utilisateurs.",
+            location="Paris",
+            contract_type="CDI",
+        )
+    )
+    adjacent_titles = (
         "Ingénieur Automatisme et Digital Twin",
         "Chargé d'études techniques actuarielles",
         "Ingénieur Logiciels Embarqués H/F",
@@ -637,7 +671,10 @@ def test_filter_rejects_clear_off_target_it_or_adjacent_titles() -> None:
         "Consultant en Agilité / IT operating model",
         "Administrateur Applications & Systèmes SI (BI/API/SQL)",
     )
-    for title in titles:
+    assert not rejected.kept
+    assert rejected.disposition is HardRejectDisposition.REJECTED
+
+    for title in adjacent_titles:
         res = f.evaluate(
             FakeJob(
                 title=title,
@@ -647,7 +684,8 @@ def test_filter_rejects_clear_off_target_it_or_adjacent_titles() -> None:
                 contract_type="CDI",
             )
         )
-        assert not res.kept, title
+        assert res.kept, title
+        assert res.disposition is HardRejectDisposition.PENDING_RELEVANCE
 
 
 def test_filter_rejects_cdd_even_when_fulltime_is_visible() -> None:
