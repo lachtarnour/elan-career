@@ -272,13 +272,13 @@ Item {
             Switch {
                 id: pendingOnlySwitch
                 objectName: "pendingDuplicatesOnlySwitch"
-                text: "Deux offres à classer"
+                text: "Au moins une offre active"
                 checked: AppBridge.duplicatePendingOnly
                 font.pixelSize: 12
                 spacing: 8
-                Accessible.name: "Afficher seulement les doublons dont les deux offres sont à classer"
+                Accessible.name: "Afficher les doublons dont au moins une offre n’est ni rejetée ni archivée"
                 ToolTip.visible: hovered
-                ToolTip.text: "Garde les paires dont les deux offres sont À classer, avant l’évaluation de pertinence."
+                ToolTip.text: "Garde les paires dont au moins une offre n’est ni rejetée ni archivée, même si elle est déjà analysée ou préparée."
                 onToggled: AppBridge.setDuplicatePendingOnly(checked)
                 indicator: Rectangle {
                     implicitWidth: 40
@@ -323,7 +323,7 @@ Item {
             visible: root.rows.length === 0 && !AppBridge.jobsLoading
             EmptyState {
                 anchors.centerIn: parent
-                title: AppBridge.duplicatePendingOnly ? "Aucune paire avec deux offres à classer" : "Aucun doublon à vérifier"
+                title: AppBridge.duplicatePendingOnly ? "Aucune paire avec une offre active" : "Aucun doublon à vérifier"
                 iconSource: Theme.icon("check")
             }
         }
@@ -536,7 +536,7 @@ Item {
                             anchors.centerIn: parent
                             visible: root.visibleGroups.length === 0 && !AppBridge.jobsLoading
                             title: root.rows.length === 0
-                                ? (AppBridge.duplicatePendingOnly ? "Aucune paire avec deux offres à classer" : "Tout est traité")
+                                ? (AppBridge.duplicatePendingOnly ? "Aucune paire avec une offre active" : "Tout est traité")
                                 : "Aucun résultat"
                             iconSource: Theme.icon(root.rows.length === 0 ? "check" : "search")
                         }
@@ -772,7 +772,7 @@ Item {
                         anchors.centerIn: parent
                         visible: !root.hasSelection && !AppBridge.jobsLoading && !AppBridge.jobDetailLoading
                         title: root.visibleRelationCount === 0
-                            ? (AppBridge.duplicatePendingOnly ? "Aucune paire avec deux offres à classer" : "Aucun doublon en attente")
+                            ? (AppBridge.duplicatePendingOnly ? "Aucune paire avec une offre active" : "Aucun doublon en attente")
                             : "Aucun rapprochement sélectionné"
                         iconSource: Theme.icon(root.visibleRelationCount === 0 ? "check" : "files")
                     }

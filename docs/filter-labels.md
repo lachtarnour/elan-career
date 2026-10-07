@@ -49,8 +49,10 @@ filtre dans `filter_label_completion`.
 
 Les offres encore à filtrer affichent seulement **Rejeté** ou **À classer**.
 Les versions terminées affichent leur état, sans ajout d'une classe fictive.
-« Regrouper les copies » change leur présentation ; « Deux offres à classer »,
-activé par défaut, sélectionne les paires dont les deux offres sont encore
-inachevées et portent une décision `pending_relevance`.
+« Regrouper les copies » change leur présentation ; « Au moins une offre active »,
+activé par défaut, sélectionne les paires dont au moins une offre n'est ni
+rejetée ni archivée. Une offre déjà analysée ou préparée peut satisfaire ce
+critère ; son rejet déterministe éventuel est lu dans l'historique enregistré.
+La visibilité du couple ne décide pas le doublon et ne débloque pas son analyse.
 
 La complétion des décisions n'appelle aucun LLM ni fournisseur d'embeddings.

@@ -579,6 +579,8 @@ assert search_routes == ["analysis"]
 """,
     "duplicate_versions_only_display_the_two_current_class_labels": r"""
 duplicates = load_page("DuplicatesPage.qml")
+active_filter = duplicates.findChild(QQuickItem, "pendingDuplicatesOnlySwitch")
+assert active_filter.property("text") == "Au moins une offre active"
 for disposition, expected in (
     ("rejected", "Rejeté"),
     ("pending_relevance", "À classer"),

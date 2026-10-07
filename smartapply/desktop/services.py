@@ -70,6 +70,7 @@ from smartapply.jobsearch.offer_state import (
 from smartapply.jobsearch.offer_state import (
     completed_offer_expression,
     offer_state,
+    recorded_filter_disposition,
 )
 from smartapply.jobsearch.offer_state import (
     is_reusable_reservation as _is_reusable_reservation,
@@ -787,7 +788,7 @@ class DesktopService(AnalysisServiceMixin):
                     if not self._duplicate_pair_is_fully_archived(session, job)
                     and (
                         not only_pending_duplicates
-                        or self._duplicate_pair_is_pending(session, job)
+                        or self._duplicate_pair_has_active_offer(session, job)
                     )
                 ]
                 total = len(jobs)
@@ -941,17 +942,23 @@ class DesktopService(AnalysisServiceMixin):
         )
 
     @staticmethod
-    def _duplicate_pair_is_pending(session, job: Job) -> bool:
-        """Keep a review pair only when both offers still await classification."""
+    def _duplicate_pair_has_active_offer(session, job: Job) -> bool:
+        """Keep an unresolved pair if either offer is neither rejected nor archived.
+
+        Completed offers remain eligible: analysis or a prepared dossier does
+        not remove the need to resolve a duplicate. Read historical filter
+        evidence too, without recalculating or changing either offer.
+        """
         if job.possible_duplicate_of_id is None:
             return False
         candidate = canonical_job(session, int(job.possible_duplicate_of_id))
         if candidate is None:
             return False
-        return all(
-            offer_state(offer).awaits_classification
-            and offer.score is not None
-            and (offer.score.components or {}).get("filter_disposition") == "pending_relevance"
+        return any(
+            offer_state(offer).workflow_status not in {JobStatus.ARCHIVED, JobStatus.REJECTED}
+            and recorded_filter_disposition(
+                offer.score.components if offer.score is not None else None
+            ) != FilterDisposition.REJECTED.value
             for offer in (job, candidate)
         )
 
