@@ -1,5 +1,12 @@
 """Persistence layer — SQLAlchemy models, session and repository."""
 
+# Register the journal tables before session.init_db creates the metadata.
+from smartapply.database.analysis_batches import (
+    AnalysisBatchItem,
+    AnalysisBatchRun,
+    AnalysisBatchWave,
+)
+from smartapply.database.analysis_checkpoints import AnalysisCheckpoint
 from smartapply.database.models import (
     Application,
     AppSetting,
@@ -34,6 +41,10 @@ from smartapply.database.session import (
 )
 
 __all__ = [
+    "AnalysisCheckpoint",
+    "AnalysisBatchItem",
+    "AnalysisBatchRun",
+    "AnalysisBatchWave",
     "Application",
     "AppSetting",
     "Base",

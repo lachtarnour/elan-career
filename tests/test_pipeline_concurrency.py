@@ -11,7 +11,7 @@ import pytest
 
 from smartapply.config import get_settings
 from smartapply.database import session_scope
-from smartapply.database.models import Application, Job, JobAnalysis, JobStatus
+from smartapply.database.models import Application, Job, JobAnalysis, JobScore, JobStatus
 from smartapply.llm import MotivationLetter, OfferAnalysis
 from smartapply.pipeline.applier import Applier
 from smartapply.pipeline.errors import StaleTaskResultError, TaskCancelledError
@@ -40,9 +40,30 @@ def insert_job(*, analyzed=False):
         return job.id
 
 
+def prepare_analysis_candidate(job_id: int) -> None:
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        now = datetime.now(timezone.utc)
+        job.filtered_at = now
+        job.ranked_at = now
+        session.add(JobScore(
+            job_id=job_id,
+            final_score=0.7,
+            components={
+                "filter_disposition": "pending_relevance",
+                "hard_reject": {
+                    "ruleset_version": "hard-reject-v2",
+                    "rejected": False,
+                    "gates": [],
+                },
+            },
+        ))
+
+
 @pytest.mark.parametrize("change", ["description", "archive", "sent"])
 def test_changed_offer_does_not_consume_fit_call_or_publish_analysis(isolated_db, change):
     job_id = insert_job()
+    prepare_analysis_candidate(job_id)
     calls = []
 
     def complete(**kwargs):
@@ -68,8 +89,23 @@ def test_changed_offer_does_not_consume_fit_call_or_publish_analysis(isolated_db
         assert session.get(Job, job_id).analyzed_at is None
 
 
+def test_direct_analysis_refuses_unfiltered_offer_without_provider_call(isolated_db):
+    job_id = insert_job()
+    calls = []
+    instance = AnalysisMixin()
+    instance.profile, instance.settings = get_profile(), get_settings()
+    instance.llm = SimpleNamespace(
+        cheap_model="mock",
+        complete_json=lambda **kwargs: calls.append(kwargs["purpose"]),
+    )
+
+    assert instance._analyze_one(job_id=job_id) is False
+    assert calls == []
+
+
 def test_cancelled_extraction_does_not_start_fit_call(isolated_db):
     job_id = insert_job()
+    prepare_analysis_candidate(job_id)
     cancelled, calls = Event(), []
 
     def complete(**kwargs):
@@ -112,6 +148,66 @@ def test_ranking_does_not_reactivate_offer_archived_during_embedding(isolated_db
         job = session.get(Job, job_id)
         assert job.status == JobStatus.ARCHIVED
         assert job.score is None and job.ranked_at is None
+
+
+def test_ranking_does_not_overwrite_rejection_persisted_during_scoring(isolated_db):
+    from smartapply.dedup import Deduplicator
+    from smartapply.filtering import JobFilter, ruleset_from_preferences
+    from smartapply.ranking import JobScorer
+
+    job_id = insert_job()
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        job.filtered_at = datetime.now(timezone.utc)
+        job.score = JobScore(
+            components={
+                "filter_disposition": "pending_relevance",
+                "hard_reject": {
+                    "ruleset_version": "hard-reject-v2",
+                    "rejected": False,
+                    "gates": [],
+                },
+            },
+        )
+
+    profile = get_profile()
+    scorer = JobScorer(profile, embeddings=MockEmbeddingsProvider())
+    rank = scorer.rank
+
+    def reject_then_return_scores(jobs):
+        result = rank(jobs)
+        with session_scope() as session:
+            score = session.get(JobScore, job_id)
+            assert score is not None
+            score.components = {
+                "filter_disposition": "rejected",
+                "hard_reject": {
+                    "ruleset_version": "hard-reject-v2",
+                    "rejected": True,
+                    "gates": [],
+                },
+            }
+        return result
+
+    scorer.rank = reject_then_return_scores
+    processor = Processor(
+        profile=profile,
+        deduplicator=Deduplicator(),
+        job_filter=JobFilter(ruleset_from_preferences(profile.preferences)),
+        scorer=scorer,
+        llm=None,
+    )
+
+    report = processor.rank_pending(job_ids=[job_id], persist_shortlist=False)
+
+    assert report.ranked_ids == []
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        assert job is not None and job.score is not None
+        assert job.ranked_at is None
+        assert job.score.final_score is None
+        assert job.score.components["filter_disposition"] == "rejected"
 
 
 def test_analysis_ranking_keeps_the_captured_offer_scope(isolated_db):

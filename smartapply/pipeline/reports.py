@@ -29,8 +29,8 @@ class LocalFilterReport:
     duplicates_removed: int
     kept_ids: list[int]
     rejected_ids: list[int]
-    uncertain: int = 0
-    uncertain_ids: list[int] = field(default_factory=list)
+    pending_relevance: int = 0
+    pending_relevance_ids: list[int] = field(default_factory=list)
 
 
 @dataclass

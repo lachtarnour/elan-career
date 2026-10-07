@@ -78,6 +78,7 @@ def record_usage(
     cache_write_prompt_tokens: int = 0,
     cached: bool = False,
     job_id: int | None = None,
+    cache_key: str | None = None,
 ) -> LLMUsage:
     job_external_id = None
     if job_id is not None:
@@ -93,6 +94,7 @@ def record_usage(
         cached=cached,
         job_id=job_id,
         job_external_id=job_external_id,
+        cache_key=cache_key,
     )
     session.add(usage)
     return usage

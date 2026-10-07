@@ -611,11 +611,12 @@ def test_analysis_failure_is_returned_in_report(monkeypatch: pytest.MonkeyPatch)
         location="Paris",
     )
 
-    def fail_analysis(*, job_id: int, allow_existing: bool = False) -> None:  # noqa: ARG001
+    def fail_analysis(*, job_id: int, **kwargs) -> None:  # noqa: ARG001
         raise RuntimeError(f"provider unavailable for {job_id}")
 
     monkeypatch.setattr(pipeline._processor, "_analyze_one", fail_analysis)
 
+    pipeline.rank_pending(job_ids=ingested.job_ids, persist_shortlist=False)
     report = pipeline.analyze_jobs(ingested.job_ids)
 
     assert report.analyzed == 0
@@ -718,6 +719,220 @@ def test_rank_pending_scores_without_llm_analysis() -> None:
         assert sum(job.shortlisted_at is not None for job in jobs) == 0
         assert sum(job.status == JobStatus.FILTERED for job in jobs) == 2
         assert all(job.archived_at is None for job in jobs)
+
+
+@pytest.mark.parametrize(
+    ("legacy_disposition", "title", "description", "rejected"),
+    [
+        (
+            "uncertain",
+            "Data Scientist Stage",
+            "Stage de six mois en data science.",
+            True,
+        ),
+        (
+            "relevant",
+            "Machine Learning Engineer",
+            "Construire des modèles de machine learning avec Python. CDI à Paris.",
+            False,
+        ),
+    ],
+)
+def test_rank_pending_refilters_legacy_state_before_scoring(
+    legacy_disposition: str,
+    title: str,
+    description: str,
+    rejected: bool,
+) -> None:
+    from smartapply.database import session_scope
+    from smartapply.database.models import Job, JobStatus
+    from smartapply.database.repository import mark_filtered, set_score
+    from smartapply.pipeline import Pipeline
+
+    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    ingested = pipeline.ingest_text(
+        text=description,
+        title=title,
+        company="Legacy Filter Co",
+        location="Paris",
+    )
+    job_id = ingested.job_ids[0]
+    with session_scope() as session:
+        mark_filtered(session, job_id)
+        set_score(
+            session,
+            job_id,
+            components={
+                "filter_disposition": legacy_disposition,
+                "reasons": ["legacy_state"],
+            },
+        )
+
+    scored_ids: list[int] = []
+    rank = pipeline.scorer.rank
+
+    def capture_rank(jobs):
+        scored_ids.extend(int(job.id) for job in jobs)
+        return rank(jobs)
+
+    pipeline.scorer.rank = capture_rank
+    report = pipeline.rank_pending(job_ids=[job_id], persist_shortlist=False)
+
+    assert scored_ids == ([] if rejected else [job_id])
+    assert report.ranked_ids == ([] if rejected else [job_id])
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        assert job is not None and job.score is not None
+        assert job.score.components["filter_disposition"] == (
+            "rejected" if rejected else "pending_relevance"
+        )
+        assert job.score.components["hard_reject"]["ruleset_version"] == "hard-reject-v2"
+        assert job.score.components["hard_reject"]["rejected"] is rejected
+        assert (job.status == JobStatus.ARCHIVED) is rejected
+
+
+def test_explicit_override_revalidates_already_ranked_current_rejection() -> None:
+    from smartapply.database import session_scope
+    from smartapply.database.models import Job, JobStatus
+    from smartapply.database.repository import mark_ranked, set_score
+    from smartapply.pipeline import Pipeline
+    from smartapply.pipeline.process.filter_state import MANUAL_KEEP_OVERRIDE_REASON
+
+    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    ingested = pipeline.ingest_text(
+        text="Stage de six mois en data science.",
+        title="Data Scientist Stage",
+        company="Override Co",
+        location="Paris",
+    )
+    job_id = ingested.job_ids[0]
+    pipeline.filter_pending(job_ids=[job_id])
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        assert job is not None and job.score is not None
+        job.archived_at = None
+        job.status = JobStatus.FILTERED
+        mark_ranked(session, job_id)
+        set_score(session, job_id, final_score=0.91)
+
+    scored_ids: list[int] = []
+    rank = pipeline.scorer.rank
+
+    def capture_rank(jobs):
+        scored_ids.extend(int(job.id) for job in jobs)
+        return rank(jobs)
+
+    pipeline.scorer.rank = capture_rank
+    report = pipeline.rank_pending(
+        job_ids=[job_id],
+        local_filter_override_ids=[job_id],
+        persist_shortlist=False,
+    )
+
+    assert scored_ids == [job_id]
+    assert report.ranked_ids == [job_id]
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        assert job is not None and job.score is not None
+        components = job.score.components
+        assert job.archived_at is None
+        assert components["filter_disposition"] == "pending_relevance"
+        assert components["hard_reject"]["rejected"] is True
+        assert MANUAL_KEEP_OVERRIDE_REASON in components["reasons"]
+
+
+def test_persisted_manual_keep_is_preserved_when_legacy_proof_is_rebuilt() -> None:
+    from smartapply.database import session_scope
+    from smartapply.database.models import Job
+    from smartapply.database.repository import mark_filtered, set_score
+    from smartapply.pipeline import Pipeline
+    from smartapply.pipeline.process.filter_state import MANUAL_KEEP_OVERRIDE_REASON
+
+    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    job_id = pipeline.ingest_text(
+        text="Stage de six mois en data science.",
+        title="Data Scientist Stage",
+        company="Persisted Override Co",
+        location="Paris",
+    ).job_ids[0]
+    with session_scope() as session:
+        mark_filtered(session, job_id)
+        set_score(
+            session,
+            job_id,
+            components={
+                "filter_disposition": "pending_relevance",
+                "reasons": [MANUAL_KEEP_OVERRIDE_REASON],
+            },
+        )
+
+    report = pipeline.rank_pending(job_ids=[job_id], persist_shortlist=False)
+
+    assert report.ranked_ids == [job_id]
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        assert job is not None and job.score is not None
+        components = job.score.components
+        assert job.archived_at is None
+        assert components["filter_disposition"] == "pending_relevance"
+        assert components["hard_reject"]["rejected"] is True
+        assert MANUAL_KEEP_OVERRIDE_REASON in components["reasons"]
+
+
+def test_nonarchived_rejected_scores_never_enter_ranking_selection() -> None:
+    from smartapply.database import session_scope
+    from smartapply.database.models import Job, JobStatus, ShortlistOrigin
+    from smartapply.database.repository import (
+        mark_analyzed,
+        mark_filtered,
+        mark_ranked,
+        set_score,
+        set_shortlisted,
+    )
+    from smartapply.pipeline import Pipeline
+
+    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    survivor = pipeline.ingest_text(
+        text="Construire des modèles de machine learning avec Python. CDI à Paris.",
+        title="Machine Learning Engineer",
+        company="Survivor Co",
+        location="Paris",
+    ).job_ids[0]
+    rejected = pipeline.ingest_text(
+        text="Stage de six mois en data science.",
+        title="Data Scientist Stage",
+        company="Rejected Co",
+        location="Paris",
+    ).job_ids[0]
+    pipeline.filter_pending(job_ids=[survivor, rejected])
+    with session_scope() as session:
+        rejected_job = session.get(Job, rejected)
+        assert rejected_job is not None
+        rejected_job.archived_at = None
+        rejected_job.status = JobStatus.FILTERED
+        mark_filtered(session, rejected)
+        for job_id, score in ((survivor, 0.20), (rejected, 0.99)):
+            mark_ranked(session, job_id)
+            mark_analyzed(session, job_id)
+            set_score(session, job_id, final_score=score)
+        assert set_shortlisted(
+            session,
+            rejected,
+            selected=True,
+            origin=ShortlistOrigin.MANUAL,
+        ) is not None
+
+    report = pipeline.rank_pending(top_k_ranked=1, persist_shortlist=True)
+
+    assert report.ranked_ids == [survivor]
+    assert report.shortlisted_ids == [survivor]
+    with session_scope() as session:
+        rejected_job = session.get(Job, rejected)
+        survivor_job = session.get(Job, survivor)
+        assert rejected_job is not None and survivor_job is not None
+        assert rejected_job.shortlist_origin == ShortlistOrigin.MANUAL
+        assert rejected_job.shortlisted_at is not None
+        assert survivor_job.shortlist_origin == ShortlistOrigin.AUTOMATIC
 
 
 def test_automatic_shortlist_averages_matching_and_llm_scores() -> None:
@@ -892,7 +1107,7 @@ def test_filter_pending_archives_internships_before_llm() -> None:
         assert cdi_job.status == JobStatus.SCRAPED
 
 
-def test_filter_pending_persists_uncertain_offer_for_semantic_ranking() -> None:
+def test_filter_pending_persists_offer_for_future_relevance_classification() -> None:
     from smartapply.database import session_scope
     from smartapply.database.models import Job
     from smartapply.pipeline import Pipeline
@@ -909,8 +1124,8 @@ def test_filter_pending_persists_uncertain_offer_for_semantic_ranking() -> None:
 
     assert report.kept == 1
     assert report.rejected == 0
-    assert report.uncertain == 1
-    assert report.uncertain_ids == ingested.job_ids
+    assert report.pending_relevance == 1
+    assert report.pending_relevance_ids == ingested.job_ids
     ranking_report = p.rank_pending(job_ids=ingested.job_ids)
     assert ranking_report.ranked == 1
     assert ranking_report.shortlisted == 0
@@ -919,10 +1134,75 @@ def test_filter_pending_persists_uncertain_offer_for_semantic_ranking() -> None:
         assert job is not None
         assert job.archived_at is None
         assert job.filtered_at is not None
-        assert job.score.components["filter_disposition"] == "uncertain"
+        assert job.score.components["filter_disposition"] == "pending_relevance"
+        assert job.score.components["hard_reject"]["rejected"] is False
+
+
+def test_refiltering_clears_stale_relevance_scores() -> None:
+    from smartapply.database import session_scope
+    from smartapply.database.models import Job
+    from smartapply.pipeline import Pipeline
+
+    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    ingested = pipeline.ingest_text(
+        text="Build machine-learning models with Python.",
+        title="Machine Learning Engineer",
+        company="RefreshCo",
+        location="Paris",
+    )
+    job_id = ingested.job_ids[0]
+
+    pipeline.rank_pending(job_ids=[job_id])
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        assert job is not None and job.score.final_score is not None
+        job.score.components = {
+            **job.score.components,
+            "future_audit_namespace": {"source": "independent-maintenance"},
+        }
+        job.filtered_at = None
+        job.analyzed_at = None
+
+    pipeline.filter_pending(job_ids=[job_id])
+
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        assert job is not None and job.score is not None
+        for field in (
+            "rule_based_score",
+            "semantic_score",
+            "skill_score",
+            "title_score",
+            "seniority_score",
+            "location_score",
+            "domain_score",
+            "final_score",
+        ):
+            assert getattr(job.score, field) is None
+        assert job.score.components["filter_disposition"] == "pending_relevance"
+        assert job.score.components["future_audit_namespace"] == {
+            "source": "independent-maintenance"
+        }
+        assert "semantic" not in job.score.components
+        assert "final" not in job.score.components
+        assert job.ranked_at is None
+
+    ranking_report = pipeline.rank_pending(job_ids=[job_id], persist_shortlist=False)
+
+    assert ranking_report.ranked == 1
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        assert job is not None and job.score is not None
+        assert job.ranked_at is not None
+        assert job.score.final_score is not None
 
 
 def test_full_pipeline_with_mocked_dependencies() -> None:
+    from sqlalchemy import select
+
+    from smartapply.database import session_scope
+    from smartapply.database.models import Job, JobStatus
+
     _register_llm_responses()
     from smartapply.pipeline import Pipeline
 
@@ -946,27 +1226,29 @@ def test_full_pipeline_with_mocked_dependencies() -> None:
         location="Paris, France",
     )
 
-    # Process — filter + rank + analyze the relevant job
+    # Process — deterministic filtering + analysis without numeric ranking.
     process = p.process_pending()
     assert process.total == 2
     assert process.kept_after_filter == 1  # sales should be filtered out
     assert process.analyzed == 1
+    with session_scope() as session:
+        sales = session.scalar(select(Job).where(Job.company == "BetaSales"))
+        assert sales.status == JobStatus.ARCHIVED
+        assert sales.archived_at is not None
 
     # Apply
-    from smartapply.database import session_scope
-    from smartapply.database.repository import top_jobs_by_score
-
     with session_scope() as s:
-        top = list(top_jobs_by_score(s, 1))
-        assert top, "Expected at least one ranked job"
-        assert top[0].analysis is not None
-        raw = top[0].analysis.raw_response
+        analyzed = s.scalar(select(Job).where(Job.company == "Acme AI"))
+        assert analyzed is not None and analyzed.analysis is not None
+        assert analyzed.ranked_at is None
+        assert analyzed.score.final_score is None
+        raw = analyzed.analysis.raw_response
         assert raw["company_context"] == (
             "Acme AI builds HealthTech tools for clinical NLP workflows."
         )
         assert raw["extracted_location"] == "Paris"
         assert "Build RAG pipelines for healthcare teams" in raw["offer_interest_points"]
-    top_id = top[0].id
+        top_id = analyzed.id
 
     report = p.apply_to(top_id)
     assert report.application_id is not None
@@ -1001,9 +1283,9 @@ def test_run_manual_offer_executes_direct_manual_pipeline() -> None:
     with session_scope() as s:
         job = s.get(Job, report["ingest"].job_ids[0])
         assert job is not None
-        assert job.filtered_at is None
+        assert job.filtered_at is not None
         assert job.ranked_at is None
-        assert job.score is None
+        assert job.score is not None and job.score.final_score is None
     application = report["applications"][0]
     assert application.application_id is not None
     assert application.form_url == "https://jobs.acme.ai/42"
@@ -1061,6 +1343,9 @@ def test_apply_to_generates_only_application_documents() -> None:
 def test_force_regenerate_refreshes_the_application_llm_cache() -> None:
     _register_llm_responses()
 
+    from datetime import datetime, timezone
+
+    from smartapply.database import Application, session_scope
     from smartapply.pipeline import Pipeline
 
     p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
@@ -1074,6 +1359,10 @@ def test_force_regenerate_refreshes_the_application_llm_cache() -> None:
     job_id = ingested.job_ids[0]
     p.process_pending(top_k_analyze=1, job_ids=[job_id])
     first = p.apply_to(job_id)
+    with session_scope() as session:
+        application = session.get(Application, first.application_id)
+        assert application.ready_at is not None
+        application.ready_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
     calls: list[dict] = []
     original_complete_json = p.llm.complete_json
@@ -1083,6 +1372,7 @@ def test_force_regenerate_refreshes_the_application_llm_cache() -> None:
         return original_complete_json(**kwargs)
 
     p.llm.complete_json = capture_cache_mode
+    regeneration_started = datetime.now(timezone.utc)
     second = p.apply_to(
         job_id,
         force_regenerate=True,
@@ -1095,6 +1385,9 @@ def test_force_regenerate_refreshes_the_application_llm_cache() -> None:
         "document_review",
     ]
     assert all(call["refresh_cache"] is True for call in calls)
+    with session_scope() as session:
+        ready_at = session.get(Application, first.application_id).ready_at
+        assert ready_at.replace(tzinfo=timezone.utc) >= regeneration_started
 
 
 def test_application_selects_cv_then_generates_summary_and_letter_then_persists_review() -> None:
