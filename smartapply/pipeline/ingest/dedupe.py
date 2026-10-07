@@ -5,8 +5,37 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from smartapply.dedup.copy_groups import strict_copy_fingerprint
 from smartapply.offer_identity import normalize_application_url
 from smartapply.offers import RawJob
+
+
+class _StrictCopyIndex:
+    """Keep exact content candidates ahead of broader fuzzy matches."""
+
+    def __init__(self, jobs: list[Any]):
+        self._jobs: dict[int, Any] = {}
+        self._fingerprints: dict[int, str] = {}
+        self._buckets: dict[str, set[int]] = {}
+        self.replace(jobs)
+
+    def replace(self, jobs: list[Any], *, removed_ids: set[int] | None = None) -> None:
+        for job_id in (removed_ids or set()) | {int(job.id) for job in jobs}:
+            fingerprint = self._fingerprints.pop(job_id, None)
+            self._jobs.pop(job_id, None)
+            if fingerprint is not None:
+                self._buckets[fingerprint].discard(job_id)
+        for job in jobs:
+            fingerprint = strict_copy_fingerprint(job)
+            if fingerprint is not None:
+                job_id = int(job.id)
+                self._jobs[job_id] = job
+                self._fingerprints[job_id] = fingerprint
+                self._buckets.setdefault(fingerprint, set()).add(job_id)
+
+    def candidates(self, raw: RawJob) -> tuple[Any, ...]:
+        fingerprint = strict_copy_fingerprint(raw)
+        return tuple(self._jobs[job_id] for job_id in sorted(self._buckets.get(fingerprint, ())))
 
 
 @dataclass(frozen=True)

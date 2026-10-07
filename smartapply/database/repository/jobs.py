@@ -11,6 +11,23 @@ from sqlalchemy.orm import Session
 
 from smartapply.database.models import Job, JobDuplicateStatus, JobScore, JobStatus, ShortlistOrigin
 
+_SCORE_COMPONENT_KEYS = frozenset(
+    {
+        "rule_based",
+        "semantic",
+        "skills",
+        "title",
+        "seniority",
+        "location",
+        "domain",
+        "final",
+        "cap",
+    }
+)
+_ACTIVE_REJECTION_KEYS = frozenset(
+    {"rejection_stage", "rejection_reasons", "rejection_summary", "reasons", "hard_reject"}
+)
+
 
 def upsert_job(session: Session, *, external_id: str, **fields: Any) -> Job:
     """Insert or update a job by external_id. Returns the persisted instance."""
@@ -63,6 +80,9 @@ def update_status(session: Session, job_id: int, status: str) -> None:
     job = session.get(Job, job_id)
     if job is not None:
         job.status = status
+        from smartapply.database.repository.offer_state import retire_filter_routing
+
+        retire_filter_routing(job)
 
 
 def list_pending_processing(session: Session) -> Sequence[Job]:
@@ -112,15 +132,20 @@ def set_shortlisted(
 
     if selected:
         # A Top selection is eligible for CV/letter generation only after
-        # the offer analysis has completed. Manual callers must analyze first.
-        if job.analyzed_at is None:
+        # local ranking and offer analysis have both completed. A shortlist
+        # must never manufacture missing pipeline timestamps.
+        if (
+            job.filtered_at is None
+            or job.ranked_at is None
+            or job.analyzed_at is None
+            or job.score is None
+            or job.score.final_score is None
+        ):
             return None
         now = datetime.now(timezone.utc)
         job.shortlisted_at = job.shortlisted_at or now
         if origin == ShortlistOrigin.MANUAL or job.shortlist_origin != ShortlistOrigin.MANUAL:
             job.shortlist_origin = origin or ShortlistOrigin.AUTOMATIC
-        job.filtered_at = job.filtered_at or now
-        job.ranked_at = job.ranked_at or now
         # Shortlisting is a first-class offer state. Application tracking is
         # stored on Application and must not turn this into two UI labels.
         job.status = JobStatus.SHORTLISTED
@@ -140,6 +165,9 @@ def mark_analyzed(session: Session, job_id: int) -> None:
     job = session.get(Job, job_id)
     if job is not None:
         job.analyzed_at = datetime.now(timezone.utc)
+        from smartapply.database.repository.offer_state import retire_filter_routing
+
+        retire_filter_routing(job)
 
 
 def mark_archived(session: Session, job_id: int) -> None:
@@ -153,6 +181,9 @@ def mark_archived(session: Session, job_id: int) -> None:
         job.shortlisted_at = None
         job.shortlist_origin = None
         job.status = JobStatus.ARCHIVED
+        from smartapply.database.repository.offer_state import retire_filter_routing
+
+        retire_filter_routing(job)
 
 
 def rescue_archived_job(
@@ -161,7 +192,12 @@ def rescue_archived_job(
     *,
     justification: str | None = None,
 ) -> Job | None:
-    """Re-inject an archived job into the retained, analyzable queue."""
+    """Restore an archived job as unranked and pending relevance.
+
+    A manual rescue is an auditable routing override.  It must not fabricate a
+    perfect matching score or erase the deterministic-rejection evidence that
+    motivated the review.
+    """
     from smartapply.database.repository.scores import set_score
 
     job = session.get(Job, job_id)
@@ -181,32 +217,40 @@ def rescue_archived_job(
     job.archived_at = None
     job.analyzed_at = None
     job.filtered_at = now
-    job.ranked_at = now
+    job.ranked_at = None
     job.shortlisted_at = None
     job.shortlist_origin = None
     job.status = JobStatus.FILTERED
 
-    audit: dict[str, Any] = {
-        "manual_rescue": True,
+    previous_rejection = {
+        "stage": previous_components.get("rejection_stage"),
+        "reasons": list(previous_components.get("rejection_reasons", []) or []),
+        "summary": previous_components.get("rejection_summary"),
+    }
+    components = {
+        key: value
+        for key, value in previous_components.items()
+        if key not in _SCORE_COMPONENT_KEYS | _ACTIVE_REJECTION_KEYS
+    }
+    components["filter_disposition"] = "pending_relevance"
+    components["manual_rescue"] = {
+        "schema_version": 3,
         "rescued_at": now.isoformat(),
         "justification": (justification or "").strip(),
-        "previous_rejection": {
-            "stage": previous_components.get("rejection_stage"),
-            "reasons": list(previous_components.get("rejection_reasons", []) or []),
-            "summary": previous_components.get("rejection_summary"),
-        },
+        "previous_rejection": previous_rejection,
+        "previous_hard_reject": previous_components.get("hard_reject"),
     }
     set_score(
         session,
         job_id,
-        rule_based_score=1.0,
-        semantic_score=1.0,
-        skill_score=1.0,
-        title_score=1.0,
-        seniority_score=1.0,
-        location_score=1.0,
-        domain_score=1.0,
-        final_score=1.0,
-        components=audit,
+        rule_based_score=None,
+        semantic_score=None,
+        skill_score=None,
+        title_score=None,
+        seniority_score=None,
+        location_score=None,
+        domain_score=None,
+        final_score=None,
+        components=components,
     )
     return job

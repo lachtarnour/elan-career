@@ -569,7 +569,7 @@ def test_startup_backfill_closes_legacy_pair_when_both_offers_are_archived(
         assert duplicate.status == JobStatus.ARCHIVED
 
 
-def test_same_direct_offer_url_becomes_an_archived_alias(isolated_db) -> None:
+def test_generic_offer_url_requires_review_before_archiving(isolated_db) -> None:
     ingestor = Ingestor()
     first = ingestor._persist(
         "serpapi",
@@ -580,13 +580,15 @@ def test_same_direct_offer_url_becomes_an_archived_alias(isolated_db) -> None:
         [_raw("linkedin:new-id", "https://acme.test/jobs/canonical", source="linkedin")],
     )
 
-    assert second.aliases_created == 1
+    assert second.aliases_created == 0
+    assert second.duplicate_review_ids == second.job_ids
     with session_scope() as session:
         alias = session.query(Job).filter(Job.external_id == "linkedin:new-id").one()
         assert alias is not None
-        assert alias.canonical_job_id == first.job_ids[0]
-        assert alias.duplicate_review_status == JobDuplicateStatus.CONFIRMED
-        assert alias.status == JobStatus.ARCHIVED
+        assert alias.canonical_job_id is None
+        assert alias.possible_duplicate_of_id == first.job_ids[0]
+        assert alias.duplicate_review_status == JobDuplicateStatus.PENDING
+        assert alias.status == JobStatus.SCRAPED
         assert alias.shortlisted_at is None
 
 
@@ -653,7 +655,7 @@ def test_same_direct_offer_url_over_one_month_apart_stays_distinct(isolated_db) 
 
 def test_exact_url_alias_cannot_bridge_republications_over_one_month(isolated_db) -> None:
     published = datetime(2026, 8, 1, tzinfo=timezone.utc)
-    url = "https://acme.test/jobs/chain-republication"
+    url = "https://www.linkedin.com/jobs/view/4464028174"
     ingestor = Ingestor()
 
     first = ingestor._persist(
@@ -1402,18 +1404,18 @@ def test_manual_direct_url_with_different_label_requires_review(isolated_db) -> 
         assert reviewed.duplicate_confidence == 1.0
 
 
-def test_exact_url_identity_remains_strong_for_anonymous_employer(isolated_db) -> None:
+def test_strong_url_with_conflicting_locations_requires_review(isolated_db) -> None:
     ingestor = Ingestor()
     first = _raw(
         "serpapi:anonymous-url",
-        "https://acme.test/jobs/anonymous-identity",
+        "https://www.linkedin.com/jobs/view/4464028174",
         source="serpapi",
     ).model_copy(
         update={"company": "Entreprise non communiquée", "location": "75 - Paris"}
     )
     second = _raw(
         "linkedin:anonymous-url",
-        "https://acme.test/jobs/anonymous-identity",
+        "https://www.linkedin.com/jobs/view/4464028174",
         source="linkedin",
     ).model_copy(
         update={"company": "Entreprise non communiquée", "location": "69 - Lyon"}
@@ -1422,12 +1424,14 @@ def test_exact_url_identity_remains_strong_for_anonymous_employer(isolated_db) -
     first_report = ingestor._persist("serpapi", [first])
     second_report = ingestor._persist("linkedin", [second])
 
-    assert second_report.aliases_created == 1
+    assert second_report.aliases_created == 0
+    assert second_report.duplicate_review_ids == second_report.job_ids
     assert backfill_duplicate_reviews() == 0
     with session_scope() as session:
         alias = session.query(Job).filter(Job.external_id == second.external_id).one()
-        assert alias.canonical_job_id == first_report.job_ids[0]
-        assert alias.duplicate_review_status == JobDuplicateStatus.CONFIRMED
+        assert alias.canonical_job_id is None
+        assert alias.possible_duplicate_of_id == first_report.job_ids[0]
+        assert alias.duplicate_review_status == JobDuplicateStatus.PENDING
         assert alias.duplicate_match_type == "exact_url"
         assert alias.duplicate_confidence == 1.0
 
@@ -1551,7 +1555,9 @@ def test_probable_duplicate_is_visible_but_is_not_processed_or_generated(isolate
 
     rows = service.list_jobs(status=JobStatus.DUPLICATE_REVIEW)
     assert [row.id for row in rows] == [duplicate_id]
-    assert rows[0].status == JobStatus.DUPLICATE_REVIEW
+    assert rows[0].status == JobStatus.READY_FOR_FORM_SUBMISSION
+    assert rows[0].duplicate_review_status == JobDuplicateStatus.PENDING
+    assert rows[0].filter_disposition == ""
     assert rows[0].can_generate is False
     assert rows[0].can_send is False
 
@@ -1625,14 +1631,15 @@ def test_explicit_filtering_prepares_both_offers_for_review(isolated_db, old_rej
 @pytest.mark.parametrize(
     "reference_disposition,new_disposition,visible",
     [
-        ("relevant", "relevant", True),
-        ("relevant", "uncertain", False),
-        ("uncertain", "relevant", False),
-        ("relevant", "rejected", False),
-        ("", "relevant", False),
+        ("pending_relevance", "pending_relevance", True),
+        ("pending_relevance", "rejected", False),
+        ("rejected", "pending_relevance", False),
+        ("relevant", "pending_relevance", False),
+        ("pending_relevance", "relevant", False),
+        ("", "pending_relevance", False),
     ],
 )
-def test_duplicate_relevance_toggle_requires_both_offers_relevant(
+def test_duplicate_pending_toggle_requires_both_offers_pending(
     isolated_db, reference_disposition, new_disposition, visible
 ) -> None:
     reference_id, new_id = _create_review_pair()
@@ -1647,12 +1654,12 @@ def test_duplicate_relevance_toggle_requires_both_offers_relevant(
     service = DesktopService()
     assert [row.id for row in service.list_jobs(status=JobStatus.DUPLICATE_REVIEW)] == [new_id]
     rows = service.list_jobs(
-        status=JobStatus.DUPLICATE_REVIEW, only_relevant_duplicates=True
+        status=JobStatus.DUPLICATE_REVIEW, only_pending_duplicates=True
     )
     assert [row.id for row in rows] == ([new_id] if visible else [])
 
 
-def test_duplicate_relevance_toggle_applies_limit_after_filtering(isolated_db) -> None:
+def test_duplicate_pending_toggle_applies_limit_after_filtering(isolated_db) -> None:
     first_reference, first_new = _create_review_pair()
     second_company = "Another Company"
     first = _raw("other:reference", "https://other.test/jobs/1").model_copy(
@@ -1667,9 +1674,9 @@ def test_duplicate_relevance_toggle_applies_limit_after_filtering(isolated_db) -
     with session_scope() as session:
         for job_id, disposition in (
             (first_reference, "rejected"),
-            (first_new, "relevant"),
-            (second_reference, "relevant"),
-            (second_new, "relevant"),
+            (first_new, "pending_relevance"),
+            (second_reference, "pending_relevance"),
+            (second_new, "pending_relevance"),
         ):
             session.get(Job, job_id).filtered_at = datetime.now(timezone.utc)
             set_score(session, job_id, components={"filter_disposition": disposition})
@@ -1679,7 +1686,7 @@ def test_duplicate_relevance_toggle_applies_limit_after_filtering(isolated_db) -
         sort_key="company",
         sort_ascending=True,
         limit=1,
-        only_relevant_duplicates=True,
+        only_pending_duplicates=True,
     )
     assert [row.id for row in rows] == [second_new]
 
