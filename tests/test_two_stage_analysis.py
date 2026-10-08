@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from smartapply.config import get_settings
 from smartapply.database import session_scope
 from smartapply.database.models import Job, JobScore, JobStatus, LLMCache
+from smartapply.database.repository.llm_cache import purge_expired_cache
 from smartapply.filtering.hard_reject.types import HardRejectResult
 from smartapply.llm import JobAnalysis, JobFitAssessment, LLMError, OfferAnalysis, OpenAIProvider
 from smartapply.llm.prompts import job_analysis, job_fit
@@ -21,6 +22,7 @@ from smartapply.pipeline.process.analysis import (
     _assemble_analysis,
     _ground_offer_excerpts,
 )
+from smartapply.pipeline.rescore import reusable_offer
 from smartapply.profile import get_profile
 from tests.fit_fixtures import evaluation_from_user
 
@@ -443,6 +445,21 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(
     assert restored.fit_score == 0.88
     assert restored.supporting_excerpts == offer_result().supporting_excerpts
     assert restored.offer_risks == offer_result().offer_risks
+    # Cache retention cannot erase the source of a completed extraction.
+    with session_scope() as session:
+        assert purge_expired_cache(
+            session, ttl_days=15, now=datetime.now(timezone.utc) + timedelta(days=16)
+        ) > 0
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        assert session.query(LLMCache).count() == 0
+        source = job.analysis.fit_diagnostics["extraction_provenance"]
+        assert source["analyzer_input"]["offer_body"] == BODY
+        assert source["extraction_key"]
+        assert job.analysis.fit_diagnostics["offer_facts"]["required_skills"] == ["Python"]
+        reused, provenance = reusable_offer(session, job)
+        assert reused is not None
+        assert provenance == source
 
 
 @pytest.mark.parametrize("change", ["none", "profile", "body", "model", "prompt", "schema"])

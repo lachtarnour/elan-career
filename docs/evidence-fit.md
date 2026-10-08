@@ -17,6 +17,14 @@ candidat global. En absence de source, le modèle dispose des faits et extraits 
 aucune réextraction implicite n'est demandée. Les protections d'association de
 `reusable_offer` et `_source_matches` restent en place.
 
+Le cache LLM garde sa purge à **15 jours**. Pour les nouvelles analyses terminées,
+la preuve de l'extraction ne dépend pas de ce cache : `fit_diagnostics` conserve
+les faits extraits, leur empreinte et l'`analyzer_input` utilisé. Le parcours
+immédiat garde aussi la clé de requête et le modèle ; le Batch garde l'identifiant
+du lot et son journal. `reusable_offer` peut relire ces données après la purge,
+à condition que la source actuelle corresponde toujours à celle de l'extraction.
+Cette garantie ne reconstitue pas la provenance absente des analyses historiques.
+
 L'annonce peut expliciter une option, une alternative ou une condition que les
 faits structurés ont mal restituée. Le modèle conserve la citation et son
 interprétation dans `offer_interpretations`, sans corriger les champs partagés.

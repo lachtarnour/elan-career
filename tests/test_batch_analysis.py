@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import func, select
@@ -17,7 +17,7 @@ from smartapply.database.analysis_batches import (
     AnalysisBatchWave,
 )
 from smartapply.database.models import Job, JobAnalysis, JobScore, LLMCache, LLMUsage
-from smartapply.database.repository.llm_cache import cache_set
+from smartapply.database.repository.llm_cache import cache_set, purge_expired_cache
 from smartapply.filtering.hard_reject.types import HardRejectResult
 from smartapply.llm import JobFitDecisionEvaluation, MockLLMProvider, OfferAnalysis
 from smartapply.llm.batch import BatchResult, BatchSnapshot
@@ -30,6 +30,7 @@ from smartapply.pipeline.batch_analysis import coordinator as coordinator_module
 from smartapply.pipeline.batch_analysis.coordinator import BatchAnalysisCoordinator
 from smartapply.pipeline.batch_analysis.presentation import analysis_workspace
 from smartapply.pipeline.errors import TaskCancelledError
+from smartapply.pipeline.rescore import reusable_offer
 from smartapply.profile import get_profile
 from smartapply.ranking import MockEmbeddingsProvider
 from tests.fit_fixtures import evaluation_from_user
@@ -850,6 +851,20 @@ def test_batch_preserves_wrapped_source_quotes_through_evaluation_and_storage(fr
         assert job.analysis.raw_response["offer_risks"] == extracted.offer_risks
         cached = session.scalar(select(LLMCache).where(LLMCache.purpose == "job_offer_analysis"))
         assert json.loads(cached.response)["supporting_excerpts"] == extracted.supporting_excerpts
+    with session_scope() as session:
+        assert purge_expired_cache(
+            session, ttl_days=15, now=datetime.now(timezone.utc) + timedelta(days=16)
+        ) > 0
+    with session_scope() as session:
+        job = session.get(Job, ids[0])
+        assert session.scalar(select(func.count()).select_from(LLMCache)) == 0
+        source = job.analysis.fit_diagnostics["extraction_provenance"]
+        assert source["analyzer_input"] == item.analyzer_input
+        assert source["run_id"] == run_id
+        assert job.analysis.fit_diagnostics["offer_facts"]["required_skills"] == ["Python"]
+        reused, provenance = reusable_offer(session, job)
+        assert reused is not None
+        assert provenance == source
 
 
 def test_all_cached_run_completes_without_any_upload_or_batch_creation():
