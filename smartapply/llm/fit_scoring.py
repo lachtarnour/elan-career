@@ -1,4 +1,4 @@
-"""Provider-independent calculation and conversion of validated fit diagnostics."""
+"""Calculate a score from model levels and retain advisory evidence diagnostics."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from smartapply.llm.fit_context import (
     offer_references,
     resolve,
 )
-from smartapply.llm.fit_validation import AXES, POSITIVE, validate_evaluation
+from smartapply.llm.fit_validation import AXES, POSITIVE, inspect_evaluation
 from smartapply.llm.schemas import JobFitAssessment, JobFitEvaluation, OfferAnalysis
 
 
@@ -58,7 +58,10 @@ def evaluate_fit(
 ) -> tuple[JobFitAssessment, dict]:
     if context["policy"] != POLICY:
         raise ValueError("Scoring policy has changed; this result requires explicit resumption")
-    evaluation = validate_evaluation(evaluation, context, offer)
+    # Schema validation is limited to usable data (in particular the three levels).
+    # Evidence inconsistencies are recorded; they cannot veto this score.
+    evaluation = JobFitEvaluation.model_validate(evaluation.model_dump())
+    warnings = inspect_evaluation(evaluation, context, offer)
     score, calculation = calculate_fit_score(
         *(getattr(evaluation.dimensions, axis).level for axis in AXES),
         [issue.code for issue in evaluation.issues],
@@ -71,7 +74,11 @@ def evaluate_fit(
                 prefix = {"declared_only": "Déclaré : ", "transferable": "Transférable : "}.get(
                     finding.support, ""
                 )
-                refs = [context["candidate_refs"][ref] for ref in finding.candidate_refs]
+                refs = [
+                    context["candidate_refs"][ref]
+                    for ref in finding.candidate_refs
+                    if ref in context["candidate_refs"]
+                ]
                 if any(
                     ref["source_type"] == "bullet"
                     and resolve(context["candidate_facts"], ref)["evidence_level"]
@@ -107,6 +114,11 @@ def evaluate_fit(
     diagnostics = {
         **calculation,
         "evaluation": evaluation.model_dump(mode="json"),
+        "diagnostic_checks": {
+            "mode": "advisory",
+            "status": "warnings" if warnings else "ok",
+            "warnings": warnings,
+        },
         "context": copy.deepcopy(context),
         "offer_facts": offer.model_dump(mode="json"),
         "offer_refs": offer_references(offer),

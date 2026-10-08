@@ -1,4 +1,4 @@
-"""Mechanical policy guarantees. Simulated diagnostics do not test LLM judgement."""
+"""Scoring, advisory diagnostics and workflow guarantees, without paid calls."""
 
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ from smartapply.llm import (
 from smartapply.llm.batch import BatchResult, build_batch_request
 from smartapply.llm.cache import make_cache_key
 from smartapply.llm.fit_context import (
+    POLICY_VERSION,
     build_fit_context,
     build_fit_user,
     context_is_current,
@@ -39,7 +40,8 @@ from smartapply.llm.fit_context import (
 )
 from smartapply.llm.fit_request import check_request_budget, complete_fit
 from smartapply.llm.fit_scoring import calculate_fit_score, evaluate_fit
-from smartapply.llm.fit_validation import validate_evaluation
+from smartapply.llm.fit_validation import inspect_evaluation
+from smartapply.llm.provider import LLMValidationError
 from smartapply.offers import build_analyzer_input
 from smartapply.pipeline.batch_analysis.results import (
     accept_cache,
@@ -146,7 +148,7 @@ def test_declared_skill_alone_supports_essentials_four_without_cap():
         "contradicted_skill",
     ],
 )
-def test_invalid_evidence_is_rejected(mutation):
+def test_evidence_warnings_do_not_prevent_a_score(mutation):
     context, facts, evaluation = fixture(levels=(4, 4, 4))
     data = evaluation.model_dump()
     finding = data["dimensions"]["missions"]["findings"][0]
@@ -175,8 +177,13 @@ def test_invalid_evidence_is_rejected(mutation):
     else:
         finding = data["dimensions"]["essentials"]["findings"][0]
         finding["support"] = "contradicted"
-    with pytest.raises(LLMError):
-        validate_evaluation(JobFitEvaluation.model_validate(data), context, facts)
+    parsed = JobFitEvaluation.model_validate(data)
+    assert inspect_evaluation(parsed, context, facts)
+    public, diagnostics = evaluate_fit(parsed, context, facts)
+    assert 0 <= public.fit_score <= 1
+    assert diagnostics["diagnostic_checks"]["status"] == "warnings"
+    assert diagnostics["diagnostic_checks"]["mode"] == "advisory"
+    assert diagnostics["evaluation"] == data
 
 
 @pytest.mark.parametrize(
@@ -200,25 +207,29 @@ def test_years_component_preserves_capability_coverage(requirement):
     data["dimensions"]["essentials"]["findings"] = [
         copy.deepcopy(data["dimensions"]["missions"]["findings"][0])
     ]
-    with pytest.raises(LLMError, match="not covered"):
-        validate_evaluation(JobFitEvaluation.model_validate(data), context, facts)
+    assert any(
+        "not covered" in warning
+        for warning in inspect_evaluation(JobFitEvaluation.model_validate(data), context, facts)
+    )
     neutral["scope"] = "whole_entry"
-    with pytest.raises(LLMError, match="pure professional tenure"):
-        validate_evaluation(JobFitEvaluation.model_validate(data), context, facts)
+    _, diagnostic = evaluate_fit(JobFitEvaluation.model_validate(data), context, facts)
+    assert diagnostic["offer_facts"]["required_skills"] == [requirement]
+    assert diagnostic["evaluation"]["neutral_offer_refs"] == [neutral]
 
 
 @pytest.mark.parametrize(
-    "text_value,valid",
+    "text_value",
     [
-        ("5 ans d’expérience", True),
-        ("trois ans d’expérience", True),
-        ("3 years’ experience", True),
-        ("Contrat de 3 ans", False),
-        ("bac + 5", False),
-        ("Validité de 3 ans", False),
+        "5 ans d’expérience",
+        "trois ans d’expérience",
+        "3 years’ experience",
+        "1 à 3 ans d’expérience (stage, alternance ou CDI inclus)",
+        "Contrat de 3 ans",
+        "bac + 5",
+        "Validité de 3 ans",
     ],
 )
-def test_only_professional_tenure_is_neutral(text_value, valid):
+def test_python_does_not_classify_neutralised_requirement_text(text_value):
     context, facts, evaluation = fixture(constraints=[text_value])
     data = evaluation.model_dump()
     data["dimensions"]["essentials"]["findings"] = data["dimensions"]["essentials"]["findings"][:1]
@@ -230,18 +241,13 @@ def test_only_professional_tenure_is_neutral(text_value, valid):
             "candidate_refs": [],
         }
     ]
-    if valid:
-        assert (
-            evaluate_fit(JobFitEvaluation.model_validate(data), context, facts)[0].fit_score == 0.88
-        )
-    else:
-        for scope in ("whole_entry", "years_component"):
-            data["neutral_offer_refs"][0]["scope"] = scope
-            with pytest.raises(LLMError):
-                validate_evaluation(JobFitEvaluation.model_validate(data), context, facts)
+    public, diagnostic = evaluate_fit(JobFitEvaluation.model_validate(data), context, facts)
+    assert public.fit_score == 0.88
+    assert diagnostic["offer_facts"]["constraints"] == [text_value]
+    assert diagnostic["evaluation"]["neutral_offer_refs"] == data["neutral_offer_refs"]
 
 
-def test_preference_neutralisation_and_confirmed_conflict_need_both_sides():
+def test_preference_reference_problems_are_reported_without_rejecting_score():
     context, facts, evaluation = fixture(levels=(4, 4, 4), constraints=["CDI"])
     preference = "preference:accepted_contract_types:0"
     data = evaluation.model_dump()
@@ -256,8 +262,11 @@ def test_preference_neutralisation_and_confirmed_conflict_need_both_sides():
     ]
     assert evaluate_fit(JobFitEvaluation.model_validate(data), context, facts)[0].fit_score == 1
     data["neutral_offer_refs"][0]["candidate_refs"] = []
-    with pytest.raises(LLMError):
-        validate_evaluation(JobFitEvaluation.model_validate(data), context, facts)
+    assert any(
+        "compatible_preference requires" in warning
+        for warning in inspect_evaluation(JobFitEvaluation.model_validate(data), context, facts)
+    )
+    assert evaluate_fit(JobFitEvaluation.model_validate(data), context, facts)[0].fit_score == 1
     data["neutral_offer_refs"] = []
     facts.constraints = ["CDD imposé"]
     data["issues"] = [
@@ -271,8 +280,7 @@ def test_preference_neutralisation_and_confirmed_conflict_need_both_sides():
     ]
     assert evaluate_fit(JobFitEvaluation.model_validate(data), context, facts)[0].fit_score == 0.19
     data["issues"][0]["candidate_refs"] = ["identity:residence"]
-    with pytest.raises(LLMError):
-        validate_evaluation(JobFitEvaluation.model_validate(data), context, facts)
+    assert inspect_evaluation(JobFitEvaluation.model_validate(data), context, facts)
     data["issues"] = []
     data["neutral_offer_refs"] = [
         {
@@ -282,8 +290,8 @@ def test_preference_neutralisation_and_confirmed_conflict_need_both_sides():
             "candidate_refs": [],
         }
     ]
-    with pytest.raises(LLMError):
-        validate_evaluation(JobFitEvaluation.model_validate(data), context, facts)
+    assert inspect_evaluation(JobFitEvaluation.model_validate(data), context, facts)
+    assert evaluate_fit(JobFitEvaluation.model_validate(data), context, facts)[0].fit_score == 1
 
 
 def test_problem_origins_and_extraction_warnings_are_preserved():
@@ -336,11 +344,12 @@ def test_inferred_and_self_reported_realizations_keep_their_status():
         for reason in evaluate_fit(evaluation, context, facts)[0].match_reasons
     )
     bullet["evidence_level"] = "inferred"
-    with pytest.raises(LLMError, match="inferred"):
-        evaluate_fit(evaluation, context, facts)
+    public, diagnostic = evaluate_fit(evaluation, context, facts)
+    assert public.fit_score == 0.88
+    assert any("inferred" in warning for warning in diagnostic["diagnostic_checks"]["warnings"])
 
 
-def test_one_correction_no_fallback_and_exact_invalid_cache_eviction(isolated_db):
+def test_evidence_warnings_keep_cached_score_without_correction(isolated_db):
     context, facts, evaluation = fixture()
     user = build_fit_user(context, facts)
     invalid = evaluation.model_copy(deep=True)
@@ -369,16 +378,54 @@ def test_one_correction_no_fallback_and_exact_invalid_cache_eviction(isolated_db
         return invalid if len(calls) == 1 else evaluation
 
     public, diagnostic = complete_fit(SimpleNamespace(complete_json=complete), context, facts)
+    assert public.fit_score == 0.88 and len(calls) == 1
+    assert diagnostic["diagnostic_checks"]["status"] == "warnings"
+    assert diagnostic["evaluation"] == invalid.model_dump(mode="json")
+    assert diagnostic["context"]["candidate_facts"] == context["candidate_facts"]
+    with session_scope() as session:
+        assert {entry.cache_key for entry in session.scalars(select(LLMCache))} == {
+            key,
+            "unrelated",
+        }
+
+
+def test_unreadable_output_gets_one_correction_and_exact_cache_eviction(isolated_db):
+    context, facts, evaluation = fixture()
+    key = make_cache_key(
+        model=context["model"],
+        system=context["system_prompt"],
+        user=build_fit_user(context, facts),
+        schema_name="JobFitEvaluation",
+        extra={"temperature": 0.2, "schema": JobFitEvaluation.model_json_schema()},
+    )
+    with session_scope() as session:
+        for cache_key in (key, "unrelated"):
+            cache_set(
+                session,
+                cache_key=cache_key,
+                model=context["model"],
+                response="{}",
+                prompt_tokens=1,
+                completion_tokens=1,
+            )
+    calls = []
+
+    def complete(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise LLMValidationError("Missing dimensions")
+        return evaluation
+
+    public, _ = complete_fit(SimpleNamespace(complete_json=complete), context, facts)
     assert public.fit_score == 0.88 and len(calls) == 2
     assert "CORRECTION UNIQUE" in calls[1]["user"] and calls[1]["use_cache"] is False
-    assert diagnostic["context"]["candidate_facts"] == context["candidate_facts"]
     with session_scope() as session:
         assert [entry.cache_key for entry in session.scalars(select(LLMCache))] == ["unrelated"]
     calls.clear()
 
     def always_invalid(**kwargs):
         calls.append(kwargs)
-        return invalid
+        raise LLMValidationError("Missing dimensions")
 
     with pytest.raises(LLMError, match="after one correction"):
         complete_fit(SimpleNamespace(complete_json=always_invalid), context, facts)
@@ -514,7 +561,7 @@ def test_rescore_fit_only_atomic_writer_preserves_workflow(isolated_db, fail):
             assert raw[key] == after["analysis"][key]
         assert raw.keys() == before["analysis"]["raw_response"].keys()
         assert "Ancienne réserve" not in after["analysis"]["risks"]
-        assert after["analysis"]["fit_diagnostics"]["policy_version"] == "evidence_fit_v4"
+        assert after["analysis"]["fit_diagnostics"]["policy_version"] == POLICY_VERSION
 
 
 @pytest.mark.parametrize("change", ["sent", "offer", "profile", "policy", "plan"])
@@ -642,10 +689,15 @@ def batch_fixture(session, job_id, *, legacy=False):
 
 
 @pytest.mark.parametrize("path", ["batch", "cache"])
-def test_immediate_batch_cache_share_diagnostic_calculation_and_conversion(isolated_db, path):
+@pytest.mark.parametrize("warning", [False, True])
+def test_immediate_batch_cache_share_diagnostic_calculation_and_conversion(
+    isolated_db, path, warning
+):
     job_id = seed_jobs()[0]
     with session_scope() as session:
         run, item, request, facts, evaluation = batch_fixture(session, job_id)
+        if warning:
+            evaluation.dimensions.missions.findings[0].candidate_refs.append("unknown_ref")
         expected, _ = complete_fit(
             SimpleNamespace(complete_json=lambda **kwargs: evaluation), run.fit_context, facts
         )
@@ -670,6 +722,7 @@ def test_immediate_batch_cache_share_diagnostic_calculation_and_conversion(isola
             key: getattr(job.analysis, key) for key in type(expected).model_fields
         } == expected.model_dump()
         assert job.analysis.fit_diagnostics["evaluation"] == evaluation.model_dump(mode="json")
+        assert bool(job.analysis.fit_diagnostics["diagnostic_checks"]["warnings"]) == warning
         assert set(job.analysis.raw_response) == set(
             _assemble_analysis(facts, expected).model_dump()
         )
@@ -711,7 +764,7 @@ def test_missing_historical_batch_schema_requires_explicit_resumption(isolated_d
         assert session.get(Job, job_id).analysis is None
 
 
-def test_grouped_batch_invalid_diagnostic_does_not_publish_any_item(isolated_db):
+def test_grouped_batch_cannot_copy_response_to_different_offer(isolated_db):
     ids = seed_jobs(2)
     with session_scope() as session:
         run, item, request, facts, evaluation = batch_fixture(session, ids[0])
@@ -730,6 +783,7 @@ def test_grouped_batch_invalid_diagnostic_does_not_publish_any_item(isolated_db)
             BatchResult(custom_id=request.custom_id, content=evaluation.model_dump_json()),
         )
         assert item.state == other.state == "evaluation_failed"
+        assert "autre extraction" in item.error
         assert all(session.get(Job, job_id).analysis is None for job_id in ids)
 
 

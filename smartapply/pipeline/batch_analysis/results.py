@@ -144,6 +144,10 @@ def accept_result(
         if isinstance(validated, JobFitEvaluation):
             if run.fit_context is None:
                 raise LLMValidationError("Diagnostic sans contexte figé")
+            if request_body is not None and request_body["messages"][1][
+                "content"
+            ] != build_fit_user(run.fit_context, offer):
+                raise LLMValidationError("Réponse associée à une autre extraction d’offre.")
             validated, diagnostics = evaluate_fit(
                 validated,
                 run.fit_context,

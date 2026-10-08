@@ -1,4 +1,4 @@
-"""Bounded evaluation request, context budget and invalid-cache recovery."""
+"""Bounded evaluation request; correction only for unreadable structured output."""
 
 from __future__ import annotations
 
@@ -85,6 +85,7 @@ def invalidate_fit_cache(context: dict, user: str) -> None:
 
 
 def complete_fit(provider, context: dict, offer, *, job_id=None, extraction_provenance=None):
+    """Return a score even when the evidence inspection reports warnings."""
     original = build_fit_user(context, offer)
     user = original
     for attempt in range(2):

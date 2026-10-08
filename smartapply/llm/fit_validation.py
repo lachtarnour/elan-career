@@ -1,11 +1,8 @@
-"""Mechanical checks for evidence diagnostics; not a semantic entailment judge."""
+"""Advisory evidence checks. They never reject or alter the model's levels."""
 
 from __future__ import annotations
 
-import re
-
 from smartapply.llm.fit_context import offer_references, resolve
-from smartapply.llm.provider import LLMValidationError
 from smartapply.llm.schemas import JobFitEvaluation, OfferAnalysis
 
 AXES = ("missions", "essentials", "responsibilities")
@@ -13,32 +10,16 @@ POSITIVE = {"direct", "transferable", "declared_only"}
 SUBSTANTIAL = {"distant_core_work", "substantial_core_gap", "unclear_core_work"}
 MATERIAL = SUBSTANTIAL | {"material_core_question"}
 PREFERENCE_FIELDS = {"accepted_contract_types", "accepted_remote_policies", "deal_breakers"}
-# This narrow grammar recognizes only pure tenure phrases, not occupational fit.
-# More complex requirements retain their original entry and require coverage.
-_NUMBER = r"(?:\d+(?:[.,]\d+)?|un|une|deux|trois|quatre|cinq|six|sept|huit|neuf|dix|one|two|three|four|five|seven|eight|nine|ten)"
-_PERIOD = rf"{_NUMBER}(?:\s*[-–à]\s*{_NUMBER}|\s+to\s+{_NUMBER})?\s*\+?\s*(?:ans?|années?|years?)"
-_EXPERIENCE = r"(?:\s*['’]?\s+(?:of\s+)?(?:professional\s+)?experience|\s+d['’]expérience(?:\s+professionnelle)?)"
-_TENURE = re.compile(
-    rf"(?:at least |minimum |au moins |minimum de |plus de )?{_PERIOD}(?:{_EXPERIENCE})?"
-    r"(?:\s+(?:required|requested|demandés?|requise?s?|minimum))?[. ]*",
-    re.I,
-)
-
-_TENURE_COMPONENT = re.compile(
-    rf"(?:{_PERIOD}{_EXPERIENCE}|^\s*{_PERIOD}(?=\s+(?:et|and|en|in|avec|with)\s+))",
-    re.I,
-)
 
 
-def pure_tenure(text: str) -> bool:
-    return _TENURE.fullmatch(text.strip()) is not None
-
-
-def validate_evaluation(
+def inspect_evaluation(
     evaluation: JobFitEvaluation, context: dict, offer: OfferAnalysis
-) -> JobFitEvaluation:
-    # Revalidate even a provider's model_construct object; bool is not an integer level.
-    evaluation = JobFitEvaluation.model_validate(evaluation.model_dump())
+) -> list[str]:
+    """Report reference/coverage inconsistencies without changing any judgement.
+
+    The provider/schema parses the three numeric levels. Interpretation of tenure,
+    obligations and candidate ability belongs to the model, not a Python grammar.
+    """
     candidate = context["candidate_refs"]
     offers = offer_references(offer)
     facts = context["candidate_facts"]
@@ -72,20 +53,14 @@ def validate_evaluation(
         if ref not in offers:
             continue
         kind = offers[ref]["source_type"]
-        text = resolve(offer.model_dump(), offers[ref])
         if neutral.scope == "years_component" and neutral.reason != "years_only":
             fail(f"{ref}: years_component requires years_only")
-        if neutral.reason == "years_only":
-            if neutral.scope == "whole_entry" and not pure_tenure(text):
-                fail(f"{ref}: not a mechanically recognizable pure professional tenure entry")
-            if neutral.scope == "years_component" and (
-                pure_tenure(text) or not _TENURE_COMPONENT.search(text)
-            ):
-                fail(
-                    f"{ref}: years_component needs explicit professional tenure plus remaining capability"
-                )
-            if kind not in {"constraints", "required_skills", "main_tasks"}:
-                fail(f"{ref}: tenure neutralisation has inappropriate source")
+        if neutral.reason == "years_only" and kind not in {
+            "constraints",
+            "required_skills",
+            "main_tasks",
+        }:
+            fail(f"{ref}: tenure neutralisation has inappropriate source")
         if (
             kind in {"required_skills", "main_tasks"}
             and neutral.scope == "whole_entry"
@@ -256,6 +231,4 @@ def validate_evaluation(
             set.union(*findings_by_axis.values()) | issue_coverage
         ):
             fail(f"{ref}: constraint not covered (partial neutralisation is insufficient)")
-    if errors:
-        raise LLMValidationError("Invalid fit diagnostic: " + "; ".join(dict.fromkeys(errors)))
-    return evaluation
+    return list(dict.fromkeys(errors))

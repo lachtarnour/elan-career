@@ -1,4 +1,4 @@
-# Évaluation de pertinence `evidence_fit_v4`
+# Évaluation de pertinence `evidence_fit_v5`
 
 ## Fonctionnement
 
@@ -11,9 +11,16 @@ la date du jour et les anciennes notes ne sont pas envoyés au scoring.
 
 Le LLM retourne un `JobFitEvaluation` interne : trois niveaux entiers de 0 à 4,
 leurs constatations, les problèmes avec leur origine et les neutralisations avec
-leur portée. Il ne retourne aucune note finale. Python valide le diagnostic puis
-calcule `(50 × missions + 30 × essentials + 20 × responsibilities) / 400`, applique
+leur portée. Il ne retourne aucune note finale. Python calcule
+`(50 × missions + 30 × essentials + 20 × responsibilities) / 400`, applique
 le minimum des plafonds et arrondit avec `Decimal` / `ROUND_HALF_UP`.
+
+Les contrôles de références, de couverture et de cohérence sont **consultatifs**.
+Une référence inconnue, des sources mélangées, une exigence non couverte ou un
+problème mal classé sont enregistrés dans `diagnostic_checks.warnings`. Ils ne
+refusent pas la note, ne changent pas les niveaux et ne déclenchent pas de nouvel
+appel. Le diagnostic original est conservé, sans réparation sémantique silencieuse.
+`diagnostic_checks.mode` vaut `advisory` et son statut vaut `ok` ou `warnings`.
 
 | Règle | Résultat |
 | --- | --- |
@@ -37,11 +44,18 @@ L’import Batch vérifie le schéma enregistré dans chaque requête. Un ancien
 valide conserve sa provenance ancienne ; ses niveaux ne sont jamais inventés. Une
 requête sans schéma identifiable reste en échec et nécessite une reprise explicite.
 
-Une réponse invalide n’est pas publiée. Le mode immédiat autorise une seule correction
-avec les mêmes faits et les erreurs précises, puis signale l’échec. Le Batch marque
-l’élément en échec, sans nouvelle soumission automatique. Les réponses refusées ou
-tronquées restent des échecs même si leur JSON semble utilisable. Seule l’entrée de
-cache concernée est écartée lorsqu’elle est invalide.
+Une réponse exploitable au schéma produit un score, même si son diagnostic présente
+des observations. Le prompt précise les types de preuves par axe, sépare compétences
+déclarées et réalisations, et fournit une liste de couverture des exigences. Les
+années sont interprétées par le LLM : aucune grammaire Python ne prétend reconnaître
+ou rejeter les formulations d’ancienneté.
+
+Une réponse illisible ou incompatible avec le schéma (par exemple trois niveaux
+absents), un refus fournisseur ou une réponse tronquée restent des erreurs techniques.
+Le mode immédiat autorise alors une seule correction ; une absence de données
+numériques ne donne pas lieu à l’invention d’un score. Le Batch signale cette erreur
+technique sans nouvelle soumission automatique. Seul un cache techniquement invalide
+est écarté ; un diagnostic avec observations reste utilisable depuis le cache.
 
 ## Diagnostics et recalcul
 
@@ -124,12 +138,14 @@ Les limites connues sont documentées sur les pages officielles
 [GPT-5.4 mini](https://developers.openai.com/api/docs/models/gpt-5.4-mini) et
 [GPT-5.4](https://developers.openai.com/api/docs/models/gpt-5.4).
 
-Mesure du 8 octobre 2026, avec le profil synthétique des tests et une petite offre
+Mesure historique de la version v4, le 8 octobre 2026, avec le profil synthétique des tests et une petite offre
 AI Engineer : système seul **10 748 caractères / 11 220 octets**, données utilisateur
 **16 949 octets**, schéma **3 155 octets**, corps de requête Batch assemblé
 **33 565 octets**. La borne conservatrice du précontrôle est **34 525 tokens**, plus
 **12 000 tokens** réservés pour la sortie. Ces tailles dépendent des données et ne
-mesurent pas une amélioration de la qualité du jugement.
+mesurent pas une amélioration de la qualité du jugement. La version v5 ajoute des
+exemples de références et une liste de couverture ; le précontrôle recalcule la
+borne de chaque requête avec le prompt réellement utilisé.
 
 Un diagnostic identique produit le même score et les mêmes raisons/risques. Deux
 nouveaux jugements LLM peuvent différer. Les poids et plafonds sont une politique
@@ -142,10 +158,10 @@ produisent sept notes hautes et des ex æquo. Les notes historiques restent dist
 | Règles | Destination et portée |
 | --- | --- |
 | Activités dominantes, alternatives, exemptions, périmètre avancé d’une Skill, importance centrale/périphérique, étapes accomplies d’un projet | Prompt normatif ; nécessite une interprétation sémantique du LLM |
-| Support, niveaux, codes, axes, origine, portée des neutralisations | Schéma strict et validateur |
-| Références existantes, types de sources, couverture, appui positif pour axes élevés, cohérence niveau/problème | Validateur mécanique ; ne prouve pas que les textes cités impliquent le jugement |
-| Ancienneté seule / composante professionnelle d’une exigence mixte | Prompt ; vérification mécanique conservative de formes explicites, couverture du reste obligatoire |
-| Diplôme/langue obligatoire versus préférence inconnue | Prompt ; le validateur interdit les neutralisations de préférence sur `required_skills` et les références de préférence inadmissibles |
+| Support, niveaux, codes, axes, origine, portée des neutralisations | Schéma de données ; les niveaux doivent être trois entiers de 0 à 4 |
+| Références existantes, types de sources, couverture, appui positif pour axes élevés, cohérence niveau/problème | Inspection consultative ; conserve ses observations sans refuser ou modifier la note |
+| Ancienneté seule / composante professionnelle d’une exigence mixte | Interprétation dans le prompt, sans expression régulière Python |
+| Diplôme/langue obligatoire versus préférence inconnue | Prompt et exemples ; les références de préférence inadmissibles sont signalées dans le diagnostic |
 | Poids, plafonds, garde-fous, arrondi | Calcul Python et politique versionnée ; modifier aussi la version du calcul lors d’un changement de règles |
 | Contexte figé, diagnostics, schémas historiques, cache ciblé | Application et persistance |
 | Périmètre approuvé, extractions annoncées, publication atomique | Plan de recalcul, commande explicite et écriture dédiée |
@@ -165,3 +181,35 @@ Les scénarios dédiés sont dans `tests/test_evidence_fit.py`, complétés par 
 du parcours immédiat, du Batch, du cache, de l’admission et du pipeline. Ils utilisent
 une base temporaire et des fournisseurs simulés. Aucun appel LLM réel ni recalcul de
 la base utilisateur n’est nécessaire à cette vérification.
+
+## Cause du problème observé dans v4
+
+Le test réel de 30 offres réparties en cinq tranches a produit 60 réponses complètes
+(un appel et une correction pour chaque offre). Toutes étaient compatibles avec le
+schéma et contenaient les trois niveaux numériques. Le validateur v4 a pourtant
+rejeté les 30 diagnostics finaux : types de preuves/statuts incorrects sur 27 offres,
+couverture incomplète sur 21, neutralisations d’ancienneté sur 18, faible niveau sans
+problème substantiel conforme sur 15. Plusieurs causes peuvent concerner une offre.
+
+Le refus était global : une observation locale annulait l’ensemble du diagnostic.
+Les règles étaient parfois trop strictes, notamment lorsqu’une réalisation
+pertinente et une Skill étaient citées ensemble, ou lorsque l’ancienneté comportait
+la précision « stage, alternance ou CDI inclus ». Certaines réponses contenaient
+aussi des erreurs réelles, telles qu’un diplôme traité comme une préférence. Les
+instructions ne donnaient pas assez d’exemples précis de combinaisons autorisées de
+références et de statuts. Les tests synthétiques v4 confirmaient les refus attendus,
+sans vérifier cette compatibilité sur des réponses réelles.
+
+La version v5 transforme ces contrôles en observations, corrige les accès aux
+références inconnues et clarifie le prompt. Cela rétablit la disponibilité des notes ;
+cela ne démontre pas, à lui seul, une amélioration du jugement du LLM. Les scores
+historiques de la base ne sont pas recalculés par cette modification.
+
+Vérifications de v5 : les 60 réponses v4 sauvegardées produisent localement 60 scores
+avec leurs niveaux inchangés, sans nouvel appel. Un contrôle réel v5 sur cinq offres
+du même échantillon a ensuite produit cinq scores en cinq appels immédiats, sans
+correction ni extraction. Des observations restent présentes sur les cinq diagnostics :
+cela vérifie la disponibilité du résultat, pas l’absence d’erreurs sémantiques du LLM.
+Une incohérence entre niveau et code de problème est notamment encore possible. Les
+plafonds de la consigne restent appliqués aux codes renvoyés, avec leur détail stocké
+dans le diagnostic ; les observations consultatives ne constituent pas de plafond.

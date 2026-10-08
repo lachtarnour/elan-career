@@ -13,7 +13,7 @@ from smartapply.llm.prompts.loader import load_prompt
 from smartapply.llm.schemas import JobFitEvaluation, OfferAnalysis
 from smartapply.profile import Bullet, Profile
 
-POLICY_VERSION = "evidence_fit_v4"
+POLICY_VERSION = "evidence_fit_v5"
 CALCULATION_VERSION = "evidence_fit_calculation_v1"
 POLICY = {
     "version": POLICY_VERSION,
@@ -28,6 +28,7 @@ POLICY = {
     },
     "guards": {"missions_le_1": "0.39", "any_dimension_le_2": "0.59"},
     "rounding": "ROUND_HALF_UP:0.01",
+    "diagnostic_checks": "advisory",
 }
 
 
@@ -176,7 +177,7 @@ def build_fit_context(profile: Profile, model: str, *, max_completion_tokens=Non
         "declared_experience_source": "settings.declared_experience",
         "system_prompt": load_prompt("job_fit/system.j2"),
         "user_template": load_prompt("job_fit/user.j2"),
-        "prompt_version": "evidence_fit_v4",
+        "prompt_version": "evidence_fit_v5",
         "schema_version": "job_fit_evaluation_v1",
         "schema": _to_strict_schema(JobFitEvaluation),
         "model": model,
@@ -226,5 +227,12 @@ def build_fit_user(context: dict, offer: OfferAnalysis) -> str:
             candidate_reference_json=json.dumps(context["candidate_refs"], ensure_ascii=False),
             offer_json=offer.model_dump_json(),
             offer_reference_json=json.dumps(offer_references(offer), ensure_ascii=False),
+            coverage_checklist_json=json.dumps(
+                {
+                    field: [f"{field}[{index}]" for index, _ in enumerate(getattr(offer, field))]
+                    for field in ("main_tasks", "required_skills", "constraints")
+                },
+                ensure_ascii=False,
+            ),
         )
     )

@@ -10,11 +10,27 @@ Les projets peuvent soutenir une capacité transférable, jamais une durée d’
 
 Supports : direct, transferable, declared_only exigent des références candidat appropriées ; not_documented signifie preuve manquante, pas incapacité, et autorise candidate_refs vide ; contradicted exige un fait candidat explicite. Ne mélange pas compétence déclarée et réalisation pour attribuer à l’ensemble le statut de travail accompli.
 
+CONTRAT DES RÉFÉRENCES
+
+Les identifiants autorisés sont exactement les clés des deux catalogues JSON. Recopie-les ; n’invente jamais une référence au résumé d’expérience, à un titre de section ou à une compétence. Le résumé d’expérience est du contexte, sans identifiant de preuve.
+
+- Dans missions et responsibilities, une constatation direct/transferable cite uniquement des références de type bullet. Un titre, un résumé, une résidence, une préférence ou une Skill seule ne prouve pas une réalisation. L’orientation déclarée peut expliquer un problème d’orientation, avec son origine et sa préférence, séparément des preuves de capacité.
+- Dans essentials, une référence declared_skill reçoit declared_only. Une référence bullet reçoit direct ou transferable selon sa portée. Si une même compétence est déclarée ET réalisée, écris deux constatations séparées, avec leurs références respectives ; ne mélange pas leurs statuts dans une constatation.
+- Une qualification documentée utilise sa référence education/languages/certificates dans essentials. Elle n’est jamais une préférence compatible.
+- Une constatation not_documented utilise candidate_refs=[] ; elle décrit le périmètre précis non documenté. Une Skill déclarée peut être citée dans une autre constatation positive et dans le contexte d’un problème ; son existence ne prouve ni incapacité ni réalisation avancée.
+
+Exemples de forme, à adapter aux identifiants et aux faits effectivement fournis :
+1. Python dans Skills : essentials, support=declared_only, référence à cette Skill. Un pipeline Python accompli : missions/responsibilities, support=direct ou transferable, référence au bullet. Ne cite pas la Skill comme preuve de pipeline.
+2. Diplôme obligatoire documenté : constatation essentials avec référence education. Diplôme non documenté : constatation not_documented avec candidate_refs=[], puis problème proportionné si nécessaire. Ne choisis jamais compatible_preference.
+3. Condition CDI compatible : compatible_preference peut citer seulement une référence preference:accepted_contract_types existante. Une résidence ne prouve ni cette compatibilité, ni une exposition Cloud.
+
 2. SKILLS, ANNÉES ET PRÉFÉRENCES
 
 Une Skill est valable seule, sans projet associé. declared_only ne justifie à lui seul aucun manque, risque, baisse ou plafond. Une exigence ordinaire de connaissance ou d’usage peut être suffisamment soutenue par Skills, y compris pour essentials=4. Une Skill ne prouve pas années d’usage, maîtrise avancée, production, management ou réalisation. Si ce périmètre est explicitement requis : « compétence déclarée ; périmètre avancé à confirmer », jamais « compétence absente ». Évalue séparément missions et responsabilités.
 
 Utilise uniquement le résumé d’expérience déclaré, sans recalcul des dates ni fusion stage/hors stage. Les années professionnelles demandées seules ne changent aucun niveau et ne créent aucun problème, même face à une préférence ou exclusion numérique. Conserve l’exigence sans prétendre qu’elle est satisfaite ou abandonnée. Évalue toujours la capacité restante d’une exigence mixte. Cette neutralité exclut durée de contrat, bac+5, durée de formation et validité d’habilitation.
+
+« 1 à 3 ans d’expérience (stage, alternance ou CDI inclus) » décrit une ancienneté seule : years_only / whole_entry / candidate_refs=[]. « 3 ans d’expérience et maîtrise de Python » garde la capacité Python à évaluer : years_only / years_component, plus une constatation sur Python. « Entry level » est une étiquette de séniorité, pas une durée ; « première expérience réussie » ne donne pas de nombre d’années. Ne neutralise pas ces deux formulations comme years_only.
 
 Qualification non demandée : aucun critère. Qualification obligatoire non documentée : incertitude proportionnée à son importance. Préférence inconnue : aucune compatibilité ni exclusion à inventer ; elle ne neutralise jamais une qualification obligatoire. Résidence ne prouve ni refus de mobilité ni droit au travail ; annonces acceptées en anglais ne prouvent pas le niveau linguistique ; Full Time ne prouve pas CDI. Un métier hors des cibles déclarées n’est pas une exclusion ferme.
 
@@ -70,3 +86,9 @@ Caractérise les activités dominantes et celles qui les soutiennent : modélisa
 Data Analyst sans indication de Python/SQL/statistiques/expérimentation : signale l’incertitude si la nature analytique reste floue, sans exclure d’autres outils. Offre brève ou exigences vagues : explicite l’incertitude réelle ; elle n’est centrale que si les informations manquantes empêchent matériellement d’évaluer le cœur.
 
 Conserve les réserves encore vraies après enrichissement, notamment client final masqué et avertissements d’extraction. Signale toute ambiguïté étayée d’obligation/option/alternative sans réécrire l’offre. Des supporting_excerpts vides n’invalident pas automatiquement les faits structurés. Formule clairement : déclaré, réalisé, transférable, non documenté, écart établi, orientation du poste ou offre à clarifier. Aucun quota de points positifs ou de problèmes.
+
+8. VÉRIFICATION AVANT RÉPONSE
+
+Utilise la liste de couverture fournie. Pour chaque référence main_tasks, required_skills et constraints, vérifie qu’une constatation, un problème ou une neutralisation admissible la couvre dans l’axe prévu. Tu peux regrouper plusieurs références si le même constat et les mêmes preuves s’appliquent réellement à chacune ; n’omets pas les dernières entrées d’une liste.
+
+Vérifie aussi : uniquement des identifiants existants ; pas de mélange Skill/bullet sous un même statut ; not_documented sans référence candidat ; qualification obligatoire non neutralisée comme préférence ; chaque axe≤2 accompagné d’un problème substantial_core_gap, distant_core_work ou unclear_core_work approprié. material_core_question décrit une question bornée au niveau 3 ; il ne suffit pas à expliquer seul un axe 0/1/2. Ces instructions servent à produire un diagnostic cohérent, jamais à augmenter artificiellement les niveaux.
