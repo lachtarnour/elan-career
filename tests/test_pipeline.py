@@ -347,9 +347,12 @@ def test_ingestor_keeps_paid_serpapi_boolean_query_atomic(monkeypatch: pytest.Mo
         "francetravail",
         " OR ".join(all_roles),
     )
-    # Exact user terms remain first, then every intersecting family contributes
-    # its English/French alternatives.
-    assert expanded_roles[: len(all_roles)] == all_roles
+    # Broad profile terms are qualified before every family contributes aliases.
+    assert expanded_roles[:3] == all_roles[:3]
+    assert "Research Engineer" not in expanded_roles
+    assert "Applied Scientist" not in expanded_roles
+    assert "AI Research Engineer" in expanded_roles
+    assert "Applied ML Scientist" in expanded_roles
     assert "Scientifique des données" in expanded_roles
     assert "Ingénieur Machine Learning" in expanded_roles
     assert "Ingénieur IA Vision" in expanded_roles

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import re
+
+import pytest
+
 from smartapply.pipeline.ingest.queries import (
     build_source_queries,
     build_source_query_plan,
@@ -9,6 +13,8 @@ from smartapply.pipeline.ingest.queries import (
 from smartapply.pipeline.ingest.role_families import (
     ROLE_FAMILIES,
     ROLE_FAMILY_SETS,
+    SEARCH_TERM_REPLACEMENTS,
+    default_search_query,
     expand_role_terms,
     matching_role_families,
     normalize_role_title,
@@ -22,8 +28,8 @@ def _family_keys(*terms: str) -> set[str]:
 def test_canonical_families_keep_shared_alias_associations() -> None:
     aliases = [alias for family in ROLE_FAMILIES for alias in ROLE_FAMILY_SETS[family.key]]
 
-    assert len(aliases) == 128
-    assert len(set(aliases)) == 117
+    assert len(aliases) == 114
+    assert len(set(aliases)) == 105
 
 
 def test_every_configured_profile_role_has_its_own_family() -> None:
@@ -129,7 +135,7 @@ def test_multiple_families_alternate_aliases_after_user_terms() -> None:
         "Ingénieur NLP",
         "Machine Learning Scientist",
         "Natural Language Processing Engineer",
-        "Data Science Engineer",
+        "Ingénieur Data Science",
         "Ingénieur traitement automatique du langage",
     ]
 
@@ -218,3 +224,74 @@ def test_bi_business_product_and_linguist_titles_do_not_activate_a_family() -> N
 
     for title in excluded:
         assert _family_keys(title) == set()
+
+
+def test_default_search_activates_every_family_using_precise_titles() -> None:
+    terms = default_search_query().split(" OR ")
+
+    assert terms == [
+        "AI Engineer",
+        "Machine Learning Engineer",
+        "Data Scientist",
+        "AI Research Engineer",
+        "Applied ML Scientist",
+        "NLP Engineer",
+        "Computer Vision Engineer",
+        "Speech AI Engineer",
+        "Data Analyst",
+        "Analytics Engineer",
+        "Technical AI Consultant",
+    ]
+    assert _family_keys(*terms) == {family.key for family in ROLE_FAMILIES}
+    assert not {normalize_role_title(term) for term in terms} & SEARCH_TERM_REPLACEMENTS.keys()
+
+
+@pytest.mark.parametrize("source", ["linkedin", "francetravail", "serpapi"])
+@pytest.mark.parametrize("include_research_cdd", [False, True])
+def test_legacy_profile_queries_never_reintroduce_retired_terms(
+    source: str, include_research_cdd: bool,
+) -> None:
+    legacy_terms = [alias for family in ROLE_FAMILIES for alias in family.legacy_aliases]
+    query = " OR ".join(f"{term} CDI" for term in legacy_terms)
+    plan = build_source_query_plan(source, query, include_research_cdd=include_research_cdd)
+    concrete = [term for query in plan.all_queries for term in query.split(" OR ")]
+    base_terms = {
+        normalize_role_title(re.sub(r"\s+(?:CDI|thèse|doctorat|PhD)$", "", term))
+        for term in concrete
+    }
+
+    assert not base_terms & SEARCH_TERM_REPLACEMENTS.keys()
+    assert "ai research engineer" in base_terms
+    assert "applied ml scientist" in base_terms
+    assert "technical ai consultant" in base_terms
+    assert "consultant technique ia" in base_terms
+    assert "speech ml engineer" in base_terms
+    assert len(concrete) == len(set(concrete))
+
+
+def test_replaced_user_terms_stay_in_primary_tier_and_are_deduplicated() -> None:
+    plan = build_source_query_plan(
+        "linkedin",
+        "Research Engineer OR AI Research Engineer OR Applied Scientist",
+        include_research_cdd=True,
+    )
+
+    assert plan.primary[:4] == (
+        "AI Research Engineer", "Machine Learning Research Engineer",
+        "Applied ML Scientist", "AI Research Scientist",
+    )
+    assert len(plan.primary) == 16
+    assert "Applied ML Scientist PhD" in plan.primary
+    assert len(plan.all_queries) == len(set(plan.all_queries))
+
+
+def test_precision_changes_preserve_ai_engineering_healthcare_and_consulting() -> None:
+    expanded = expand_role_terms(["IA Engineer", "Data Consultant", "Consultant Data"])
+
+    assert expanded[0] == "IA Engineer"
+    assert "AI Engineer" in expanded
+    assert "Healthcare Data Scientist" in expanded
+    assert "Applied AI Consultant" in expanded
+    assert "Consultant Data Science" in expanded
+    assert "Data Consultant" not in expanded
+    assert "Consultant Data" not in expanded

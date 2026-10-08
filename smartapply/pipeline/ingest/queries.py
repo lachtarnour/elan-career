@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from smartapply.pipeline.ingest.role_families import (
     expand_role_terms,
     normalize_role_title,
+    precise_role_terms,
 )
 
 OR_SPLIT_RE = re.compile(r"\s+\bOR\b\s+", flags=re.IGNORECASE)
@@ -92,7 +93,7 @@ def build_source_query_plan(
     parts = split_or_query(cleaned)
     all_cdi = bool(parts) and all(part.lower().endswith(" cdi") for part in parts)
     family_terms = [re.sub(r"\s+cdi$", "", part, flags=re.IGNORECASE).strip() for part in parts]
-    primary_terms = _stable_unique_terms(family_terms)
+    primary_terms = precise_role_terms(_stable_unique_terms(family_terms))
     expanded = expand_role_terms(family_terms)
     if all_cdi and source_key != "serpapi" and not include_research_cdd:
         expanded = [f"{candidate} CDI" for candidate in expanded]
