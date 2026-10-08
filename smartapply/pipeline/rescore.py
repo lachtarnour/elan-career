@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import asdict
 from datetime import datetime, timezone
 
@@ -101,6 +102,25 @@ def _source_matches(saved: dict, current: dict, offer: OfferAnalysis):
 
 
 def reusable_offer(session, job):
+    current = asdict(build_analyzer_input(job))
+    diagnostics = job.analysis.fit_diagnostics or {}
+    provenance = diagnostics.get("extraction_provenance", {})
+    facts = diagnostics.get("offer_facts")
+    # The latest scoring snapshot owns its facts, hash and provenance together.
+    # Historical raw_response intentionally retains the previous extraction.
+    if isinstance(facts, dict) and set(OfferAnalysis.model_fields) <= facts.keys():
+        try:
+            recent = OfferAnalysis.model_validate(facts)
+        except ValidationError:
+            pass
+        else:
+            if (
+                diagnostics.get("offer_fingerprint") == fingerprint(recent.model_dump(mode="json"))
+                and isinstance(provenance, dict)
+                and isinstance(provenance.get("analyzer_input"), dict)
+                and _source_matches(provenance["analyzer_input"], current, recent)
+            ):
+                return recent, copy.deepcopy(provenance)
     raw = job.analysis.raw_response
     # Defaults on historical schemas are not evidence that missing facts existed.
     if not isinstance(raw, dict) or not set(OfferAnalysis.model_fields) <= raw.keys():
@@ -112,13 +132,17 @@ def reusable_offer(session, job):
         JobAnalysis.model_validate(raw)
     except ValidationError:
         return None, None
-    current = asdict(build_analyzer_input(job))
-    diagnostics = job.analysis.fit_diagnostics or {}
-    provenance = diagnostics.get("extraction_provenance", {})
-    if provenance.get("analyzer_input") and _source_matches(
-        provenance["analyzer_input"], current, offer
+    # Legacy diagnostics without a separate snapshot describe raw_response.
+    # Once a snapshot exists, its provenance must never authenticate old facts.
+    if (
+        "offer_facts" not in diagnostics
+        and diagnostics.get("offer_fingerprint", fingerprint(offer.model_dump(mode="json")))
+        == fingerprint(offer.model_dump(mode="json"))
+        and isinstance(provenance, dict)
+        and isinstance(provenance.get("analyzer_input"), dict)
+        and _source_matches(provenance["analyzer_input"], current, offer)
     ):
-        return offer, provenance
+        return offer, copy.deepcopy(provenance)
     for item in session.scalars(
         select(AnalysisBatchItem)
         .where(AnalysisBatchItem.job_id == job.id, AnalysisBatchItem.offer_data.is_not(None))
