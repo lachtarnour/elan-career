@@ -41,6 +41,52 @@ def payload(*, code="limited_question"):
     return complete, partial
 
 
+def key_payload(location, prefix, *, code="limited_question"):
+    data = json.loads(payload(code=code)[0])
+    # Keep the issue codes before the cut, including cuts inside a dimension.
+    complete = json.dumps({"issues": data["issues"], "dimensions": data["dimensions"]})
+    closing_braces = {"root": 1, "dimensions": 2, "dimension": 3}[location]
+    return complete[:-closing_braces] + ',"' + prefix
+
+
+@pytest.mark.parametrize(
+    "location,prefix",
+    [
+        ("root", "neutral_offer_re"),
+        ("root", "iss"),
+        ("root", r"\u006eutral_offer_re"),
+        ("root", r"neutral_offer_\u0072e"),
+        ("root", r"\u0069ss"),
+        ("root", "neutral_offer_re\\"),
+        ("root", r"iss\u"),
+        ("root", r"\u007"),
+        ("root", r"\u006E"),
+        ("root", r"dim\u007"),
+        ("root", r"dim\""),
+        ("root", r"dimensions\/"),
+        ("root", r"dimensions\\"),
+        ("dimensions", "level"),
+        ("dimensions", r"responsibilities\u006"),
+        ("dimension", "missions"),
+        ("dimension", "find"),
+        ("dimension", r"f\u0069nd"),
+        ("dimension", r"le\u006"),
+        ("dimension", 'findings":[{"lev'),
+    ],
+)
+def test_interrupted_annotation_keys_do_not_invalidate_completed_levels(location, prefix):
+    content = key_payload(location, prefix)
+    context, facts, _ = fixture()
+    public, diagnostic = evaluate_fit(content, context, facts)
+    assert public.fit_score == 0.95
+    assert diagnostic["used_levels"] == {"missions": 4, "essentials": 4, "responsibilities": 3}
+    assert diagnostic["original_response"] == content
+    assert diagnostic["recognized_issue_codes"] == ["limited_question"]
+    assert any(
+        "Truncated JSON" in warning for warning in diagnostic["diagnostic_checks"]["warnings"]
+    )
+
+
 @pytest.mark.parametrize(
     "code,expected",
     [
@@ -128,13 +174,35 @@ def test_syntax_errors_before_eof_are_not_repaired(suffix):
 
 @pytest.mark.parametrize("path", ["immediate", "batch", "cache"])
 @pytest.mark.parametrize(
-    "code,expected", [("limited_question", 0.95), ("material_core_question", 0.79)]
+    "code,expected",
+    [
+        ("limited_question", 0.95),
+        ("material_core_question", 0.79),
+        ("confirmed_constraint_conflict", 0.19),
+    ],
+)
+@pytest.mark.parametrize(
+    "location,prefix",
+    [
+        (None, None),
+        ("root", "neutral_offer_re"),
+        ("root", "iss"),
+        ("root", r"\u0069ss"),
+        ("dimension", "find"),
+        ("dimension", r"f\u0069nd"),
+        ("dimension", 'findings":[{"lev'),
+    ],
 )
 def test_recovered_score_is_saved_and_reused_without_paid_correction(
-    isolated_db, monkeypatch, path, code, expected
+    isolated_db, monkeypatch, path, code, expected, location, prefix
 ):
     job_id = seed_jobs()[0]
-    content = payload(code=code)[1]
+    content = key_payload(location, prefix, code=code) if location else payload(code=code)[1]
+
+    def unexpected_api(self, **kwargs):
+        pytest.fail("Recovered evaluations must not trigger a correction call")
+
+    monkeypatch.setattr(OpenAIProvider, "_call_openai", unexpected_api)
     if path == "immediate":
         context, facts, _ = fixture()
         provider = OpenAIProvider()
@@ -153,6 +221,7 @@ def test_recovered_score_is_saved_and_reused_without_paid_correction(
             for warning in cached_diagnostic["diagnostic_checks"]["warnings"]
         )
         with session_scope() as session:
+            assert session.scalar(select(LLMCache)).response == content
             persist_job_analysis(
                 session,
                 session.get(Job, job_id),
@@ -195,6 +264,10 @@ def test_recovered_score_is_saved_and_reused_without_paid_correction(
         assert saved.fit_score == expected and saved.raw_response["fit_score"] == expected
         assert saved.fit_diagnostics["original_response"] == content
         assert saved.fit_diagnostics["evaluation"]["issues"][0]["code"] == code
+        assert saved.fit_diagnostics["recognized_issue_codes"] == [code]
+        assert saved.fit_diagnostics["applied_caps"] == (
+            {} if code == "limited_question" else {code: str(expected)}
+        )
         assert any(
             "Truncated JSON" in warning
             for warning in saved.fit_diagnostics["diagnostic_checks"]["warnings"]
@@ -202,14 +275,31 @@ def test_recovered_score_is_saved_and_reused_without_paid_correction(
 
 
 @pytest.mark.parametrize(
-    "suffix",
+    "location,prefix",
     [
-        ',"dimension',
-        ',"dimensions":{"missions":{"level":4,"lev',
+        ("root", "dimension"),
+        ("root", "dimensions"),
+        ("root", r"\u0064im"),
+        ("root", "dim\\"),
+        ("root", r"dim\u"),
+        ("root", r"\u006"),
+        ("root", ""),
+        ("root", "\\"),
+        ("dimensions", "mis"),
+        ("dimensions", r"\u006diss"),
+        ("dimensions", "essentials"),
+        ("dimensions", "responsibilities"),
+        ("dimensions", ""),
+        ("dimension", "lev"),
+        ("dimension", "level"),
+        ("dimension", r"\u006Ce"),
+        ("dimension", r"le\u007"),
+        ("dimension", "lev\\"),
+        ("dimension", ""),
     ],
 )
-def test_unfinished_scoring_keys_cannot_hide_potential_duplicates(suffix):
-    content = json.dumps(minimal())[:-1] + suffix
+def test_unfinished_scoring_keys_cannot_hide_potential_duplicates(location, prefix):
+    content = key_payload(location, prefix)
     with pytest.raises(LLMValidationError):
         read_fit_response(content)
 
