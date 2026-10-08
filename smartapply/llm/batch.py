@@ -282,7 +282,9 @@ class BatchResult:
             if schema is JobFitEvaluation and self.error_code in {"refusal", "incomplete_output"}:
                 parsed = read_fit_response(self.content)
                 return replace(
-                    parsed, observations=[f"Provider {self.error_code}; usable levels retained"]
+                    parsed,
+                    observations=parsed.observations
+                    + [f"Provider {self.error_code}; usable levels retained"],
                 )
             raise LLMValidationError(
                 f"Batch request {self.custom_id} failed: {self.error_message or self.error_code}"

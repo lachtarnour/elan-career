@@ -292,7 +292,7 @@ def validate_request_response(body: dict, content: str):
     saved = body.get("response_format", {}).get("json_schema", {}).get("schema")
     if schema is JobFitEvaluation:
         parsed = read_fit_response(content)
-        observations = []
+        observations = list(parsed.observations)
         try:
             if not saved:
                 observations.append(

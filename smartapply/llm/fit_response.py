@@ -9,6 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from smartapply.llm.fit_partial_json import recover_truncated_json
 from smartapply.llm.provider import LLMValidationError
 from smartapply.llm.schemas import (
     FitDimension,
@@ -32,15 +33,23 @@ class FitEvaluationResponse:
 
 
 class _JSONObject(dict):
-    def __init__(self, pairs):
+    def __init__(self, pairs, *, incomplete_keys=(), unread_key=False):
         super().__init__(pairs)
         self.variants = {}
+        self.incomplete_keys = incomplete_keys
+        self.unread_key = unread_key
         for key, value in pairs:
             self.variants.setdefault(key, []).append(value)
 
 
 def _variants(value, key):
-    return value.variants.get(key, [None]) if isinstance(value, _JSONObject) else [value.get(key)]
+    if not isinstance(value, _JSONObject):
+        return [value.get(key)]
+    values = list(value.variants.get(key, []))
+    # An unfinished key here could introduce another dimensions/axis/level key.
+    if key in value.incomplete_keys or value.unread_key:
+        values.append(None)
+    return values or [None]
 
 
 def issue_codes(value) -> list[str]:
@@ -58,11 +67,16 @@ def read_fit_response(value: Any) -> FitEvaluationResponse:
     if isinstance(value, FitEvaluationResponse):
         return value
     original = value if isinstance(value, str) else None
+    observations = []
     if isinstance(value, str):
         try:
             value = json.loads(value, object_pairs_hook=_JSONObject)
-        except (ValueError, TypeError) as exc:
-            raise LLMValidationError("Fit response is unreadable JSON") from exc
+        except ValueError:
+            try:
+                value = recover_truncated_json(value, object_factory=_JSONObject)
+            except (ValueError, RecursionError) as exc:
+                raise LLMValidationError("Fit response is unreadable JSON") from exc
+            observations.append("Truncated JSON response; only fully read values retained")
     elif isinstance(value, BaseModel):
         value = value.model_dump(mode="json", warnings=False)
     if not isinstance(value, dict) or not isinstance(value.get("dimensions"), dict):
@@ -83,7 +97,9 @@ def read_fit_response(value: Any) -> FitEvaluationResponse:
             raise LLMValidationError(f"Fit response has ambiguous {axis} levels")
         levels.append(candidates[0])
     codes = [code for group in _variants(value, "issues") for code in issue_codes(group)]
-    return FitEvaluationResponse(tuple(levels), copy.deepcopy(value), original, tuple(codes))
+    return FitEvaluationResponse(
+        tuple(levels), copy.deepcopy(value), original, tuple(codes), observations
+    )
 
 
 def annotation_dicts(value: Any) -> list[dict]:

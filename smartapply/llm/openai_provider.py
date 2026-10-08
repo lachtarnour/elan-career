@@ -237,7 +237,7 @@ class OpenAIProvider(LLMProvider):
                 getattr(choice.message, "refusal", None),
             )
             if isinstance(validated, FitEvaluationResponse):
-                observations = []
+                observations = list(validated.observations)
                 if finish not in {None, "stop"}:
                     observations.append(f"Provider finish reason {finish}; usable levels retained")
                 if refusal:
