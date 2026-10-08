@@ -19,6 +19,11 @@ from sqlalchemy.orm import Session, contains_eager
 from smartapply.database import session_scope, write_session_scope
 from smartapply.database.models import Job, JobScore
 from smartapply.filtering.hard_reject.types import HardRejectDisposition, HardRejectResult
+from smartapply.filtering.manual_policy import (
+    evaluate_or_bypass,
+    has_manual_filter_bypass,
+    manual_filter_bypass_result,
+)
 from smartapply.jobsearch.offer_state import completed_offer_expression, offer_state
 from smartapply.maintenance.hard_reject_backfill import build_rejector
 from smartapply.pipeline.process.filter_state import has_manual_keep_override
@@ -82,6 +87,8 @@ def persist_filter_label(
     if not needs_filter_label(previous_raw):
         return False
     previous = dict(previous_raw) if isinstance(previous_raw, Mapping) else {}
+    if has_manual_filter_bypass(previous):
+        result = manual_filter_bypass_result()
     _, decision = LocalFilterMixin._filter_decision_components(
         result, force_keep=_manual_keep(previous),
     )
@@ -156,7 +163,7 @@ def complete_missing_filter_labels(
     for job in jobs:
         if stopped():
             return 0
-        results[int(job.id)] = rejector.evaluate(job)
+        results[int(job.id)] = evaluate_or_bypass(rejector, job)
     with write_session_scope() as session:
         if session.get_bind().dialect.name == "sqlite":
             # Reserve this short transaction before reading its authoritative state.

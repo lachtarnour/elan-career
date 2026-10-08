@@ -103,7 +103,7 @@ def test_single_pending_copy_exposes_its_reference_and_confirmed_alias(isolated_
     assert {version.id for version in rows[0].strict_copy_versions} == ids
 
 
-def test_pending_only_switch_keeps_exact_two_state_filter_with_copy_groups(isolated_db):
+def test_active_offer_switch_keeps_pair_with_one_rejected_copy(isolated_db):
     with session_scope() as session:
         reference = _offer(session, "reference")
         recent = _offer(session, "recent")
@@ -113,7 +113,9 @@ def test_pending_only_switch_keeps_exact_two_state_filter_with_copy_groups(isola
 
     service = DesktopService()
     assert len(service.list_jobs(status=JobStatus.DUPLICATE_REVIEW)) == 1
-    assert not service.list_jobs(status=JobStatus.DUPLICATE_REVIEW, only_pending_duplicates=True)
+    assert len(service.list_jobs(
+        status=JobStatus.DUPLICATE_REVIEW, only_pending_duplicates=True,
+    )) == 1
 
 
 def test_normal_list_does_not_load_copy_content_or_build_copy_groups(isolated_db, monkeypatch):

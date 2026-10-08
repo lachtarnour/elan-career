@@ -1632,14 +1632,15 @@ def test_explicit_filtering_prepares_both_offers_for_review(isolated_db, old_rej
     "reference_disposition,new_disposition,visible",
     [
         ("pending_relevance", "pending_relevance", True),
-        ("pending_relevance", "rejected", False),
-        ("rejected", "pending_relevance", False),
-        ("relevant", "pending_relevance", False),
-        ("pending_relevance", "relevant", False),
-        ("", "pending_relevance", False),
+        ("pending_relevance", "rejected", True),
+        ("rejected", "pending_relevance", True),
+        ("relevant", "pending_relevance", True),
+        ("pending_relevance", "relevant", True),
+        ("", "pending_relevance", True),
+        ("rejected", "rejected", False),
     ],
 )
-def test_duplicate_pending_toggle_requires_both_offers_pending(
+def test_duplicate_active_toggle_requires_at_least_one_non_rejected_offer(
     isolated_db, reference_disposition, new_disposition, visible
 ) -> None:
     reference_id, new_id = _create_review_pair()
@@ -1674,7 +1675,7 @@ def test_duplicate_pending_toggle_applies_limit_after_filtering(isolated_db) -> 
     with session_scope() as session:
         for job_id, disposition in (
             (first_reference, "rejected"),
-            (first_new, "pending_relevance"),
+            (first_new, "rejected"),
             (second_reference, "pending_relevance"),
             (second_new, "pending_relevance"),
         ):

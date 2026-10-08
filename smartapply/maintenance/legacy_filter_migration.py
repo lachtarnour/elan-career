@@ -354,6 +354,13 @@ def _job(record: dict[str, Any]) -> LegacyJob:
 def _evaluate(
     record: dict[str, Any], rejector: Rejector, allowed_ids: frozenset[int],
 ) -> HardRejectResult:
+    from smartapply.filtering.manual_policy import (
+        has_manual_filter_bypass,
+        manual_filter_bypass_result,
+    )
+
+    if has_manual_filter_bypass(_decode_object(record["score__components"])):
+        return manual_filter_bypass_result()
     result = rejector.evaluate(_job(record))
     if result.ruleset_version != RULESET_VERSION:
         raise LegacyFilterMigrationError(f"Unsupported ruleset: {result.ruleset_version}")

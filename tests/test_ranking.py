@@ -317,4 +317,7 @@ def test_ranking_replaces_scores_and_preserves_audit_namespaces(isolated_db) -> 
         }
         assert components["future_audit_namespace"] == {"source": "test"}
         assert components["filter_disposition"] == "pending_relevance"
-        assert components["hard_reject"]["rejected"] is False
+        assert components["hard_reject"] == {
+            "skipped": True, "skip_reason": "manual_addition", "gates": [],
+        }
+        assert components["manual_filter_bypass"]["origin"] == "manual_addition"

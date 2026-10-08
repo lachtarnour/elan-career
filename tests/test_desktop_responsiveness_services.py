@@ -51,6 +51,10 @@ def test_tracking_on_other_offers_and_notes_remain_available_under_lease(isolate
             with pytest.raises(TaskConflictError):
                 service.archive_job(alias)
             with pytest.raises(TaskConflictError):
+                service.archive_analysis_offers([job_b, alias])
+            with session_scope() as session:
+                assert session.get(Job, job_b).archived_at is None
+            with pytest.raises(TaskConflictError):
                 service.mark_job_sent(job_a)
             assert service.set_job_shortlisted(job_a, selected=False)
             assert service.save_application_notes(app_a, "Brouillon conservé")

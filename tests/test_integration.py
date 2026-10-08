@@ -215,19 +215,16 @@ def test_full_pipeline_on_realistic_sample(tmp_path: Path) -> None:
     from smartapply.database import session_scope
     from smartapply.database.models import Job, JobAnalysis
     from smartapply.database.repository import top_jobs_by_score
+    from smartapply.offers import RawJob
     from smartapply.pipeline import Pipeline
+    from smartapply.pipeline.ingestor import Ingestor
 
     p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
 
-    # ---- Step 1: Ingest the 5 sample jobs ----
-    for job_data in SAMPLE_JOBS:
-        p.ingest_text(
-            text=job_data["description"],
-            title=job_data["title"],
-            company=job_data["company"],
-            location=job_data["location"],
-            application_url=job_data["application_url"],
-        )
+    # Mock fetched results: a user-entered offer deliberately bypasses filters.
+    Ingestor()._persist("fixture_search", [RawJob(
+        external_id=f"fixture_search:{index}", source="fixture_search", **job_data,
+    ) for index, job_data in enumerate(SAMPLE_JOBS)])
 
     # ---- Step 2: Process ----
     process_report = p.process_pending()

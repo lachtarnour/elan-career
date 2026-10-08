@@ -7,12 +7,14 @@ Item {
     property var offer: ({})
     property int requestedId: 0
     property bool loading: false
+    property bool archiveEnabled: false
     property real pageWidth: 1400
     property real textZoom: 1.15
     readonly property int offerId: Number(offer.id || 0)
     readonly property real fontScale: Math.min(1.25, Math.max(1, pageWidth / 1400)) * textZoom
     signal sourceRequested(string url)
     signal retryRequested()
+    signal archiveRequested(int jobId)
     onOfferIdChanged: detailViewport.contentY = 0
 
     EmptyState {
@@ -188,6 +190,7 @@ Item {
             Layout.fillWidth: true
             spacing: 8
             AppButton {
+                objectName: "analysisOfferSourceAction"
                 text: "Offre d’origine"
                 iconSource: Theme.icon("arrow-up-right")
                 visible: Boolean(root.offer.url)
@@ -196,6 +199,17 @@ Item {
                 fontPixelSize: 11
                 implicitHeight: 32
                 onClicked: root.sourceRequested(String(root.offer.url))
+            }
+            AppButton {
+                objectName: "analysisArchiveOfferAction"
+                text: root.offer.status === "archived" ? "Archivée" : "Archiver"
+                iconSource: Theme.icon("archive")
+                kind: "warning"
+                refined: true
+                fontPixelSize: 11
+                implicitHeight: 32
+                enabled: root.archiveEnabled && root.offerId > 0
+                onClicked: root.archiveRequested(root.offerId)
             }
         }
     }

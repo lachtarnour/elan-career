@@ -18,7 +18,8 @@ Item {
     readonly property bool launching: loading && operation === "start"
     readonly property bool immediateRunning: loading && operation === "immediate"
     readonly property string error: AppBridge.analysisWorkspaceError || ""
-    readonly property bool controlsEnabled: (!loading || immediateRunning) && !AppBridge.shutdownRequested
+    readonly property bool controlsEnabled: (!loading || immediateRunning)
+        && !AppBridge.shutdownRequested && !AppBridge.analysisArchiving
     property string offerView: "available"
     readonly property bool viewingLot: offerView === "lot" && Boolean(selectedRun.id)
     readonly property var listedOffers: viewingLot ? (selectedRun.items || []) : candidates
@@ -37,6 +38,23 @@ Item {
     readonly property var selectedIds: candidates.filter(function(row) {
         return Boolean(selectedOffers[String(row.id)])
     }).map(function(row) { return Number(row.id) })
+    readonly property var reservedOfferIds: runs.filter(function(run) {
+        return run.is_active || run.can_cancel || run.status === "cancelling"
+    }).reduce(function(ids, run) {
+        return ids.concat((run.items || []).map(function(row) { return Number(row.id) }))
+    }, [])
+
+    function canArchive(jobId) {
+        return jobId > 0 && controlsEnabled
+            && (AppBridge.busyJobIds || []).indexOf(jobId) < 0
+            && reservedOfferIds.indexOf(jobId) < 0
+    }
+
+    function confirmArchive(ids) {
+        if (!ids.length || !ids.every(canArchive)) return
+        archiveConfirm.ids = ids.slice()
+        archiveConfirm.open()
+    }
     readonly property var selectedRun: {
         var target = selectedRunId || String(workspace.active_run_id || "")
         for (var i = 0; i < runs.length; ++i)
@@ -113,6 +131,15 @@ Item {
     onOfferViewChanged: {
         listRevision += 1
         offerTable.contentY = 0
+    }
+
+    Connections {
+        target: AppBridge
+        function onAnalysisOffersArchived(ids) {
+            var next = Object.assign({}, root.selectedOffers)
+            ids.forEach(function(jobId) { delete next[String(jobId)] })
+            root.selectedOffers = next
+        }
     }
 
     ColumnLayout {
@@ -236,76 +263,98 @@ Item {
                     }
                 }
 
-                RowLayout {
+                ColumnLayout {
                     objectName: "analysisActionBar"
                     Layout.fillWidth: true
-                    spacing: 10
-                    BusyIndicator {
-                        visible: root.immediateRunning
-                        running: visible
-                        Layout.preferredWidth: 24
-                        Layout.preferredHeight: 24
-                    }
-                    ColumnLayout {
+                    spacing: 6
+                    RowLayout {
                         Layout.fillWidth: true
-                        spacing: 3
-                        Text {
-                            objectName: "analysisCandidateCount"
+                        spacing: 10
+                        BusyIndicator {
+                            visible: root.immediateRunning
+                            running: visible
+                            Layout.preferredWidth: 24
+                            Layout.preferredHeight: 24
+                        }
+                        ColumnLayout {
                             Layout.fillWidth: true
-                            text: root.immediateRunning ? "Analyse immédiate en cours…"
-                                : !root.viewingLot && root.selectedIds.length > 0
-                                    ? root.selectedIds.length + (root.selectedIds.length === 1
-                                        ? " offre sélectionnée" : " offres sélectionnées")
-                                    : root.filteredCandidates.length + (root.filteredCandidates.length === 1
-                                        ? " offre affichée" : " offres affichées")
-                            color: root.selectedIds.length > 0 || root.immediateRunning
-                                ? Theme.ink : Theme.inkMuted
-                            font.pixelSize: 12
-                            font.weight: Font.Medium
+                            spacing: 3
+                            Text {
+                                objectName: "analysisCandidateCount"
+                                Layout.fillWidth: true
+                                text: root.immediateRunning ? "Analyse immédiate en cours…"
+                                    : !root.viewingLot && root.selectedIds.length > 0
+                                        ? root.selectedIds.length + (root.selectedIds.length === 1
+                                            ? " offre sélectionnée" : " offres sélectionnées")
+                                        : root.filteredCandidates.length + (root.filteredCandidates.length === 1
+                                            ? " offre affichée" : " offres affichées")
+                                color: root.selectedIds.length > 0 || root.immediateRunning
+                                    ? Theme.ink : Theme.inkMuted
+                                font.pixelSize: 12
+                                font.weight: Font.Medium
+                            }
+                        }
+                        AppButton {
+                            objectName: "analysisClearSelection"
+                            visible: !root.viewingLot && root.selectedIds.length > 0
+                            text: ""
+                            iconSource: Theme.icon("x")
+                            implicitWidth: 28
+                            implicitHeight: 32
+                            refined: true
+                            quiet: true
+                            fontPixelSize: 11
+                            onClicked: root.selectedOffers = ({})
+                            Accessible.name: "Effacer la sélection"
                         }
                     }
-                    AppButton {
-                        objectName: "analysisClearSelection"
-                        visible: !root.viewingLot && root.selectedIds.length > 0
-                        text: ""
-                        iconSource: Theme.icon("x")
-                        implicitWidth: 28
-                        implicitHeight: 32
-                        refined: true
-                        quiet: true
-                        fontPixelSize: 11
-                        onClicked: root.selectedOffers = ({})
-                        Accessible.name: "Effacer la sélection"
-                    }
-                    AppButton {
-                        objectName: "analysisCancelImmediateAction"
-                        visible: root.immediateRunning
-                        text: "Arrêter l’analyse"
-                        iconSource: Theme.icon("x")
-                        kind: "danger"
-                        refined: true
-                        onClicked: AppBridge.cancelImmediateAnalysis()
-                    }
-                    AppButton {
-                        objectName: "analysisStartImmediateAction"
-                        visible: !root.viewingLot && !root.immediateRunning
-                        text: "Analyse immédiate"
-                        fontPixelSize: 11
-                        implicitHeight: 36
-                        refined: true
-                        enabled: root.controlsEnabled && root.selectedIds.length > 0
-                        onClicked: root.startImmediate()
-                    }
-                    AppButton {
-                        objectName: "analysisStartBatchAction"
-                        visible: !root.viewingLot && !root.immediateRunning
-                        text: "Analyse par Batch"
-                        fontPixelSize: 11
-                        implicitHeight: 36
-                        iconSource: Theme.icon("analysis")
-                        kind: "primary"
-                        enabled: root.controlsEnabled && root.selectedIds.length > 0
-                        onClicked: root.startBatch()
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        visible: !root.viewingLot || root.immediateRunning
+                        AppButton {
+                            objectName: "analysisArchiveSelectionAction"
+                            visible: !root.viewingLot
+                            text: AppBridge.analysisArchiving ? "Archivage…" : "Archiver (" + root.selectedIds.length + ")"
+                            iconSource: Theme.icon("archive")
+                            kind: "warning"
+                            refined: true
+                            fontPixelSize: 11
+                            implicitHeight: 36
+                            enabled: root.selectedIds.length > 0 && root.selectedIds.every(root.canArchive)
+                            onClicked: root.confirmArchive(root.selectedIds)
+                        }
+                        Item { Layout.fillWidth: true }
+                        AppButton {
+                            objectName: "analysisCancelImmediateAction"
+                            visible: root.immediateRunning
+                            text: "Arrêter l’analyse"
+                            iconSource: Theme.icon("x")
+                            kind: "danger"
+                            refined: true
+                            onClicked: AppBridge.cancelImmediateAnalysis()
+                        }
+                        AppButton {
+                            objectName: "analysisStartImmediateAction"
+                            visible: !root.viewingLot && !root.immediateRunning
+                            text: "Analyse immédiate"
+                            fontPixelSize: 11
+                            implicitHeight: 36
+                            refined: true
+                            enabled: root.controlsEnabled && root.selectedIds.length > 0
+                            onClicked: root.startImmediate()
+                        }
+                        AppButton {
+                            objectName: "analysisStartBatchAction"
+                            visible: !root.viewingLot && !root.immediateRunning
+                            text: "Analyse par Batch"
+                            fontPixelSize: 11
+                            implicitHeight: 36
+                            iconSource: Theme.icon("analysis")
+                            kind: "primary"
+                            enabled: root.controlsEnabled && root.selectedIds.length > 0
+                            onClicked: root.startBatch()
+                        }
                     }
                 }
             }
@@ -316,10 +365,12 @@ Item {
                 SplitView.fillWidth: true
                 offer: AppBridge.analysisOffer || ({})
                 loading: AppBridge.analysisOfferLoading
+                archiveEnabled: !loading && offer.status !== "archived" && root.canArchive(offerId)
                 requestedId: Number(AppBridge.analysisOfferId || 0)
                 onRetryRequested: AppBridge.selectAnalysisOffer(requestedId)
                 pageWidth: root.width
                 onSourceRequested: function(url) { AppBridge.openUrl(url) }
+                onArchiveRequested: function(jobId) { root.confirmArchive([jobId]) }
             }
         }
 
@@ -449,6 +500,23 @@ Item {
         }
 
 
+    }
+
+    ConfirmDialog {
+        id: archiveConfirm
+        objectName: "analysisArchiveConfirm"
+        property var ids: []
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        heading: ids.length === 1 ? "Archiver cette offre ?" : "Archiver ces offres ?"
+        message: ids.length + (ids.length === 1
+            ? " offre sera archivée." : " offres seront archivées.")
+            + " Les données et les analyses existantes seront conservées."
+        confirmText: "Archiver"
+        kind: "warning"
+        iconSource: Theme.icon("archive")
+        confirmEnabled: ids.length > 0 && ids.every(root.canArchive)
+        onAccepted: AppBridge.archiveAnalysisOffers(ids)
     }
 
     ConfirmDialog {
