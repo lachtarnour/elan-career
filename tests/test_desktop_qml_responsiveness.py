@@ -8,12 +8,14 @@ from pathlib import Path
 import pytest
 
 _HARNESS = r"""
+import os
 import sys
 from pathlib import Path
 from PySide6.QtCore import QObject, Property, Signal, Slot, QUrl, QElapsedTimer, QEventLoop, QMetaObject, Q_ARG, Q_RETURN_ARG, Qt, QPointF
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine, QQmlComponent
 from PySide6.QtQuick import QQuickItem, QQuickWindow
+from smartapply.pipeline.ingest.role_families import default_search_query
 
 app = QGuiApplication([])
 app.setQuitOnLastWindowClosed(False)
@@ -25,6 +27,7 @@ class Bridge(QObject):
     shutdownRequestedChanged = Signal()
     shutdownReadyChanged = Signal()
     jobsChanged = Signal()
+    minimumScoreChanged = Signal()
     allMatchingJobsReady = Signal("QVariantList")
     duplicatePendingOnlyChanged = Signal()
     duplicateResolutionFinished = Signal(int, bool)
@@ -56,6 +59,7 @@ class Bridge(QObject):
         self.selections = []
         self.duplicate_decisions = []
         self.rows = [offer(42, 7), offer(43, 8)]
+        self.min_score = -1
         self.matching_rows = self.rows
         self.page_index = 0
         self.total = len(self.rows)
@@ -81,6 +85,7 @@ class Bridge(QObject):
     shutdownRequested = Property(bool, lambda self: self.closing, notify=shutdownRequestedChanged)
     shutdownReady = Property(bool, lambda self: self.ready, notify=shutdownReadyChanged)
     jobs = Property("QVariantList", lambda self: self.rows, notify=jobsChanged)
+    minimumLlmScorePercent = Property(int, lambda self: self.min_score, notify=minimumScoreChanged)
     jobsPage = Property(int, lambda self: self.page_index, notify=jobsChanged)
     jobsTotal = Property(int, lambda self: self.total, notify=jobsChanged)
     jobsPageSize = Property(int, lambda self: 2, constant=True)
@@ -89,6 +94,7 @@ class Bridge(QObject):
     jobStatuses = Property("QVariantList", lambda self: [
         {"value": "analyzed", "label": "Analysée"},
         {"value": "ready_for_form_submission", "label": "Prête"},
+        {"value": "sent", "label": "Envoyée"},
         {"value": "archived", "label": "Archivées"}
     ], constant=True)
     shortlist = Property("QVariantMap", lambda self: {"ready_to_generate": 0}, constant=True)
@@ -103,6 +109,7 @@ class Bridge(QObject):
     analysisTopK = Property(int, lambda self: 5, constant=True)
     duplicatePendingOnly = Property(bool, lambda self: True, notify=duplicatePendingOnlyChanged)
     profile = Property("QVariantMap", lambda self: {}, constant=True)
+    defaultSearchQuery = Property(str, lambda self: default_search_query(), constant=True)
     dashboard = Property("QVariantMap", lambda self: {}, constant=True)
     activity = Property("QVariantMap", lambda self: {}, constant=True)
     diagnostics = Property("QVariantMap", lambda self: {"source_ready": {}}, constant=True)
@@ -189,6 +196,11 @@ class Bridge(QObject):
     def loadJobs(self, *args):
         self.queries.append(args)
 
+    @Slot(int)
+    def setMinimumLlmScorePercent(self, value):
+        self.min_score = value
+        self.minimumScoreChanged.emit()
+
     @Slot()
     def selectAllMatchingJobs(self):
         self.allMatchingJobsReady.emit(self.matching_rows)
@@ -259,6 +271,52 @@ assert notes is not None
 """
 
 _SCENARIOS = {
+    "search_default_covers_all_families_and_preserves_custom_text": r"""
+from smartapply.pipeline.ingest.role_families import ROLE_FAMILIES, matching_role_families
+search = load_page("SearchPage.qml")
+field = search.findChild(QQuickItem, "searchQuery")
+assert field.property("text") == bridge.defaultSearchQuery
+assert {family.key for family in matching_role_families(field.property("text").split(" OR "))} == {family.key for family in ROLE_FAMILIES}
+field.setProperty("text", "IA Engineer OR NLP Engineer")
+bridge.busyChanged.emit()
+bridge.currentJobChanged.emit()
+app.processEvents()
+assert field.property("text") == "IA Engineer OR NLP Engineer"
+if os.environ.get("ELAN_SEARCH_SCREENSHOT"):
+    field.setProperty("text", bridge.defaultSearchQuery)
+    window = QQuickWindow()
+    window.resize(1400, 850)
+    search.setParentItem(window.contentItem())
+    window.show()
+    app.processEvents()
+    window.grabWindow().save(os.environ["ELAN_SEARCH_SCREENSHOT"])
+""",
+    "minimum_ai_score_slider_persists_until_none": r"""
+slider = page.findChild(QQuickItem, "offerMinimumLlmScoreSlider")
+clear = page.findChild(QQuickItem, "offerMinimumLlmScoreClear")
+assert slider and slider.property("visible")
+assert slider.property("from") == 0 and slider.property("to") == 100
+assert slider.property("stepSize") == 1 and slider.property("value") == 0
+assert slider.property("background").height() == 3
+assert not clear.property("visible")
+invoke(page, "setMinLlmScorePercent", 70)
+app.processEvents()
+assert bridge.min_score == 70 and slider.property("value") == 70
+assert clear.property("visible")
+assert bridge.queries[-1] == ("", "analyzed", "llm_score", False, "", 0)
+invoke(page, "sortBy", "operation_date")
+assert bridge.min_score == 70 and slider.property("value") == 70
+page.setProperty("requestedFilter", "archived")
+invoke(page, "refreshOffers", 0)
+assert not slider.property("visible") and bridge.min_score == 70
+page.setProperty("requestedFilter", "analyzed")
+invoke(page, "refreshOffers", 0)
+assert slider.property("visible") and slider.property("value") == 70
+invoke(clear, "clicked")
+app.processEvents()
+assert bridge.min_score == -1 and slider.property("value") == 0
+assert not clear.property("visible")
+""",
     "lifecycle_dates_follow_the_filter_and_keep_columns_aligned": r"""
 host = QQuickWindow()
 host.resize(1400, 850)
@@ -272,23 +330,31 @@ def visual_item(item, name):
         if found is not None:
             return found
     return None
-bridge.rows = [{**row, "analyzed_at": "03/10/2026", "ready_at": "06/10/2026"}
+bridge.rows = [{**row, "operation_date": "03/10/2026"}
                for row in bridge.rows]
 bridge.jobsChanged.emit()
 date_header = page.findChild(QQuickItem, "offerLifecycleDateHeader")
 match_header = page.findChild(QQuickItem, "offerMatchHeader")
 wait_until(lambda: visual_item(page, "offerLifecycleDate-42") is not None)
-date_cell = visual_item(page, "offerLifecycleDate-42")
-assert date_header and date_cell
-for status, key, title, value in [
-    ("analyzed", "analyzed_at", "Analysée le", "03/10/2026"),
-    ("ready_for_form_submission", "ready_at", "Prête le", "06/10/2026"),
+assert date_header and visual_item(page, "offerLifecycleDate-42")
+for status, value in [
+    ("analyzed", "03/10/2026"),
+    ("ready_for_form_submission", "06/10/2026"),
+    ("sent", "07/10/2026"),
 ]:
+    bridge.rows = [{**row, "operation_date": value} for row in bridge.rows]
+    bridge.jobsChanged.emit()
     page.setProperty("filterStatus", status)
+    page.setProperty("sortKey", "llm_score")
     app.processEvents()
-    assert date_header.property("visible") and date_cell.property("visible")
-    assert date_header.property("title") == title
-    assert date_header.property("sortKey") == key
+    date_cell = visual_item(page, "offerLifecycleDate-42")
+    assert date_cell is not None
+    assert date_header.property("visible") and date_cell.property("visible"), (
+        status, page.property("filterStatus"),
+        date_header.property("visible"), date_cell.property("visible"),
+    )
+    assert date_header.property("title") == "Operation date"
+    assert date_header.property("sortKey") == "operation_date"
     assert date_cell.property("text") == value
     for width in (1400, 1100):
         page.setProperty("width", width)
@@ -298,7 +364,7 @@ for status, key, title, value in [
         assert abs(date_header.x() - date_cell.x()) <= 1
         assert visual_item(page, "offerTitle-42").width() > 0
     assert QMetaObject.invokeMethod(date_header, "clicked", Qt.DirectConnection)
-    assert page.property("sortKey") == key and page.property("sortAscending") is False
+    assert page.property("sortKey") == "operation_date" and page.property("sortAscending") is False
 page.setProperty("filterStatus", "archived")
 app.processEvents()
 assert not date_header.property("visible") and not date_cell.property("visible")

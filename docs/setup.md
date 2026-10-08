@@ -204,6 +204,15 @@ The profile controls the main user preferences, but several deterministic vocabu
 | [`smartapply/filtering/role_signals.py`](../smartapply/filtering/role_signals.py) | Domain, analytics, engineering, and off-target signal vocabularies |
 | [`smartapply/filtering/location_signals.py`](../smartapply/filtering/location_signals.py) | Location markers and foreign-location detection patterns |
 
+The desktop search starts with one precise title for each of the 11 search
+families, including technical AI consulting, Data Analyst, and Analytics Engineer.
+The query remains editable and is independent of the profile's matching preferences.
+Broad legacy terms such as `Research Engineer`, `Applied Scientist`, or
+`Consultant Data` still activate their families, but are replaced by specific
+AI/ML/Data Science queries before reaching LinkedIn, France Travail, or Google Jobs.
+Shared aliases and replacement queries are deduplicated. WTTJ keeps its
+personalized feed, which does not use the entered titles as search filters.
+
 Recommended order:
 
 1. Update `preferences.json` first.

@@ -263,6 +263,7 @@ class JobRow:
     scraped_at: str
     analyzed_at: str = "—"
     ready_at: str = "—"
+    operation_date: str = "—"
     related_application_id: int | None = None
     duplicate_review_status: str = JobDuplicateStatus.NONE
     possible_duplicate_of_id: int | None = None
@@ -555,6 +556,7 @@ class DesktopService(AnalysisServiceMixin):
         ids_only: bool = False,
         only_pending_duplicates: bool = False,
         filter_disposition: str = "",
+        min_llm_score: float | None = None,
     ) -> list[JobRow] | tuple[list[JobRow], int] | list[int]:
         # Old routes/bookmarks using the review-only state open Prête too.
         if status == JobStatus.QUALITY_REJECTED:
@@ -574,6 +576,10 @@ class DesktopService(AnalysisServiceMixin):
             raise ValueError(f"Unsupported filter disposition: {filter_disposition}")
         if filter_disposition and status != JobStatus.SCRAPED:
             raise ValueError("Filter disposition is available only for new offers")
+        if min_llm_score is not None and (
+            status != JobStatus.ANALYZED or not 0 <= min_llm_score <= 1
+        ):
+            raise ValueError("Minimum IA score requires analyzed offers and a value from 0 to 1")
         reusable_job_ids = set()
         if status in {JobStatus.SCRAPED, JobStatus.ANALYZED, JobStatus.SHORTLISTED}:
             with session_scope() as session:
@@ -705,6 +711,8 @@ class DesktopService(AnalysisServiceMixin):
                 func.json_extract(JobScore.components, "$.filter_disposition")
                 == filter_disposition
             )
+        if min_llm_score is not None:
+            stmt = stmt.where(JobAnalysis.fit_score >= min_llm_score)
         needle = search.strip()
         if needle:
             term = f"%{needle}%"
@@ -719,7 +727,9 @@ class DesktopService(AnalysisServiceMixin):
         # Aggregate once for legacy dossiers rather than scanning their
         # documents per offer. Pagination and sorting stay entirely in SQL.
         ready_date = Application.ready_at
-        if sort_key == "ready_at":
+        if sort_key == "ready_at" or (
+            sort_key == "operation_date" and status == JobStatus.READY_FOR_FORM_SUBMISSION
+        ):
             document_dates = select(
                 GeneratedDocument.application_id,
                 func.max(GeneratedDocument.created_at).label("prepared_at"),
@@ -752,6 +762,12 @@ class DesktopService(AnalysisServiceMixin):
             "published_date": Job.published_date,
             "analyzed_at": func.coalesce(Job.analyzed_at, JobAnalysis.created_at),
             "ready_at": ready_date,
+            "operation_date": (
+                func.coalesce(Job.analyzed_at, JobAnalysis.created_at)
+                if status == JobStatus.ANALYZED else
+                ready_date if status == JobStatus.READY_FOR_FORM_SUBMISSION else
+                Application.form_submitted_at if status == JobStatus.SENT else Job.analyzed_at
+            ),
             # Experience is displayed from the same seniority signal when it
             # is available; exact numeric extraction remains a derived text
             # value and is not suitable for a portable SQL expression.
@@ -761,8 +777,19 @@ class DesktopService(AnalysisServiceMixin):
             "status": func.coalesce(Application.status, Job.status),
         }
         sort_column = sort_columns.get(sort_key, JobScore.final_score)
-        ordering = sort_column.asc() if sort_ascending else sort_column.desc()
-        stmt = stmt.order_by(ordering.nulls_last(), Job.id.asc())
+        if sort_key == "operation_date":
+            # Group by the displayed local calendar day, then rank that day's
+            # offers by IA score. A precise timestamp is only a final tie-break.
+            local_day = func.date(sort_column, "localtime")
+            stmt = stmt.order_by(
+                (local_day.asc() if sort_ascending else local_day.desc()).nulls_last(),
+                JobAnalysis.fit_score.desc().nulls_last(),
+                sort_column.desc().nulls_last(),
+                Job.id.asc(),
+            )
+        else:
+            ordering = sort_column.asc() if sort_ascending else sort_column.desc()
+            stmt = stmt.order_by(ordering.nulls_last(), Job.id.asc())
         if ids_only:
             if status == JobStatus.DUPLICATE_REVIEW:
                 raise ValueError("ID-only duplicate review requires pair filtering")
@@ -1145,6 +1172,14 @@ class DesktopService(AnalysisServiceMixin):
                 job.analyzed_at or (job.analysis.created_at if job.analysis else None)
             ),
             ready_at=_event_date_text(_application_ready_at(application)),
+            operation_date=_event_date_text(
+                (job.analyzed_at or (job.analysis.created_at if job.analysis else None))
+                if display_status == JobStatus.ANALYZED else
+                _application_ready_at(application)
+                if display_status == JobStatus.READY_FOR_FORM_SUBMISSION else
+                application.form_submitted_at
+                if display_status == JobStatus.SENT and application else None
+            ),
             duplicate_review_status=duplicate_review_status,
             possible_duplicate_of_id=job.possible_duplicate_of_id,
             duplicate_confidence=job.duplicate_confidence,
@@ -2407,6 +2442,31 @@ class DesktopService(AnalysisServiceMixin):
     @staticmethod
     def set_shortlist_top_k(value: int) -> int:
         return DesktopService._write_top_k_setting("top_k_shortlist", value)
+
+    @staticmethod
+    def minimum_llm_score_percent() -> int:
+        with session_scope() as session:
+            setting = session.get(AppSetting, "minimum_llm_score_percent")
+            if setting is None or setting.value == "none":
+                return -1
+            try:
+                value = int(setting.value)
+            except (TypeError, ValueError):
+                return -1
+            return value if 0 <= value <= 100 else -1
+
+    @staticmethod
+    def set_minimum_llm_score_percent(value: int) -> int:
+        if not -1 <= value <= 100:
+            raise ValueError("Minimum IA score must be Aucun or 0–100 %")
+        with write_session_scope() as session:
+            setting = session.get(AppSetting, "minimum_llm_score_percent")
+            stored = "none" if value == -1 else str(value)
+            if setting is None:
+                session.add(AppSetting(key="minimum_llm_score_percent", value=stored))
+            else:
+                setting.value = stored
+        return value
 
     @staticmethod
     def source_label(source: str) -> str:

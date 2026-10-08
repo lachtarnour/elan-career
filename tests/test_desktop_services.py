@@ -305,6 +305,59 @@ def test_preparation_dates_keep_document_evidence_after_note_edits(isolated_db) 
     )
     assert page["total"] == 3 and page["rows"][0].id == current_id
     assert service.get_job(historical_id).ready_at == "02/10/2026"
+    operation_rows = service.list_jobs(
+        status=JobStatus.READY_FOR_FORM_SUBMISSION, sort_key="operation_date",
+    )
+    assert [row.id for row in operation_rows] == [current_id, historical_id, unknown_id]
+    assert [row.operation_date for row in operation_rows] == [
+        "04/10/2026", "02/10/2026", "—",
+    ]
+
+
+def test_operation_date_groups_day_then_ai_score_across_pages(isolated_db) -> None:
+    ids = [_job(external_id=f"operation-sort-{index}") for index in range(3)]
+    with session_scope() as session:
+        for job_id, day, hour, score in zip(
+            ids, [5, 5, 6], [18, 9, 9], [0.4, 0.9, 0.2], strict=True,
+        ):
+            _prepare_ranked_analysis(session, job_id)
+            set_analysis(session, job_id, fit_score=score)
+            session.get(Job, job_id).analyzed_at = datetime(
+                2026, 10, day, hour, tzinfo=timezone.utc,
+            )
+
+    service = DesktopService()
+    rows = service.list_jobs(status=JobStatus.ANALYZED, sort_key="operation_date")
+    assert [row.id for row in rows] == [ids[2], ids[1], ids[0]]
+    assert [row.operation_date for row in rows] == [
+        "06/10/2026", "05/10/2026", "05/10/2026",
+    ]
+    page = service.list_jobs_page(
+        status=JobStatus.ANALYZED, sort_key="operation_date", page=1, page_size=1,
+    )
+    assert page["total"] == 3 and page["rows"][0].id == ids[1]
+    ascending = service.list_jobs(
+        status=JobStatus.ANALYZED, sort_key="operation_date", sort_ascending=True,
+    )
+    assert [row.id for row in ascending] == [ids[1], ids[0], ids[2]]
+
+
+def test_sent_operation_date_uses_submission_time_only(isolated_db) -> None:
+    sent_id = _job(external_id="sent-operation-date")
+    missing_id = _job(external_id="sent-without-submission-date")
+    with session_scope() as session:
+        for job_id in (sent_id, missing_id):
+            application = create_or_get_application(session, job_id)
+            application.status = JobStatus.SENT
+            application.updated_at = datetime(2026, 10, 7, 12, tzinfo=timezone.utc)
+            if job_id == sent_id:
+                application.form_submitted_at = datetime(
+                    2026, 10, 4, 12, tzinfo=timezone.utc,
+                )
+
+    rows = DesktopService().list_jobs(status=JobStatus.SENT, sort_key="operation_date")
+    assert [row.id for row in rows] == [sent_id, missing_id]
+    assert [row.operation_date for row in rows] == ["04/10/2026", "—"]
 
 
 def test_dashboard_counts_confirmed_duplicate_submissions_once(isolated_db) -> None:
@@ -919,6 +972,52 @@ def test_offer_pages_sort_and_filter_before_pagination(isolated_db) -> None:
     assert service.job_page_for(
         ids[2], status=JobStatus.ANALYZED, sort_key="llm_score", page_size=2
     ) == 2
+
+
+def test_analyzed_minimum_ai_score_filters_before_sort_and_pagination(isolated_db) -> None:
+    ids = [_job(external_id=f"minimum-ai-{index}") for index in range(5)]
+    with session_scope() as session:
+        for job_id, score in zip(ids, [None, 0.0, 0.69, 0.70, 0.90], strict=True):
+            _prepare_ranked_analysis(session, job_id)
+            if score is not None:
+                set_analysis(session, job_id, fit_score=score)
+
+    service = DesktopService()
+    assert len(service.list_jobs(status=JobStatus.ANALYZED, min_llm_score=None)) == 5
+    assert [row.id for row in service.list_jobs(
+        status=JobStatus.ANALYZED, min_llm_score=0.0,
+    )] == [ids[4], ids[3], ids[2], ids[1]]
+    first = service.list_jobs_page(
+        status=JobStatus.ANALYZED, min_llm_score=0.7,
+        sort_key="llm_score", page_size=1,
+    )
+    second = service.list_jobs_page(
+        status=JobStatus.ANALYZED, min_llm_score=0.7,
+        sort_key="llm_score", page=1, page_size=1,
+    )
+    assert first["total"] == second["total"] == 2
+    assert [first["rows"][0].id, second["rows"][0].id] == [ids[4], ids[3]]
+    assert service.job_page_for(
+        ids[3], status=JobStatus.ANALYZED, min_llm_score=0.7,
+        sort_key="llm_score", page_size=1,
+    ) == 1
+    assert service.job_page_for(
+        ids[2], status=JobStatus.ANALYZED, min_llm_score=0.7,
+        sort_key="llm_score", page_size=1,
+    ) is None
+    with pytest.raises(ValueError):
+        service.list_jobs(status=JobStatus.SENT, min_llm_score=0.7)
+
+
+def test_minimum_ai_score_preference_persists_and_none_clears_it(isolated_db) -> None:
+    service = DesktopService()
+    assert service.minimum_llm_score_percent() == -1
+    assert service.set_minimum_llm_score_percent(0) == 0
+    assert DesktopService().minimum_llm_score_percent() == 0
+    assert service.set_minimum_llm_score_percent(73) == 73
+    assert DesktopService().minimum_llm_score_percent() == 73
+    assert service.set_minimum_llm_score_percent(-1) == -1
+    assert DesktopService().minimum_llm_score_percent() == -1
 
 
 def test_ready_offer_pages_follow_persisted_ai_score(isolated_db) -> None:

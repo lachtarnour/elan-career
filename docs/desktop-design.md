@@ -95,12 +95,23 @@ la vue se positionne sur la nouvelle fiche à son rang. Voir le
 
 ## Avant distribution
 
-Dans Offres, la colonne « Analysée le » affiche la date d’achèvement de l’analyse,
-et « Prête le » la date de la dernière préparation réussie du dossier. Ces dates
-sont affichées en heure locale et leur tri s’applique à tous les résultats avant
-pagination. La préparation utilise `applications.ready_at`, sans dépendre des
-modifications de notes. Pour les anciens dossiers sans ce champ, la date de
-création des documents sert de repère historique ; une date inconnue reste « — ».
+Dans Offres, la colonne « Operation date » affiche la date d’achèvement de
+l’analyse pour « Analysée », la date de la dernière préparation réussie pour
+« Prête » et la date de soumission pour « Envoyée ». Les dates sont affichées en
+heure locale. Un clic sur l’en-tête trie tous les résultats par jour d’opération,
+puis par score IA décroissant dans chaque jour, avant pagination. Un second clic
+inverse l’ordre des jours. La préparation utilise `applications.ready_at`, sans
+dépendre des modifications de notes. Pour les anciens dossiers sans ce champ,
+la date de création des documents sert de repère historique. L’envoi utilise
+`applications.form_submitted_at` ; une date inconnue reste « — ».
+
+Dans « Analysée », un curseur fin « IA min. » règle le seuil de 0 à 100 %, par
+pas de 1 %. Le petit bouton de remise à zéro affiche « Aucun », qui conserve
+aussi les offres sans score IA ; 0 % exige un score renseigné. Le seuil est
+appliqué avant le tri, la pagination et la sélection de tous les résultats. Il
+reste actif pendant les recherches, les tris, les actualisations et les
+changements de vue, jusqu’à la remise à zéro.
+La préférence est aussi restaurée au prochain lancement de l’application.
 
 Compléter les contrôles automatiques par une recette de l’application macOS empaquetée :
 rendu Metal/Retina, plein écran natif, lecteurs d’écran, signature/notarisation,

@@ -23,6 +23,7 @@ from smartapply.desktop.models import OfferListModel
 from smartapply.desktop.services import DesktopService, SearchResult
 from smartapply.desktop.workers import TaskWorker
 from smartapply.jobsearch.status import display_status
+from smartapply.pipeline.ingest.role_families import default_search_query
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,7 @@ class DesktopBridge(QObject):
     analysisTopKChanged = Signal()
     shortlistTopKChanged = Signal()
     jobsChanged = Signal()
+    minimumLlmScorePercentChanged = Signal()
     duplicatePendingOnlyChanged = Signal()
     duplicateResolutionFinished = Signal(int, bool)
     offersDeleted = Signal("QVariantList", "QVariantList")
@@ -272,6 +274,10 @@ class DesktopBridge(QObject):
         self._job_sort_key = "default"
         self._job_sort_ascending = False
         self._job_filter_disposition = ""
+        self._minimum_llm_score_percent = (
+            self.service.minimum_llm_score_percent()
+            if hasattr(self.service, "minimum_llm_score_percent") else -1
+        )
         self._activity: dict[str, Any] = {
             "title": "",
             "message": "",
@@ -610,6 +616,10 @@ class DesktopBridge(QObject):
     def profile(self) -> dict[str, Any]:
         return self._profile
 
+    @Property(str, constant=True)
+    def defaultSearchQuery(self) -> str:  # noqa: N802
+        return default_search_query()
+
     @Property("QVariantMap", notify=diagnosticsChanged)
     def diagnostics(self) -> dict[str, Any]:
         return self._diagnostics
@@ -649,6 +659,20 @@ class DesktopBridge(QObject):
     @Property("QVariantList", constant=True)
     def jobStatuses(self) -> list[dict[str, str]]:  # noqa: N802
         return [{"value": value, "label": label} for value, label in self.service.job_statuses()]
+
+    @Property(int, notify=minimumLlmScorePercentChanged)
+    def minimumLlmScorePercent(self) -> int:  # noqa: N802
+        return self._minimum_llm_score_percent
+
+    @Slot(int)
+    def setMinimumLlmScorePercent(self, value: int) -> None:  # noqa: N802
+        if not -1 <= value <= 100:
+            raise ValueError("Minimum IA score must be Aucun or 0–100 %")
+        if value != self._minimum_llm_score_percent:
+            self._minimum_llm_score_percent = value
+            self.minimumLlmScorePercentChanged.emit()
+            if hasattr(self.service, "set_minimum_llm_score_percent"):
+                self._mutate(self.service.set_minimum_llm_score_percent, value)
 
     @Slot()
     def refreshAll(self) -> None:  # noqa: N802
@@ -709,6 +733,9 @@ class DesktopBridge(QObject):
         self._job_sort_key = sort_key
         self._job_sort_ascending = sort_ascending
         self._job_filter_disposition = filter_disposition if status == JobStatus.SCRAPED else ""
+        min_score_percent = (
+            self._minimum_llm_score_percent if status == JobStatus.ANALYZED else -1
+        )
         duplicates_only = (
             self._duplicate_pending_only if status == JobStatus.DUPLICATE_REVIEW else False
         )
@@ -719,6 +746,7 @@ class DesktopBridge(QObject):
             sort_ascending,
             duplicates_only,
             self._job_filter_disposition,
+            min_score_percent,
             page,
         )
         if query != getattr(self, "_displayed_jobs_query", None):
@@ -734,6 +762,7 @@ class DesktopBridge(QObject):
             sort_ascending=sort_ascending,
             only_pending_duplicates=duplicates_only,
             filter_disposition=self._job_filter_disposition,
+            min_llm_score=None if min_score_percent < 0 else min_score_percent / 100,
         )
         paged = status != JobStatus.DUPLICATE_REVIEW and hasattr(self.service, "list_jobs_page")
         self._start_read(
@@ -803,6 +832,7 @@ class DesktopBridge(QObject):
         query = (
             self._job_search, self._job_status, self._job_sort_key,
             self._job_sort_ascending, self._job_filter_disposition,
+            self._minimum_llm_score_percent if self._job_status == JobStatus.ANALYZED else -1,
         )
         self._selection_loading = True
         self.selectionLoadingChanged.emit()
@@ -811,6 +841,7 @@ class DesktopBridge(QObject):
             current = (
                 self._job_search, self._job_status, self._job_sort_key,
                 self._job_sort_ascending, self._job_filter_disposition,
+                self._minimum_llm_score_percent if self._job_status == JobStatus.ANALYZED else -1,
             )
             if query == current:
                 self.allMatchingJobsReady.emit([
@@ -832,6 +863,7 @@ class DesktopBridge(QObject):
             "all_matching_jobs", self.service.list_jobs,
             search=query[0], status=query[1] or None, sort_key=query[2],
             sort_ascending=query[3], filter_disposition=query[4],
+            min_llm_score=None if query[5] < 0 else query[5] / 100,
             on_success=loaded, on_finished=finished,
         )
 
@@ -863,8 +895,9 @@ class DesktopBridge(QObject):
             current = (
                 self._job_search, self._job_status, self._job_sort_key,
                 self._job_sort_ascending, False, self._job_filter_disposition,
+                self._minimum_llm_score_percent if self._job_status == JobStatus.ANALYZED else -1,
             )
-            if displayed is None or displayed[:6] != current or not any(
+            if displayed is None or displayed[:7] != current or not any(
                 int(row["id"]) == job_id for row in self._jobs
             ):
                 self._start_read(
@@ -873,6 +906,11 @@ class DesktopBridge(QObject):
                     sort_key=self._job_sort_key,
                     sort_ascending=self._job_sort_ascending,
                     filter_disposition=self._job_filter_disposition,
+                    min_llm_score=(
+                        self._minimum_llm_score_percent / 100
+                        if self._job_status == JobStatus.ANALYZED
+                        and self._minimum_llm_score_percent >= 0 else None
+                    ),
                     page_size=self._jobs_page_size,
                     on_success=lambda page: self._selected_job_page_found(job_id, page),
                 )

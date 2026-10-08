@@ -56,7 +56,7 @@ Item {
                             Layout.fillWidth: true
                             iconSource: Theme.icon("search")
                             placeholderText: "Data Scientist, ML Engineer…"
-                            text: (AppBridge.profile.target_roles || []).join(" OR ")
+                            text: AppBridge.defaultSearchQuery
                             Component.onCompleted: cursorPosition = 0
                             onAccepted: root.runSearch()
                         }

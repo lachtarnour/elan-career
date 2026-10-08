@@ -63,14 +63,14 @@ Item {
     readonly property int scoreWidth: Math.round(42 + 6 * tableScale)
     readonly property int llmScoreWidth: scoreWidth
     readonly property int publishedDateWidth: Math.round(76 + 12 * tableScale)
+    readonly property int operationDateWidth: Math.round(94 + 10 * tableScale)
     readonly property bool isNewOffersFilter: filterStatus === "scraped"
-    readonly property bool showsLifecycleDate: filterStatus === "analyzed" || filterStatus === "ready_for_form_submission"
-    readonly property string lifecycleDateKey: filterStatus === "ready_for_form_submission" ? "ready_at" : "analyzed_at"
+    readonly property bool showsLifecycleDate: ["analyzed", "ready_for_form_submission", "sent"].indexOf(filterStatus) >= 0
     // Nouvelle shows the source publication date beside the local-filter
     // disposition. Unknown publication dates remain explicit instead of
     // falling back to the import date.
     readonly property int filterDispositionWidth: scoreWidth + llmScoreWidth + columnGap
-    readonly property int rightColumnsWidth: isNewOffersFilter ? publishedDateWidth + columnGap + filterDispositionWidth : scoreWidth + llmScoreWidth + columnGap + (showsLifecycleDate ? publishedDateWidth + columnGap : 0)
+    readonly property int rightColumnsWidth: isNewOffersFilter ? publishedDateWidth + columnGap + filterDispositionWidth : scoreWidth + llmScoreWidth + columnGap + (showsLifecycleDate ? operationDateWidth + columnGap : 0)
     readonly property int visibleColumnGapCount: isNewOffersFilter ? 5 : 6
     readonly property real textColumnsWidth: Math.max(0, tableContentWidth - selectWidth - experienceWidth - rightColumnsWidth - columnGap * visibleColumnGapCount)
     readonly property int companyWidth: Math.round(textColumnsWidth * 0.26)
@@ -214,8 +214,8 @@ Item {
 
     function companyX() { return selectWidth + columnGap }
     function titleX() { return companyX() + companyWidth + columnGap }
-    function lifecycleDateX(contentWidth) { return contentWidth - publishedDateWidth }
-    function scoreX(contentWidth) { return contentWidth - scoreWidth - (showsLifecycleDate ? publishedDateWidth + columnGap : 0) }
+    function lifecycleDateX(contentWidth) { return contentWidth - operationDateWidth }
+    function scoreX(contentWidth) { return contentWidth - scoreWidth - (showsLifecycleDate ? operationDateWidth + columnGap : 0) }
     function llmScoreX(contentWidth) { return scoreX(contentWidth) - columnGap - llmScoreWidth }
     function filterDispositionX(contentWidth) { return contentWidth - filterDispositionWidth }
     function publishedDateX(contentWidth) { return filterDispositionX(contentWidth) - columnGap - publishedDateWidth }
@@ -333,7 +333,7 @@ Item {
         if (sortKey === key) sortAscending = !sortAscending
         else {
             sortKey = key
-            sortAscending = ["score", "llm_score", "published_date", "analyzed_at", "ready_at"].indexOf(key) < 0
+            sortAscending = ["score", "llm_score", "published_date", "operation_date"].indexOf(key) < 0
         }
         loadOffers(0)
     }
@@ -357,6 +357,16 @@ Item {
         savedListScrollY = 0
         jobsTable.contentY = 0
         clearSelection()
+        loadOffers(0)
+    }
+
+    function setMinLlmScorePercent(percent) {
+        AppBridge.setMinimumLlmScorePercent(Number(percent))
+        restoreListScroll = false
+        savedListScrollY = 0
+        jobsTable.contentY = 0
+        clearSelection()
+        AppBridge.selectJob(0)
         loadOffers(0)
     }
 
@@ -705,6 +715,91 @@ Item {
                 }
             }
 
+            Item {
+                visible: root.filterStatus === "analyzed"
+                Layout.fillWidth: true
+                Layout.preferredHeight: visible ? 28 : 0
+                RowLayout {
+                    anchors.fill: parent
+                    spacing: 7
+                    Text {
+                        text: "IA min."
+                        color: Theme.inkMuted
+                        font.pixelSize: 11
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    Slider {
+                        id: minimumScoreSlider
+                        objectName: "offerMinimumLlmScoreSlider"
+                        Layout.preferredWidth: 150
+                        Layout.preferredHeight: 24
+                        from: 0
+                        to: 100
+                        stepSize: 1
+                        snapMode: Slider.SnapAlways
+                        value: Math.max(0, AppBridge.minimumLlmScorePercent)
+                        leftPadding: 6
+                        rightPadding: 6
+                        Accessible.name: "Score IA minimum"
+                        Accessible.description: AppBridge.minimumLlmScorePercent < 0
+                            ? "Aucun seuil" : Math.round(value) + " pour cent"
+                        onMoved: {
+                            if (!pressed) root.setMinLlmScorePercent(Math.round(value))
+                        }
+                        onPressedChanged: {
+                            if (!pressed) root.setMinLlmScorePercent(Math.round(value))
+                        }
+                        background: Rectangle {
+                            x: minimumScoreSlider.leftPadding
+                            y: (minimumScoreSlider.height - height) / 2
+                            width: minimumScoreSlider.availableWidth
+                            height: 3
+                            radius: 2
+                            color: Theme.lineStrong
+                            Rectangle {
+                                width: parent.width * minimumScoreSlider.visualPosition
+                                height: parent.height
+                                radius: parent.radius
+                                color: Theme.accentBright
+                            }
+                        }
+                        handle: Rectangle {
+                            x: minimumScoreSlider.leftPadding
+                                + minimumScoreSlider.visualPosition * (minimumScoreSlider.availableWidth - width)
+                            y: (minimumScoreSlider.height - height) / 2
+                            width: 12
+                            height: 12
+                            radius: 6
+                            color: minimumScoreSlider.pressed ? Theme.accentBright : Theme.inkSoft
+                            border.color: Theme.accentBright
+                            border.width: 1
+                        }
+                    }
+                    Text {
+                        Layout.preferredWidth: 44
+                        text: AppBridge.minimumLlmScorePercent < 0 && !minimumScoreSlider.pressed
+                            ? "Aucun" : Math.round(minimumScoreSlider.value) + " %"
+                        color: AppBridge.minimumLlmScorePercent < 0 ? Theme.inkMuted : Theme.inkSoft
+                        font.pixelSize: 11
+                        font.weight: Font.DemiBold
+                    }
+                    AppButton {
+                        objectName: "offerMinimumLlmScoreClear"
+                        visible: AppBridge.minimumLlmScorePercent >= 0
+                        Layout.preferredWidth: visible ? 22 : 0
+                        Layout.preferredHeight: 22
+                        text: ""
+                        iconSource: Theme.icon("x")
+                        iconSize: 11
+                        refined: true
+                        quiet: true
+                        Accessible.name: "Supprimer le score IA minimum"
+                        onClicked: root.setMinLlmScorePercent(-1)
+                    }
+                    Item { Layout.fillWidth: true }
+                }
+            }
+
             Rectangle {
                 visible: root.selectedCount > 0
                 Layout.fillWidth: true
@@ -827,11 +922,11 @@ Item {
                                     objectName: "offerLifecycleDateHeader"
                                     visible: root.showsLifecycleDate
                                     x: root.lifecycleDateX(parent.width)
-                                    width: root.publishedDateWidth
+                                    width: root.operationDateWidth
                                     anchors.verticalCenter: parent.verticalCenter
-                                    title: root.filterStatus === "ready_for_form_submission" ? "Prête le" : "Analysée le"
-                                    Accessible.name: root.filterStatus === "ready_for_form_submission" ? "Trier par date de préparation" : "Trier par date d’analyse"
-                                    sortKey: root.lifecycleDateKey
+                                    title: "Operation date"
+                                    Accessible.name: "Trier par date d’opération puis score IA"
+                                    sortKey: "operation_date"
                                     active: root.sortKey === sortKey
                                     ascending: root.sortAscending
                                     centered: true
@@ -959,10 +1054,10 @@ Item {
                                             objectName: "offerLifecycleDate-" + modelData.id
                                             visible: root.showsLifecycleDate
                                             x: root.lifecycleDateX(parent.width)
-                                            width: root.publishedDateWidth
+                                            width: root.operationDateWidth
                                             anchors.verticalCenter: parent.verticalCenter
                                             horizontalAlignment: Text.AlignHCenter
-                                            text: modelData[root.lifecycleDateKey] || "—"
+                                            text: modelData.operation_date || "—"
                                             color: text === "—" ? Theme.inkFaint : Theme.inkMuted
                                             font.pixelSize: root.tableTextSize - 1
                                         }
