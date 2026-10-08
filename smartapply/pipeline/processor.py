@@ -34,9 +34,11 @@ class Processor(AnalysisMixin, LocalFilterMixin, RankingMixin, DeduplicationMixi
         scorer: JobScorer,
         llm: LLMProvider,
         stop_requested: Callable[[], bool] | None = None,
+        use_global_profile: bool = False,
     ):
         self.stop_requested = stop_requested
         self.profile = profile
+        self._uses_global_profile = use_global_profile
         self.deduplicator = deduplicator
         self.filter = job_filter
         self.scorer = scorer
@@ -65,7 +67,8 @@ class Processor(AnalysisMixin, LocalFilterMixin, RankingMixin, DeduplicationMixi
             exclude_applications=job_ids is None,
         )
         analyzed, analysis_errors = self._analyze_in_parallel(
-            candidates, exclude_applications=job_ids is None,
+            candidates,
+            exclude_applications=job_ids is None,
         )
 
         return ProcessReport(

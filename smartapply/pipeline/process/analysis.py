@@ -17,9 +17,7 @@ from smartapply.database.repository import (
 from smartapply.llm import JobAnalysis, JobFitAssessment, OfferAnalysis
 from smartapply.llm.fit_context import (
     build_fit_context,
-    candidate_facts,
     context_is_current,
-    fingerprint,
 )
 from smartapply.llm.fit_request import complete_fit
 from smartapply.llm.prompts import job_analysis as analysis_prompts
@@ -235,6 +233,10 @@ class AnalysisMixin(AnalysisAdmissionMixin):
 
     # -------------------- internals --------------------
 
+    def _analysis_profile(self):
+        """Resolve the same profile source for a request and its stale checks."""
+        return get_profile() if getattr(self, "_uses_global_profile", False) else self.profile
+
     def _analyze_one(
         self,
         *,
@@ -246,7 +248,7 @@ class AnalysisMixin(AnalysisAdmissionMixin):
         check_cancelled(stop_requested)
         with job_operation([job_id], operation="analyse"):
             check_cancelled(stop_requested)
-            loaded_profile_key = fingerprint(candidate_facts(get_profile()))
+            evaluation_profile = self._analysis_profile().model_copy(deep=True)
             with session_scope() as session:
                 job = session.get(Job, job_id)
                 if job is None or not is_current_analysis_candidate(
@@ -293,8 +295,8 @@ class AnalysisMixin(AnalysisAdmissionMixin):
                 offer = _ground_offer_excerpts(offer, analyzer_input.offer_body)
                 save_extraction(session, current, key, offer)
             check_cancelled(stop_requested)
-            context = build_fit_context(self.profile, self.llm.cheap_model)
-            if loaded_profile_key != fingerprint(candidate_facts(get_profile())):
+            context = build_fit_context(evaluation_profile, self.llm.cheap_model)
+            if not context_is_current(context, self._analysis_profile()):
                 raise StaleTaskResultError()
             fit, diagnostics = complete_fit(
                 self.llm,
@@ -310,10 +312,8 @@ class AnalysisMixin(AnalysisAdmissionMixin):
             check_cancelled(stop_requested)
             analysis = _assemble_analysis(offer, fit)
             with write_session_scope() as session:
-                if (
-                    context["model"] != self.llm.cheap_model
-                    or not context_is_current(context, self.profile)
-                    or loaded_profile_key != fingerprint(candidate_facts(get_profile()))
+                if context["model"] != self.llm.cheap_model or not context_is_current(
+                    context, self._analysis_profile()
                 ):
                     raise StaleTaskResultError()
                 job = session.get(Job, job_id)

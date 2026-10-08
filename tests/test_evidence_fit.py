@@ -905,6 +905,7 @@ def test_profile_file_change_during_extraction_stops_before_fit(isolated_db, mon
 
     job_id = insert_job()
     instance = runner(SimpleNamespace(complete_json=complete, cheap_model="mock"))
+    instance._uses_global_profile = True
     with pytest.raises(StaleTaskResultError):
         instance._analyze_one(job_id=job_id)
     assert calls == ["job_offer_analysis"]

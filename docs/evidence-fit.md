@@ -74,6 +74,14 @@ trois niveaux exploitables ; un contenu réellement tronqué qui empêche leur l
 reste inexploitable. Seul un cache privé des données minimales peut être rafraîchi
 de manière ciblée ; les erreurs d'annotations ne justifient jamais son éviction.
 
+Si le JSON est coupé dans une annotation, le lecteur commun peut récupérer son
+préfixe structuré. Il conserve les valeurs entièrement lues, les doublons et les
+codes métier déjà complets ; il ne ferme pas artificiellement un texte ou un
+nombre. Un nombre sans délimiteur à la coupure, un niveau absent ou un doublon
+contradictoire ne fournit pas de niveau exploitable. Le texte original exact reste
+stocké et la troncature devient une observation, y compris en Batch et depuis le
+cache. Une erreur de syntaxe avant la coupure n'est pas réparée.
+
 Les codes métier reconnus sont lus indépendamment de leurs annotations : leur
 plafond reste applicable même si l'axe, l'origine ou les références sont incorrects.
 Un code inconnu est conservé et signalé, sans plafond inventé. Les vérificateurs ne
@@ -149,6 +157,21 @@ candidatures, documents et choix manuels restent conservés. Un échec conserve 
 fit. Une extraction autorisée apparaît dans les nouveaux faits et leur provenance,
 sans réécrire les faits historiques de `raw_response`.
 
+Les plans suivants réutilisent d'abord le snapshot complet de
+`fit_diagnostics.offer_facts`, avec son empreinte et sa propre provenance. Les
+anciens faits de `raw_response` ne peuvent pas être validés par la provenance
+d'une extraction différente. Un repli historique exige une provenance associée à
+ces mêmes faits. Un champ optionnel absent dans l'historique n'empêche pas la
+réutilisation d'un snapshot récent complet.
+
+En immédiat, chaque offre fige une copie du profil provenant de la source pertinente
+au démarrage du traitement. Un Pipeline sans profil explicite consulte le profil
+global actualisé ; un profil fourni par l'appelant reste sa propre source. La
+requête, le diagnostic et les contrôles d'obsolescence utilisent cette même copie
+et vérifient cette même source avant et après l'évaluation. Une modification
+factuelle en cours de traitement bloque sa publication ; une modification visuelle
+du CV ne crée pas d'obsolescence factuelle.
+
 ## Budget et limites
 
 `FIT_MAX_COMPLETION_TOKENS` vaut 12 000 par défaut pour ce diagnostic plus détaillé.
@@ -201,8 +224,9 @@ ne démontrent pas la justesse sémantique de tous les futurs appels réels.
 make check
 ```
 
-Les scénarios dédiés sont dans `tests/test_evidence_fit.py` et
-`tests/test_fit_nonblocking.py`, complétés par les tests
+Les scénarios dédiés sont dans `tests/test_evidence_fit.py`,
+`tests/test_fit_nonblocking.py`, `tests/test_fit_recovery.py` et
+`tests/test_fit_extraction_snapshots.py` et `tests/test_fit_profile_snapshots.py`, complétés par les tests
 du parcours immédiat, du Batch, du cache, de l’admission et du pipeline. Ils utilisent
 une base temporaire et des fournisseurs simulés. Aucun appel LLM réel ni recalcul de
 la base utilisateur n’est nécessaire à cette vérification. Les tests de non-régression

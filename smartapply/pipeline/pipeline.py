@@ -118,6 +118,7 @@ class Pipeline:
         self._ingestor = Ingestor(job_filter=self.filter)
         self._processor = Processor(
             profile=self.profile,
+            use_global_profile=profile is None,
             deduplicator=self.deduplicator,
             job_filter=self.filter,
             scorer=self.scorer,
