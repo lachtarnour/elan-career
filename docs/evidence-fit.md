@@ -2,12 +2,35 @@
 
 ## Contrat envoyé et source figée
 
-Le premier appel reste `OfferAnalysis` : prompt, schéma, champs, clé de cache,
-checkpoints et sauvegarde inchangés. L'unique deuxième appel utilise
+Les nouvelles extractions utilisent `OfferExtractionOutput`, qui conserve les
+15 champs d'`OfferAnalysis` et ferme uniquement `seniority` et `offer_language`.
+`OfferAnalysis` reste le lecteur des faits historiques, sans conversion de leurs
+valeurs. L'unique deuxième appel utilise
 `JobFitDecisionEvaluation` (`job_fit_evaluation_v2`), le prompt
 `llm/prompts/templates/job_fit/system.j2` et le template `user.j2` de ce dossier.
 Les versions du lecteur et du calcul sont `fit_decisions_reader_v2` et
 `evidence_fit_calculation_v3`.
+
+Les catégories du premier appel sont figées dans le schéma et le prompt :
+
+- `seniority` : `junior`, `mid`, `senior`, `lead`, `manager`, `mixed`, `unknown`.
+- `offer_language` : `fr`, `en`, `de`, `es`, `it`, `nl`, `pt`, `other`, `unknown`.
+
+`mixed` désigne plusieurs niveaux explicitement visés. `other` désigne une langue
+identifiable hors liste ; `unknown` conserve une incertitude sans deviner.
+Les langues correspondent aux codes déjà reconnus par la détection locale.
+Le contrat fermé s'applique à l'immédiat, au Batch et aux réextractions approuvées.
+Son nom, son schéma et son prompt produisent une nouvelle identité de cache et de
+checkpoint. Une réponse à une ancienne requête Batch garde sa clé historique :
+elle ne devient pas une extraction du nouveau contrat lors de sa réception.
+Les scores historiques, les faits réutilisés pour un fit seul et les documents
+existants ne sont pas convertis. Aucun nouveau filtre de rejet n'est activé.
+
+Pour les futures lettres, `other` et `unknown` restent enregistrés tels quels.
+La langue de rédaction est résolue localement depuis le texte de l'annonce ;
+sans détection confiante, le français est un choix documentaire explicite avec
+une observation, pas une affirmation sur la langue de l'offre. Les étiquettes
+HTML des lettres restent limitées au français et à l'anglais comme auparavant.
 
 Le corps normalisé `offer_body` issu de la provenance figée est transmis une
 seule fois avec les métadonnées déjà fournies à l'extraction. `fit_source` conserve

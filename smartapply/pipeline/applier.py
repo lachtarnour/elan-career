@@ -12,6 +12,7 @@ from smartapply.cv.motivation_validator import MotivationLetterValidator
 from smartapply.cv.role_family import classify
 from smartapply.database import session_scope, write_session_scope
 from smartapply.database.models import Application, Job, JobStatus
+from smartapply.language import resolve_document_language
 from smartapply.llm import LLMProvider
 from smartapply.pipeline.application_renderer import ApplicationDocumentRenderer
 from smartapply.pipeline.apply.cv_writer import CvWriterMixin, _document_company_label
@@ -101,7 +102,12 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
             snapshot = PublicationSnapshot.capture(job, application)
             snapshot.validate(session.get(Job, job_id), application)
         check_cancelled(self.stop_requested)
-        offer_language = analysis.offer_language or "fr"
+        offer_language, language_observation = resolve_document_language(
+            analysis.offer_language,
+            f"{job.title}\n{job.cleaned_description or job.description or ''}",
+        )
+        if language_observation:
+            report.validation_warnings.append(language_observation)
         document_company = _document_company_label(
             job.company,
             analysis.extracted_company_name,
@@ -117,7 +123,7 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
             refresh_cache=refresh_cache,
         )
         check_cancelled(self.stop_requested)
-        self._validate_letter(letter, adapted, analysis, report)
+        self._validate_letter(letter, adapted, analysis, report, language=offer_language)
         self._validate_cv_offer_alignment(adapted, analysis, job.title, report)
         resolved_form_url = form_url or job.application_url
         report.form_url = resolved_form_url

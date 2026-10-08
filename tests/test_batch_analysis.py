@@ -19,7 +19,12 @@ from smartapply.database.analysis_batches import (
 from smartapply.database.models import Job, JobAnalysis, JobScore, LLMCache, LLMUsage
 from smartapply.database.repository.llm_cache import cache_set, purge_expired_cache
 from smartapply.filtering.hard_reject.types import HardRejectResult
-from smartapply.llm import JobFitDecisionEvaluation, MockLLMProvider, OfferAnalysis
+from smartapply.llm import (
+    JobFitDecisionEvaluation,
+    MockLLMProvider,
+    OfferAnalysis,
+    OfferExtractionOutput,
+)
 from smartapply.llm.batch import BatchResult, BatchSnapshot
 from smartapply.llm.cache import make_cache_key
 from smartapply.llm.prompts import job_analysis, job_fit
@@ -47,6 +52,12 @@ def offer(role="Machine Learning Engineer"):
         required_skills=["Python"],
         nice_to_have=[],
         cv_keywords_to_include=["Python"],
+    )
+
+
+def extraction_offer(role="Machine Learning Engineer"):
+    return OfferExtractionOutput.model_validate(
+        {**offer(role).model_dump(), "seniority": "unknown"}
     )
 
 
@@ -144,8 +155,8 @@ class FakeTransport:
                 continue
             schema = record["body"]["response_format"]["json_schema"]["name"]
             answer = answers.get(custom_id) or (
-                offer(f"Machine Learning Engineer {custom_id}")
-                if schema == "OfferAnalysis"
+                extraction_offer(f"Machine Learning Engineer {custom_id}")
+                if schema in {"OfferAnalysis", "OfferExtractionOutput"}
                 else evaluation_from_user(record["body"]["messages"][1]["content"])
             )
             successes[custom_id] = BatchResult(
@@ -764,18 +775,18 @@ def _write_sync_cache(job_id, *, extraction=True, evaluation=False, extraction_a
             requests.append(
                 (
                     "job_offer_analysis",
-                    OfferAnalysis,
+                    OfferExtractionOutput,
                     job_analysis.build_system_prompt(),
                     job_analysis.build_user_prompt_from_input(
                         analyzer_input=build_analyzer_input(job)
                     ),
-                    extraction_answer or offer(),
+                    extraction_answer or extraction_offer(),
                 )
             )
         if evaluation:
             fit_user = job_fit.build_user_prompt(
                 profile=profile,
-                offer_analysis=offer(),
+                offer_analysis=extraction_offer(),
                 extraction_provenance={"analyzer_input": asdict(build_analyzer_input(job))},
             )
             requests.append(
@@ -823,7 +834,7 @@ def test_existing_synchronous_exact_cache_skips_extraction_batch():
 @pytest.mark.parametrize("from_cache", [False, True])
 def test_batch_preserves_wrapped_source_quotes_through_evaluation_and_storage(from_cache):
     ids = seed_jobs()
-    extracted = offer()
+    extracted = extraction_offer()
     source_quote = "Build machine learning models with Python."
     extracted.supporting_excerpts = [f"« {source_quote} »"]
     if from_cache:

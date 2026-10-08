@@ -249,11 +249,18 @@ class CvWriterMixin:
         adapted,
         analysis: JobAnalysis,
         report: ApplyReport,
+        *,
+        language: str | None = None,
     ) -> None:
+        validation_analysis = (
+            analysis.model_copy(update={"offer_language": language})
+            if language is not None and language != analysis.offer_language
+            else analysis
+        )
         result = self.letter_validator.validate(
             letter_draft,
             cv=adapted,
-            analysis=analysis,
+            analysis=validation_analysis,
         )
         report.validation_warnings.extend(
             warning for warning in result.warnings if warning not in report.validation_warnings

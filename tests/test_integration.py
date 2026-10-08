@@ -16,7 +16,7 @@ from smartapply.llm import (
     CVSelection,
     DocumentTextReview,
     MockLLMProvider,
-    OfferAnalysis,
+    OfferExtractionOutput,
 )
 from smartapply.profile import get_profile
 from smartapply.ranking import MockEmbeddingsProvider
@@ -117,9 +117,10 @@ def _register_llm_fixtures() -> None:
     MockLLMProvider.clear()
     MockLLMProvider.register(
         "job_offer_analysis",
-        OfferAnalysis(
+        OfferExtractionOutput(
             role_type="Data Scientist NLP",
             seniority="mid",
+            offer_language="fr",
             domain="HealthTech",
             main_tasks=[
                 "Concevoir des pipelines RAG",

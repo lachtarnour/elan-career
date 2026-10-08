@@ -29,6 +29,7 @@ from smartapply.llm.schemas import (
     MotivationLetter,
     MotivationLetterRepair,
     OfferAnalysis,
+    OfferExtractionOutput,
     ProjectSelectionReason,
     SkillSelectionBlock,
 )
@@ -54,6 +55,7 @@ __all__ = [
     "MotivationLetter",
     "MotivationLetterRepair",
     "OfferAnalysis",
+    "OfferExtractionOutput",
     "ProjectSelectionReason",
     "SkillSelectionBlock",
     "LLMError",

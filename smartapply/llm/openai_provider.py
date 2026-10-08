@@ -243,7 +243,7 @@ class OpenAIProvider(LLMProvider):
                 if refusal:
                     observations.append("Provider refusal flag; usable levels retained")
                 validated = replace(validated, observations=observations)
-            elif schema is not OfferAnalysis:
+            elif not issubclass(schema, OfferAnalysis):
                 if finish not in {None, "stop"}:
                     raise LLMValidationError("Incomplete LLM response; no evaluation published")
                 if refusal:

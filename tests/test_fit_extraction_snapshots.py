@@ -12,7 +12,7 @@ import pytest
 from smartapply.database import session_scope
 from smartapply.database.analysis_batches import AnalysisBatchItem, AnalysisBatchRun
 from smartapply.database.models import Job
-from smartapply.llm import OfferAnalysis
+from smartapply.llm import OfferAnalysis, OfferExtractionOutput
 from smartapply.llm.fit_context import fingerprint
 from smartapply.offers import build_analyzer_input
 from smartapply.pipeline.rescore import execute_rescore_plan, prepare_rescore_plan
@@ -40,7 +40,13 @@ def test_next_plan_reuses_reextracted_facts_with_their_own_provenance(
             analysis.raw_response = raw
     before = snapshot(job_id)
     original = before["analysis"]["raw_response"]
-    new_facts = fixture()[1].model_copy(update={"required_skills": ["Python", "Kubernetes"]})
+    new_facts = OfferExtractionOutput.model_validate(
+        {
+            **fixture()[1].model_dump(),
+            "required_skills": ["Python", "Kubernetes"],
+            "seniority": "unknown",
+        }
+    )
     initial_plan = prepare_rescore_plan(job_ids=[job_id], include_extractions=True)
     assert initial_plan["entries"][0]["operation"] == "reextract_then_fit"
     calls = []
@@ -48,7 +54,9 @@ def test_next_plan_reuses_reextracted_facts_with_their_own_provenance(
     def complete(**kwargs):
         calls.append(kwargs)
         return (
-            new_facts if kwargs["schema"] is OfferAnalysis else evaluation_from_user(kwargs["user"])
+            new_facts
+            if kwargs["purpose"] == "job_offer_analysis"
+            else evaluation_from_user(kwargs["user"])
         )
 
     provider = SimpleNamespace(complete_json=complete)

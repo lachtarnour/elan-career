@@ -14,7 +14,14 @@ from smartapply.database import session_scope
 from smartapply.database.models import Job, JobScore, JobStatus, LLMCache
 from smartapply.database.repository.llm_cache import purge_expired_cache
 from smartapply.filtering.hard_reject.types import HardRejectResult
-from smartapply.llm import JobAnalysis, JobFitAssessment, LLMError, OfferAnalysis, OpenAIProvider
+from smartapply.llm import (
+    JobAnalysis,
+    JobFitAssessment,
+    LLMError,
+    OfferAnalysis,
+    OfferExtractionOutput,
+    OpenAIProvider,
+)
 from smartapply.llm.prompts import job_analysis, job_fit
 from smartapply.pipeline.errors import StaleTaskResultError
 from smartapply.pipeline.process.analysis import (
@@ -40,6 +47,12 @@ def offer_result():
         cv_keywords_to_include=["forecasting models"],
         supporting_excerpts=["Build forecasting models.", "Python is required."],
         offer_risks=["Working location is not stated in the body."],
+    )
+
+
+def extraction_offer_result():
+    return OfferExtractionOutput.model_validate(
+        {**offer_result().model_dump(), "seniority": "unknown"}
     )
 
 
@@ -153,7 +166,7 @@ def test_rejection_during_analysis_stops_remaining_calls_and_publication(
                     },
                 }
         return (
-            offer_result()
+            extraction_offer_result()
             if kwargs["purpose"] == "job_offer_analysis"
             else evaluation_from_user(kwargs["user"])
         )
@@ -359,7 +372,7 @@ def test_failure_does_not_save_partial_analysis_or_mark_job_analyzed(isolated_db
         calls.append(kwargs["purpose"])
         if kwargs["purpose"] == failed_purpose:
             raise LLMError("Simulated controller failure")
-        return offer_result()
+        return extraction_offer_result()
 
     instance = runner(SimpleNamespace(complete_json=complete, cheap_model="gpt-5.4-mini"))
     job_id = insert_job()
@@ -383,7 +396,7 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(
     provider = OpenAIProvider()
     calls = []
     fail_fit_once = retry_after_failure
-    extracted = offer_result()
+    extracted = extraction_offer_result()
     if wrapped_excerpts:
         extracted.supporting_excerpts = [
             f'« "{quote}" »' for quote in extracted.supporting_excerpts
@@ -398,7 +411,7 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(
             raise RuntimeError("Temporary matching failure")
         result = (
             extracted
-            if schema_name == "OfferAnalysis"
+            if schema_name == "OfferExtractionOutput"
             else evaluation_from_user(kwargs["messages"][1]["content"])
         )
         return SimpleNamespace(
@@ -420,7 +433,7 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(
     # skips history and never silently rewrites a previously displayed score.
     instance._analyze_one(job_id=job_id)
     assert [name for name, _ in calls] == [
-        "OfferAnalysis",
+        "OfferExtractionOutput",
         "JobFitDecisionEvaluation",
         "JobFitDecisionEvaluation",
     ]
@@ -474,7 +487,7 @@ def test_failed_evaluation_checkpoint_obeys_exact_extraction_contract(
     def complete(**kwargs):
         calls.append(kwargs["purpose"])
         if kwargs["purpose"] == "job_offer_analysis":
-            return offer_result()
+            return extraction_offer_result()
         if fail_fit:
             raise LLMError("Evaluation temporarily unavailable")
         return evaluation_from_user(kwargs["user"])
@@ -495,9 +508,9 @@ def test_failed_evaluation_checkpoint_obeys_exact_extraction_contract(
         original = job_analysis.build_system_prompt()
         monkeypatch.setattr(job_analysis, "build_system_prompt", lambda: original + " Revised.")
     elif change == "schema":
-        original = OfferAnalysis.model_json_schema()
+        original = OfferExtractionOutput.model_json_schema()
         monkeypatch.setattr(
-            OfferAnalysis, "model_json_schema", lambda: {**original, "version": "new"}
+            OfferExtractionOutput, "model_json_schema", lambda: {**original, "version": "new"}
         )
     assert instance._analyze_one(job_id=job_id, allow_existing=False)
     expected_extractions = 1 if change in {"none", "profile"} else 2
@@ -521,7 +534,7 @@ def test_cancel_after_valid_extraction_keeps_checkpoint_before_stopping(isolated
         nonlocal stopped
         calls.append(kwargs["purpose"])
         stopped = True
-        return offer_result()
+        return extraction_offer_result()
 
     instance = runner(
         CancellableProvider(

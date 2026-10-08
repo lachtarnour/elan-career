@@ -411,7 +411,7 @@ def test_immediate_extraction_acceptance_matches_fixed_main(
     assert len(calls) == 1
 
 
-def test_batch_extraction_defaults_and_valid_cache_publication_error_matches_main(
+def test_historical_batch_extraction_defaults_and_valid_cache_publication_error_match_main(
     isolated_db, monkeypatch
 ):
     job_id = seed_jobs()[0]
@@ -429,7 +429,17 @@ def test_batch_extraction_defaults_and_valid_cache_publication_error_matches_mai
         item = new_item(run.id, session.get(Job, job_id))
         session.add(item)
         session.flush()
-        request = item_request(item, run, "extraction", 6000)
+        current_request = item_request(item, run, "extraction", 6000)
+        # This regression concerns a persisted historical OfferAnalysis request.
+        request = build_batch_request(
+            custom_id=current_request.custom_id,
+            system="Historical offer-only extraction instructions",
+            user=current_request.body["messages"][1]["content"],
+            schema=OfferAnalysis,
+            model=run.model,
+            purpose="job_offer_analysis",
+            max_completion_tokens=6000,
+        )
         raw = offer().model_dump()
         del raw["supporting_excerpts"]
         content = json.dumps(raw)
@@ -517,16 +527,15 @@ def test_reasons_include_each_positive_axis_and_generator_nonfit_inputs_are_pres
     )
 
 
-def test_fixed_main_extraction_contract_and_key_building_remain_identical():
-    # Golden signatures taken from main at 6a9309d, independent of branch HEAD.
+def test_historical_extraction_readers_and_source_input_remain_identical():
+    # Historical readers and source input stay compatible with main at 6a9309d.
+    # New extraction enums intentionally revise its generation prompt and cache key.
     root = Path(__file__).resolve().parents[1]
     signatures = {
-        "smartapply/llm/prompts/templates/job_analysis/system_long.j2": "3196393a3992126cf119d532c394754139b1a4d6ed05356e39f9fde0bc287777",
         "smartapply/llm/prompts/templates/job_analysis/user.j2": "1630d597e1c1e70a04971483fecf528af5c4b6b9be195d08494dadfad67892cc",
         "smartapply/llm/prompts/templates/job_analysis/source_metadata_block.j2": "5b6a532adf452ca4a1ffa90930c72a5f92fed841d56e5b06685495530d94cf17",
         "smartapply/llm/prompts/job_analysis.py": "714ffcb156b5e48fff49c4497dfe8e3ded67c54def8b9148285269569fffd4df",
         "smartapply/offers/analyzer_input.py": "c65c1e12af5a0839de312903e9ee56a96ebdc978833a0483881efe3eb3275118",
-        "smartapply/pipeline/process/analysis_checkpoint.py": "9665dcd311f0eaaa6367a001aa285c6c1ed38c040f616c1754c2b2d6501fc03b",
     }
     for path, signature in signatures.items():
         assert hashlib.sha256((root / path).read_bytes()).hexdigest() == signature

@@ -25,7 +25,6 @@ from smartapply.llm import (
     JobFitAssessment,
     JobFitEvaluation,
     LLMError,
-    OfferAnalysis,
     OpenAIProvider,
 )
 from smartapply.llm.batch import BatchResult, build_batch_request
@@ -53,7 +52,7 @@ from smartapply.pipeline.process.analysis import _assemble_analysis, persist_job
 from smartapply.pipeline.rescore import execute_rescore_plan, plan_summary, prepare_rescore_plan
 from smartapply.profile import get_profile
 from tests.fit_fixtures import evaluation_from_user
-from tests.test_batch_analysis import offer, seed_jobs
+from tests.test_batch_analysis import extraction_offer, offer, seed_jobs
 
 
 def fixture(*, levels=(4, 3, 3), skills=None, constraints=None, version="evidence_fit_v5"):
@@ -589,7 +588,9 @@ def test_additional_extractions_must_be_announced(isolated_db):
     def complete(**kwargs):
         calls.append(kwargs["purpose"])
         return (
-            offer() if kwargs["schema"] is OfferAnalysis else evaluation_from_user(kwargs["user"])
+            extraction_offer()
+            if kwargs["purpose"] == "job_offer_analysis"
+            else evaluation_from_user(kwargs["user"])
         )
 
     provider = SimpleNamespace(complete_json=complete)
@@ -869,14 +870,14 @@ def test_alternatives_and_peripheral_questions_do_not_introduce_code_penalties()
 
 
 def test_factual_profile_edit_during_immediate_request_prevents_publication(isolated_db):
-    from tests.test_two_stage_analysis import insert_job, offer_result, runner
+    from tests.test_two_stage_analysis import extraction_offer_result, insert_job, runner
 
     profile = get_profile().model_copy(deep=True)
     job_id = insert_job()
 
     def complete(**kwargs):
-        if kwargs["schema"] is OfferAnalysis:
-            return offer_result()
+        if kwargs["purpose"] == "job_offer_analysis":
+            return extraction_offer_result()
         evaluation = evaluation_from_user(kwargs["user"])
         profile.experiences[0].bullets[0].text += " Changed after submission"
         return evaluation
@@ -892,7 +893,7 @@ def test_factual_profile_edit_during_immediate_request_prevents_publication(isol
 
 def test_profile_file_change_during_extraction_stops_before_fit(isolated_db, monkeypatch):
     from smartapply.pipeline.errors import StaleTaskResultError
-    from tests.test_two_stage_analysis import insert_job, offer_result, runner
+    from tests.test_two_stage_analysis import extraction_offer_result, insert_job, runner
 
     changed = get_profile().model_copy(deep=True)
     changed.skills.categories[0].skills.append("New canonical fact")
@@ -901,7 +902,7 @@ def test_profile_file_change_during_extraction_stops_before_fit(isolated_db, mon
     def complete(**kwargs):
         calls.append(kwargs["purpose"])
         monkeypatch.setattr("smartapply.pipeline.process.analysis.get_profile", lambda: changed)
-        return offer_result()
+        return extraction_offer_result()
 
     job_id = insert_job()
     instance = runner(SimpleNamespace(complete_json=complete, cheap_model="mock"))

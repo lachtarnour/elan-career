@@ -18,6 +18,7 @@ from smartapply.llm import (
     JobFitDecisionEvaluation,
     JobFitEvaluation,
     OfferAnalysis,
+    OfferExtractionOutput,
 )
 from smartapply.llm.batch import BatchRequest, BatchResult, build_batch_request
 from smartapply.llm.fit_context import (
@@ -48,7 +49,7 @@ from smartapply.pipeline.process.analysis_checkpoint import (
 from smartapply.pipeline.snapshots import job_snapshot_key
 from smartapply.profile import Profile, get_profile
 
-PHASE_SCHEMA = {"extraction": OfferAnalysis, "evaluation": JobFitDecisionEvaluation}
+PHASE_SCHEMA = {"extraction": OfferExtractionOutput, "evaluation": JobFitDecisionEvaluation}
 PHASE_PURPOSE = {"extraction": "job_offer_analysis", "evaluation": "job_fit_assessment"}
 
 
@@ -139,6 +140,7 @@ def accept_result(
     validated,
     *,
     request_body: dict | None = None,
+    request_cache_key: str | None = None,
 ) -> None:
     job = current_job(session, item, run)
     if job is None:
@@ -147,7 +149,11 @@ def accept_result(
     if phase == "extraction":
         grounded = _ground_offer_excerpts(validated, item.analyzer_input["offer_body"])
         save_extraction(
-            session, job, extraction_key(AnalyzerInput(**item.analyzer_input), run.model), grounded
+            session,
+            job,
+            request_cache_key
+            or extraction_key(AnalyzerInput(**item.analyzer_input), run.model),
+            grounded,
         )
         item.offer_data = grounded.model_dump(mode="json")
         item.state = "evaluation_pending"
@@ -214,7 +220,10 @@ def accept_cache(
         return False
     # Publication/context failures are not invalid cached content. Keep the entry
     # and propagate the error, rather than scheduling another extraction.
-    accept_result(session, item, run, phase, validated, request_body=request.body)
+    accept_result(
+        session, item, run, phase, validated,
+        request_body=request.body, request_cache_key=request.cache_key,
+    )
     record_usage(
         session,
         purpose=PHASE_PURPOSE[phase],
@@ -272,7 +281,10 @@ def import_result(
         # Roll back all publications if one grouped item fails validation. Usage remains recorded.
         with session.begin_nested():
             for item in items:
-                accept_result(session, item, run, phase, validated, request_body=request["body"])
+                accept_result(
+                    session, item, run, phase, validated,
+                    request_body=request["body"], request_cache_key=request["cache_key"],
+                )
     except (ValueError, LLMValidationError) as exc:
         for item in items:
             item.state = f"{phase}_failed"
@@ -293,7 +305,10 @@ def schema_for_request(body: dict, content: str | None = None):
     stored = body.get("response_format", {}).get("json_schema", {})
     classes = {
         model.__name__: model
-        for model in (OfferAnalysis, JobFitAssessment, JobFitEvaluation, JobFitDecisionEvaluation)
+        for model in (
+            OfferAnalysis, OfferExtractionOutput,
+            JobFitAssessment, JobFitEvaluation, JobFitDecisionEvaluation,
+        )
     }
     if stored.get("name") in {JobFitEvaluation.__name__, JobFitDecisionEvaluation.__name__}:
         return classes[stored["name"]]
@@ -334,7 +349,7 @@ def validate_request_response(body: dict, content: str):
         return replace(parsed, observations=observations)
     try:
         data = json.loads(content)
-        if schema is not OfferAnalysis:
+        if not issubclass(schema, OfferAnalysis):
             Draft202012Validator(saved).validate(data)
         return schema.model_validate(data)
     except Exception as exc:

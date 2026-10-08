@@ -13,7 +13,7 @@ from smartapply.pipeline.errors import StaleTaskResultError
 from smartapply.profile import get_profile
 from smartapply.ranking import MockEmbeddingsProvider
 from tests.fit_fixtures import evaluation_from_user
-from tests.test_two_stage_analysis import insert_job, offer_result
+from tests.test_two_stage_analysis import extraction_offer_result, insert_job
 
 
 def pipeline_with_profile_source(monkeypatch, *, explicit=False):
@@ -28,7 +28,7 @@ def pipeline_with_profile_source(monkeypatch, *, explicit=False):
         calls.append(kwargs)
         return evaluation_from_user(kwargs["user"])
 
-    llm = MockLLMProvider({"job_offer_analysis": offer_result(), "job_fit_assessment": fit})
+    llm = MockLLMProvider({"job_offer_analysis": extraction_offer_result(), "job_fit_assessment": fit})
     pipeline = Pipeline(
         profile=supplied if explicit else None, llm=llm, embeddings=MockEmbeddingsProvider()
     )

@@ -4,7 +4,7 @@ from sqlalchemy import select
 
 from smartapply.database.analysis_batches import AnalysisBatchItem, AnalysisBatchWave
 from smartapply.database.analysis_checkpoints import AnalysisCheckpoint
-from smartapply.llm import OfferAnalysis
+from smartapply.llm import OfferAnalysis, OfferExtractionOutput
 from smartapply.llm.cache import make_cache_key
 from smartapply.llm.prompts import job_analysis
 
@@ -14,8 +14,8 @@ def extraction_key(analyzer_input, model: str) -> str:
         model=model,
         system=job_analysis.build_system_prompt(),
         user=job_analysis.build_user_prompt_from_input(analyzer_input=analyzer_input),
-        schema_name=OfferAnalysis.__name__,
-        extra={"temperature": 0.2, "schema": OfferAnalysis.model_json_schema()},
+        schema_name=OfferExtractionOutput.__name__,
+        extra={"temperature": 0.2, "schema": OfferExtractionOutput.model_json_schema()},
     )
 
 
@@ -39,7 +39,7 @@ def load_extraction(session, job, key: str) -> OfferAnalysis | None:
     if checkpoint is not None:
         if checkpoint.extraction_key == key:
             try:
-                return OfferAnalysis.model_validate(checkpoint.offer_data)
+                return OfferExtractionOutput.model_validate(checkpoint.offer_data)
             except ValueError:
                 pass
         session.delete(checkpoint)
@@ -66,7 +66,7 @@ def load_extraction(session, job, key: str) -> OfferAnalysis | None:
         ):
             continue
         try:
-            offer = OfferAnalysis.model_validate(item.offer_data)
+            offer = OfferExtractionOutput.model_validate(item.offer_data)
         except ValueError:
             continue
         save_extraction(session, job, key, offer)

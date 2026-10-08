@@ -115,6 +115,29 @@ class OfferAnalysis(BaseModel):
     )
 
 
+ExtractionSeniority = Literal["junior", "mid", "senior", "lead", "manager", "mixed", "unknown"]
+ExtractionLanguage = Literal["fr", "en", "de", "es", "it", "nl", "pt", "other", "unknown"]
+
+
+class OfferExtractionOutput(OfferAnalysis):
+    """Closed categories for new extractions; historical offer facts stay readable."""
+
+    seniority: ExtractionSeniority = Field(
+        description=(
+            "Seniority explicitly supported by the offer: junior, mid, senior, lead, manager; "
+            "mixed for multiple stated levels, unknown when not established."
+        )
+    )
+    offer_language: ExtractionLanguage = Field(
+        default="unknown",
+        description=(
+            "Language the offer is written in: fr, en, de, es, it, nl or pt; "
+            "other for an identifiable language outside that list, unknown when unclear. "
+            "Required candidate languages do not determine the offer language."
+        ),
+    )
+
+
 class FitFinding(BaseModel):
     model_config = _strict
     offer_refs: list[str]

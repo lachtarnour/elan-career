@@ -12,7 +12,7 @@ from smartapply.database.models import Application, Job, JobDuplicateStatus
 from smartapply.desktop.classification_explanation import classification_explanation
 from smartapply.desktop.services import DesktopService
 from smartapply.filtering.manual_policy import has_manual_filter_bypass
-from smartapply.llm import MockLLMProvider, OfferAnalysis
+from smartapply.llm import MockLLMProvider, OfferExtractionOutput
 from smartapply.maintenance import filter_labels
 from smartapply.offers import ManualOfferInput, RawJob
 from smartapply.pipeline import Pipeline
@@ -108,8 +108,8 @@ def test_manual_bypass_allows_analysis_without_suppressing_fit_risks(isolated_db
     def complete(**kwargs):
         calls.append(kwargs["purpose"])
         if kwargs["purpose"] == "job_offer_analysis":
-            return OfferAnalysis(
-                role_type="Data Scientist", seniority="senior", domain="",
+            return OfferExtractionOutput(
+                role_type="Data Scientist", seniority="senior", domain="", offer_language="fr",
                 required_skills=["Python"], main_tasks=["Build machine learning models"],
                 nice_to_have=[], cv_keywords_to_include=["Python"],
             )

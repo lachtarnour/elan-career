@@ -23,7 +23,7 @@ from smartapply.llm.fit_context import (
 )
 from smartapply.llm.fit_request import complete_fit
 from smartapply.llm.prompts import job_analysis
-from smartapply.llm.schemas import JobAnalysis, OfferAnalysis
+from smartapply.llm.schemas import JobAnalysis, OfferAnalysis, OfferExtractionOutput
 from smartapply.offers import build_analyzer_input
 from smartapply.pipeline.errors import StaleTaskResultError
 from smartapply.pipeline.process.analysis import _ground_offer_excerpts
@@ -242,7 +242,7 @@ def prepare_rescore_plan(
         "entries": entries,
         "extraction_request": {
             "system": job_analysis.build_system_prompt(),
-            "schema": OfferAnalysis.model_json_schema(),
+            "schema": OfferExtractionOutput.model_json_schema(),
             "temperature": 0.2,
             "max_completion_tokens": get_settings().openai_max_completion_tokens,
         },
@@ -307,7 +307,8 @@ def execute_rescore_plan(plan: dict, provider, *, approved=False, profile=None) 
                 if operation == "reextract_then_fit":
                     if (
                         plan["extraction_request"]["system"] != job_analysis.build_system_prompt()
-                        or plan["extraction_request"]["schema"] != OfferAnalysis.model_json_schema()
+                        or plan["extraction_request"]["schema"]
+                        != OfferExtractionOutput.model_json_schema()
                         or plan["extraction_request"]["max_completion_tokens"]
                         != get_settings().openai_max_completion_tokens
                     ):
@@ -322,7 +323,7 @@ def execute_rescore_plan(plan: dict, provider, *, approved=False, profile=None) 
                     offer = provider.complete_json(
                         system=plan["extraction_request"]["system"],
                         user=entry["extraction_user"],
-                        schema=OfferAnalysis,
+                        schema=OfferExtractionOutput,
                         model=context["model"],
                         purpose="job_offer_analysis",
                         job_id=job_id,

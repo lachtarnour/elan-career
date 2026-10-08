@@ -19,7 +19,7 @@ from smartapply.database.models import (
     JobStatus,
 )
 from smartapply.filtering.hard_reject.types import HardRejectResult
-from smartapply.llm import OfferAnalysis
+from smartapply.llm import OfferExtractionOutput
 from smartapply.pipeline import Pipeline
 from smartapply.pipeline.errors import StaleTaskResultError
 from smartapply.pipeline.process.analysis import AnalysisMixin
@@ -62,9 +62,9 @@ def _provider(calls: list, hook=None):
         if hook:
             hook(kwargs["purpose"])
         if kwargs["purpose"] == "job_offer_analysis":
-            return OfferAnalysis(
+            return OfferExtractionOutput(
                 role_type="Machine Learning Engineer",
-                seniority="",
+                seniority="unknown",
                 domain="",
                 required_skills=["Python"],
                 main_tasks=["Build machine learning models"],

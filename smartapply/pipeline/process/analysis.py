@@ -14,7 +14,7 @@ from smartapply.database.repository import (
     set_analysis,
     update_status,
 )
-from smartapply.llm import JobAnalysis, JobFitAssessment, OfferAnalysis
+from smartapply.llm import JobAnalysis, JobFitAssessment, OfferAnalysis, OfferExtractionOutput
 from smartapply.llm.fit_context import (
     build_fit_context,
     context_is_current,
@@ -288,7 +288,7 @@ class AnalysisMixin(AnalysisAdmissionMixin):
                 offer = self.llm.complete_json(
                     system=analysis_prompts.build_system_prompt(),
                     user=user_prompt,
-                    schema=OfferAnalysis,
+                    schema=OfferExtractionOutput,
                     model=self.llm.cheap_model,
                     purpose="job_offer_analysis",
                     job_id=job_id,

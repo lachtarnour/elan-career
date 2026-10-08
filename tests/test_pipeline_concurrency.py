@@ -12,7 +12,7 @@ import pytest
 from smartapply.config import get_settings
 from smartapply.database import session_scope
 from smartapply.database.models import Application, Job, JobAnalysis, JobScore, JobStatus
-from smartapply.llm import MotivationLetter, OfferAnalysis
+from smartapply.llm import MotivationLetter, OfferExtractionOutput
 from smartapply.pipeline.applier import Applier
 from smartapply.pipeline.errors import StaleTaskResultError, TaskCancelledError
 from smartapply.pipeline.process.analysis import AnalysisMixin
@@ -22,7 +22,7 @@ from smartapply.ranking import MockEmbeddingsProvider
 
 
 def offer_result():
-    return OfferAnalysis(role_type="AI Engineer", seniority="", domain="",
+    return OfferExtractionOutput(role_type="AI Engineer", seniority="unknown", domain="",
                          main_tasks=["Build models"], required_skills=["Python"],
                          nice_to_have=[], cv_keywords_to_include=["Python"])
 
@@ -270,7 +270,7 @@ def test_publication_revalidates_state_and_preserves_old_files(isolated_db, chan
     applier._generate_draft = lambda **kwargs: (
         adapted, MotivationLetter(subject="Application", body="Motivation"),
     )
-    applier._validate_letter = lambda *args: None
+    applier._validate_letter = lambda *args, **kwargs: None
     applier._validate_cv_offer_alignment = lambda *args: None
     if change == "notes":
         report = applier.apply(job_id, force_regenerate=True)

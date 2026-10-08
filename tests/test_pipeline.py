@@ -21,7 +21,7 @@ from smartapply.llm import (
     JobFitDecisionEvaluation,
     MockLLMProvider,
     MotivationLetter,
-    OfferAnalysis,
+    OfferExtractionOutput,
 )
 from smartapply.offers import RawJob
 from smartapply.ranking import MockEmbeddingsProvider
@@ -62,9 +62,10 @@ def _register_llm_responses() -> None:
     MockLLMProvider.clear()
     MockLLMProvider.register(
         "job_offer_analysis",
-        OfferAnalysis(
+        OfferExtractionOutput(
             role_type="Data Scientist NLP",
             seniority="mid",
+            offer_language="fr",
             domain="HealthTech",
             main_tasks=["Build RAG pipelines", "Productionize ML services"],
             required_skills=["Python", "PyTorch", "RAG"],
@@ -646,16 +647,16 @@ def test_analysis_replaces_job_board_company_with_extracted_employer() -> None:
     MockLLMProvider.clear()
     MockLLMProvider.register(
         "job_offer_analysis",
-        OfferAnalysis(
+        OfferExtractionOutput(
             role_type="Data Scientist IA",
             seniority="mid",
+            offer_language="fr",
             domain="Industrie",
             main_tasks=["Construire des maquettes IA"],
             required_skills=["Python", "Machine Learning"],
             nice_to_have=[],
             cv_keywords_to_include=["Python", "Machine Learning"],
             extracted_company_name="EXAMPLE INDUSTRY",
-            offer_language="fr",
         ),
     )
     MockLLMProvider.register(
@@ -1436,7 +1437,7 @@ def test_application_selects_cv_then_generates_summary_and_letter_then_persists_
         "job_offer_analysis",
         "job_fit_assessment",
     ]
-    assert [call["schema"] for call in calls] == [OfferAnalysis, JobFitDecisionEvaluation]
+    assert [call["schema"] for call in calls] == [OfferExtractionOutput, JobFitDecisionEvaluation]
     assert all(call["model"] == pipeline.llm.cheap_model for call in calls)
     calls.clear()
     with session_scope() as session:
@@ -1465,7 +1466,7 @@ def test_application_selects_cv_then_generates_summary_and_letter_then_persists_
         pipeline.llm.smart_model,
         pipeline.llm.smart_model,
     ]
-    # This sentence is absent from the canned OfferAnalysis: both later stages
+    # This sentence is absent from the canned OfferExtractionOutput: both later stages
     # must receive the original offer, not merely its extracted keywords.
     for call in calls[1:]:
         assert "The product must retain source citations for clinical teams." in call["user"]

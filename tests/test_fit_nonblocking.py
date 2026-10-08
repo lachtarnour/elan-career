@@ -426,15 +426,15 @@ def test_mixed_skill_and_bullet_sources_are_allowed_without_promoting_skills():
 
 
 def test_new_offer_pipeline_saves_score_despite_malformed_annotations(isolated_db, monkeypatch):
-    from tests.test_two_stage_analysis import insert_job, offer_result, runner
+    from tests.test_two_stage_analysis import extraction_offer_result, insert_job, runner
 
     provider = OpenAIProvider()
     calls = []
 
     def api(**kwargs):
         calls.append(kwargs["response_format"]["json_schema"]["name"])
-        if calls[-1] == "OfferAnalysis":
-            return response(offer_result().model_dump_json())
+        if calls[-1] == "OfferExtractionOutput":
+            return response(extraction_offer_result().model_dump_json())
         data = evaluation_from_user(kwargs["messages"][1]["content"]).model_dump(mode="json")
         data["dimensions"]["missions"]["findings"][0]["support"] = "unknown_status"
         data["issues"] = [{"code": "unknown_code"}]
@@ -443,7 +443,7 @@ def test_new_offer_pipeline_saves_score_despite_malformed_annotations(isolated_d
     monkeypatch.setattr(provider, "_call_openai", api)
     job_id = insert_job()
     runner(provider)._analyze_one(job_id=job_id)
-    assert calls == ["OfferAnalysis", "JobFitDecisionEvaluation"]
+    assert calls == ["OfferExtractionOutput", "JobFitDecisionEvaluation"]
     with session_scope() as session:
         saved = session.get(Job, job_id).analysis
         assert saved.fit_score == 0.88 and saved.fit_diagnostics["diagnostic_checks"]["warnings"]
