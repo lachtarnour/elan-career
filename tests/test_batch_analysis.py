@@ -753,7 +753,7 @@ def test_exact_duplicate_prompts_pay_for_one_request_per_wave():
     assert counts()["paid"] == 2
 
 
-def _write_sync_cache(job_id, *, extraction=True, evaluation=False):
+def _write_sync_cache(job_id, *, extraction=True, evaluation=False, extraction_answer=None):
     profile = get_profile()
     model = get_settings().openai_model_cheap
     with session_scope() as session:
@@ -768,7 +768,7 @@ def _write_sync_cache(job_id, *, extraction=True, evaluation=False):
                     job_analysis.build_user_prompt_from_input(
                         analyzer_input=build_analyzer_input(job)
                     ),
-                    offer(),
+                    extraction_answer or offer(),
                 )
             )
         if evaluation:
@@ -817,6 +817,39 @@ def test_existing_synchronous_exact_cache_skips_extraction_batch():
     finish_next(transport, coordinator)
     assert journal(run_id)[0].state == "completed"
     assert counts()["paid"] == 1
+
+
+@pytest.mark.parametrize("from_cache", [False, True])
+def test_batch_preserves_wrapped_source_quotes_through_evaluation_and_storage(from_cache):
+    ids = seed_jobs()
+    extracted = offer()
+    source_quote = "Build machine learning models with Python."
+    extracted.supporting_excerpts = [f"« {source_quote} »"]
+    if from_cache:
+        _write_sync_cache(ids[0], extraction_answer=extracted)
+    transport = FakeTransport()
+    coordinator = BatchAnalysisCoordinator(transport=transport, pipeline=pipeline())
+    run_id = coordinator.start(ids)
+    if not from_cache:
+        custom_id = transport.requests(transport.created[-1])[0]["custom_id"]
+        finish_next(transport, coordinator, answers={custom_id: extracted})
+    item = journal(run_id)[1][0]
+    assert item.offer_data["supporting_excerpts"] == [source_quote]
+    assert item.offer_data["offer_risks"] == extracted.offer_risks
+    request = transport.requests(transport.created[-1])[0]
+    assert request["body"]["response_format"]["json_schema"]["name"] == "JobFitDecisionEvaluation"
+    assert json.dumps([source_quote]) in request["body"]["messages"][1]["content"]
+    finish_next(transport, coordinator)
+    assert journal(run_id)[0].state == "completed"
+    assert len(transport.created) == (1 if from_cache else 2)
+    assert counts()["paid"] == (1 if from_cache else 2)
+    with session_scope() as session:
+        job = session.get(Job, ids[0])
+        assert job.analysis.fit_score == 0.88
+        assert job.analysis.raw_response["supporting_excerpts"] == [source_quote]
+        assert job.analysis.raw_response["offer_risks"] == extracted.offer_risks
+        cached = session.scalar(select(LLMCache).where(LLMCache.purpose == "job_offer_analysis"))
+        assert json.loads(cached.response)["supporting_excerpts"] == extracted.supporting_excerpts
 
 
 def test_all_cached_run_completes_without_any_upload_or_batch_creation():

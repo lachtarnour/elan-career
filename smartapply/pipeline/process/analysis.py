@@ -45,17 +45,33 @@ from smartapply.profile import get_profile
 logger = get_logger(__name__)
 
 
+_EXCERPT_QUOTE_PAIRS = frozenset(
+    {('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’"), ("«", "»"), ("‹", "›"), ("„", "“")}
+)
+
+
+def _match_offer_excerpt(quote: str, body: str) -> str | None:
+    """Match source text first, then try removing paired quotation wrappers."""
+    candidate = quote.strip()
+    while candidate:
+        match = re.search(r"\s+".join(re.escape(word) for word in candidate.split()), body)
+        if match:
+            return match.group(0)
+        if len(candidate) < 2 or (candidate[0], candidate[-1]) not in _EXCERPT_QUOTE_PAIRS:
+            break
+        candidate = candidate[1:-1].strip()
+    return None
+
+
 def _ground_offer_excerpts(offer: OfferAnalysis, body: str) -> OfferAnalysis:
     """Discard unverifiable quotes and surface an offer-quality concern."""
     verified = []
     for quote in offer.supporting_excerpts:
-        if not quote.strip():
-            continue
-        match = re.search(r"\s+".join(re.escape(word) for word in quote.split()), body)
-        if match:
+        matched_text = _match_offer_excerpt(quote, body)
+        if matched_text is not None:
             # Whitespace may be normalized by the model; store the exact body
             # span so every retained excerpt remains directly verifiable.
-            verified.append(match.group(0))
+            verified.append(matched_text)
     if verified == offer.supporting_excerpts:
         return offer
     risks = list(offer.offer_risks)

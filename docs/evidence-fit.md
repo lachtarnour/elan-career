@@ -102,6 +102,16 @@ Les autres schémas de candidature gardent leurs contrôles actuels.
 Un échec de publication/contexte après lecture d'un cache valide est propagé
 sans supprimer ce cache et sans provoquer de nouvelle extraction.
 
+Le contrôle local des `supporting_excerpts` cherche d'abord la citation telle
+quelle, puis retire si nécessaire des paires de guillemets extérieurs reconnues
+(droits, français ou typographiques), y compris imbriquées. Il conserve le
+passage exact de l'annonce, avec ses espaces et ses guillemets éventuels. Les
+différences de casse, de ponctuation et les paraphrases restent rejetées ; un
+retrait réel produit toujours une observation. Ce contrôle commun couvre
+l'immédiat, le Batch, les réponses du cache et les extractions explicitement
+demandées lors d'un recalcul. Il ne change ni le prompt ni le schéma ni les clés
+du cache et ne restaure pas automatiquement les citations historiques.
+
 ## Limites et validation
 
 `tests/test_fit_decisions.py` couvre le calcul, les quatre entrées nécessaires,

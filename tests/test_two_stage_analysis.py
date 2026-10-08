@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from smartapply.config import get_settings
 from smartapply.database import session_scope
-from smartapply.database.models import Job, JobScore, JobStatus
+from smartapply.database.models import Job, JobScore, JobStatus, LLMCache
 from smartapply.filtering.hard_reject.types import HardRejectResult
 from smartapply.llm import JobAnalysis, JobFitAssessment, LLMError, OfferAnalysis, OpenAIProvider
 from smartapply.llm.prompts import job_analysis, job_fit
@@ -266,6 +266,89 @@ def test_retained_excerpt_uses_exact_source_whitespace():
     assert grounded.offer_risks == offer.offer_risks
 
 
+@pytest.mark.parametrize(
+    "quote",
+    [
+        '"Python is required."',
+        "'Python is required.'",
+        "“Python is required.”",
+        "‘Python is required.’",
+        "« Python is required. »",
+        "‹Python is required.›",
+        "„Python is required.“",
+        ' « “"Python is required."” » ',
+    ],
+)
+def test_paired_quote_wrappers_preserve_exact_source_and_extraction_facts(quote):
+    offer = offer_result()
+    offer.supporting_excerpts = [quote]
+    original = offer.model_dump()
+    body = "Python\n  is required. SQL is preferred."
+    grounded = _ground_offer_excerpts(offer, body)
+    assert grounded.supporting_excerpts == ["Python\n  is required."]
+    assert grounded.model_dump(exclude={"supporting_excerpts"}) == offer.model_dump(
+        exclude={"supporting_excerpts"}
+    )
+    assert offer.model_dump() == original
+
+
+@pytest.mark.parametrize(
+    ("quote", "body", "expected"),
+    [
+        (
+            '"Python is required."',
+            'Python is required. Then "Python is required."',
+            '"Python is required."',
+        ),
+        ("« Python is required. »", "«\nPython is required.\n»", "«\nPython is required.\n»"),
+        (
+            '« Build "Python" tools for l’équipe. »',
+            'Build "Python" tools for l’équipe.',
+            'Build "Python" tools for l’équipe.',
+        ),
+        (
+            '"Develop Python\'s ecosystem."',
+            "Develop Python's ecosystem.",
+            "Develop Python's ecosystem.",
+        ),
+    ],
+)
+def test_source_quotes_and_internal_apostrophes_are_preserved(quote, body, expected):
+    offer = offer_result()
+    offer.supporting_excerpts = [quote]
+    grounded = _ground_offer_excerpts(offer, body)
+    assert grounded.supporting_excerpts == [expected]
+    assert expected in body
+    assert grounded.offer_risks == offer.offer_risks
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        '"Kubernetes is required."',
+        '"python is required."',
+        '"Python is required!"',
+        '"Python is mandatory."',
+        '"Python is required.»',
+        '"Python is required.',
+        "Python is required.”",
+        '""',
+        "« »",
+        '« "" »',
+        "",
+        "   ",
+    ],
+)
+def test_wrapper_tolerance_does_not_accept_changed_missing_or_empty_quotes(quote):
+    offer = offer_result()
+    offer.supporting_excerpts = ["« Python is required. »", quote]
+    grounded = _ground_offer_excerpts(offer, BODY)
+    assert grounded.supporting_excerpts == ["Python is required."]
+    assert grounded.required_skills == offer.required_skills
+    assert grounded.offer_risks[:-1] == offer.offer_risks
+    assert "excluded" in grounded.offer_risks[-1]
+
+
 @pytest.mark.parametrize("failed_purpose", ["job_offer_analysis", "job_fit_assessment"])
 def test_failure_does_not_save_partial_analysis_or_mark_job_analyzed(isolated_db, failed_purpose):
     calls = []
@@ -290,13 +373,19 @@ def test_failure_does_not_save_partial_analysis_or_mark_job_analyzed(isolated_db
 
 
 @pytest.mark.parametrize("retry_after_failure", [False, True])
+@pytest.mark.parametrize("wrapped_excerpts", [False, True])
 def test_offer_cache_survives_profile_edit_or_failed_fit(
-    isolated_db, monkeypatch, retry_after_failure
+    isolated_db, monkeypatch, retry_after_failure, wrapped_excerpts
 ):
     """Exercise the real cache/provider boundary; network calls are replaced locally."""
     provider = OpenAIProvider()
     calls = []
     fail_fit_once = retry_after_failure
+    extracted = offer_result()
+    if wrapped_excerpts:
+        extracted.supporting_excerpts = [
+            f'« "{quote}" »' for quote in extracted.supporting_excerpts
+        ]
 
     def fake_api(**kwargs):
         nonlocal fail_fit_once
@@ -306,7 +395,7 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(
             fail_fit_once = False
             raise RuntimeError("Temporary matching failure")
         result = (
-            offer_result()
+            extracted
             if schema_name == "OfferAnalysis"
             else evaluation_from_user(kwargs["messages"][1]["content"])
         )
@@ -346,6 +435,8 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(
             job.analysis.raw_response["supporting_excerpts"] == offer_result().supporting_excerpts
         )
         assert job.analysis.raw_response["offer_risks"] == offer_result().offer_risks
+        cached = session.query(LLMCache).filter_by(purpose="job_offer_analysis").one()
+        assert json.loads(cached.response)["supporting_excerpts"] == extracted.supporting_excerpts
     from smartapply.pipeline.apply.cv_writer import CvWriterMixin
 
     _, restored = CvWriterMixin()._load_job_analysis(job_id)
