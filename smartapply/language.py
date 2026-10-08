@@ -111,13 +111,17 @@ def resolve_document_language(
 ) -> tuple[str, str | None]:
     """Resolve a writing language without changing the extracted offer fact.
 
-    Preserve concrete language values, including historical ones. ``other``
-    and ``unknown`` do not name a language: inspect the available announcement
-    locally, or choose the existing French document default with an observation.
+    Preserve concrete language values, including historical ones. For
+    ``mixed_fr_en``, choose French or English from the available text (French
+    on ties). ``other`` and historical ``unknown`` do not name a language:
+    inspect the announcement locally, or use the French document default.
     The default is a writing choice, not a claim about the offer's language.
     """
     language = offer_language or "fr"
     sentinel = language.strip().lower()
+    if sentinel == "mixed_fr_en":
+        selected = detect_offer_language(offer_text)
+        return selected, f"document_language_selected:{selected}:offer_language_{sentinel}"
     if sentinel not in {"other", "unknown"}:
         return language, None
     detected = detect_offer_language_confident(offer_text)

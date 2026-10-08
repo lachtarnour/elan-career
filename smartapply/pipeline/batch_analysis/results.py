@@ -5,8 +5,10 @@ from __future__ import annotations
 import copy
 import json
 from dataclasses import asdict, replace
+from typing import Literal
 
 from jsonschema import Draft202012Validator
+from pydantic import Field
 from sqlalchemy.orm import Session
 
 from smartapply.config import get_settings
@@ -51,6 +53,14 @@ from smartapply.profile import Profile, get_profile
 
 PHASE_SCHEMA = {"extraction": OfferExtractionOutput, "evaluation": JobFitDecisionEvaluation}
 PHASE_PURPOSE = {"extraction": "job_offer_analysis", "evaluation": "job_fit_assessment"}
+
+
+class _PreviousOfferExtractionOutput(OfferExtractionOutput):
+    """Read the nine-language contract only for its already-recorded requests."""
+
+    offer_language: Literal[
+        "fr", "en", "de", "es", "it", "nl", "pt", "other", "unknown"
+    ] = Field(default="unknown")
 
 
 def new_item(run_id: str, job: Job, *, session=None, model="") -> AnalysisBatchItem:
@@ -303,6 +313,15 @@ def import_result(
 
 def schema_for_request(body: dict, content: str | None = None):
     stored = body.get("response_format", {}).get("json_schema", {})
+    if stored.get("name") == OfferExtractionOutput.__name__:
+        recorded_languages = (
+            stored.get("schema", {}).get("properties", {}).get("offer_language", {}).get("enum")
+        )
+        previous_languages = _PreviousOfferExtractionOutput.model_json_schema()[
+            "properties"
+        ]["offer_language"]["enum"]
+        if recorded_languages == previous_languages:
+            return _PreviousOfferExtractionOutput
     classes = {
         model.__name__: model
         for model in (

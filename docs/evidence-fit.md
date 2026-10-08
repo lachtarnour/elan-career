@@ -14,11 +14,13 @@ Les versions du lecteur et du calcul sont `fit_decisions_reader_v2` et
 Les catégories du premier appel sont figées dans le schéma et le prompt :
 
 - `seniority` : `junior`, `mid`, `senior`, `lead`, `manager`, `mixed`, `unknown`.
-- `offer_language` : `fr`, `en`, `de`, `es`, `it`, `nl`, `pt`, `other`, `unknown`.
+- `offer_language` : `fr`, `en`, `mixed_fr_en`, `other`.
 
-`mixed` désigne plusieurs niveaux explicitement visés. `other` désigne une langue
-identifiable hors liste ; `unknown` conserve une incertitude sans deviner.
-Les langues correspondent aux codes déjà reconnus par la détection locale.
+Pour la séniorité, `mixed` désigne plusieurs niveaux explicitement visés et
+`unknown` conserve une incertitude sans deviner. Pour la langue, `mixed_fr_en`
+désigne des sections substantielles en français et en anglais, sans confondre
+les termes techniques ou les langues exigées du candidat avec la langue du texte.
+`other` couvre les autres langues, les autres mélanges et les cas indéterminables.
 Le contrat fermé s'applique à l'immédiat, au Batch et aux réextractions approuvées.
 Son nom, son schéma et son prompt produisent une nouvelle identité de cache et de
 checkpoint. Une réponse à une ancienne requête Batch garde sa clé historique :
@@ -26,7 +28,10 @@ elle ne devient pas une extraction du nouveau contrat lors de sa réception.
 Les scores historiques, les faits réutilisés pour un fit seul et les documents
 existants ne sont pas convertis. Aucun nouveau filtre de rejet n'est activé.
 
-Pour les futures lettres, `other` et `unknown` restent enregistrés tels quels.
+Pour les futures lettres, `mixed_fr_en`, `other` et l'ancien `unknown` restent
+enregistrés tels quels. Pour `mixed_fr_en`, la rédaction choisit français ou
+anglais avec la détection locale existante (français en cas d'égalité), avec
+une observation explicite.
 La langue de rédaction est résolue localement depuis le texte de l'annonce ;
 sans détection confiante, le français est un choix documentaire explicite avec
 une observation, pas une affirmation sur la langue de l'offre. Les étiquettes

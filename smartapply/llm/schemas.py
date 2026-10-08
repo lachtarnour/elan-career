@@ -116,7 +116,7 @@ class OfferAnalysis(BaseModel):
 
 
 ExtractionSeniority = Literal["junior", "mid", "senior", "lead", "manager", "mixed", "unknown"]
-ExtractionLanguage = Literal["fr", "en", "de", "es", "it", "nl", "pt", "other", "unknown"]
+ExtractionLanguage = Literal["fr", "en", "mixed_fr_en", "other"]
 
 
 class OfferExtractionOutput(OfferAnalysis):
@@ -129,10 +129,11 @@ class OfferExtractionOutput(OfferAnalysis):
         )
     )
     offer_language: ExtractionLanguage = Field(
-        default="unknown",
+        default="other",
         description=(
-            "Language the offer is written in: fr, en, de, es, it, nl or pt; "
-            "other for an identifiable language outside that list, unknown when unclear. "
+            "Language the offer is written in: fr for French, en for English, "
+            "mixed_fr_en for substantive content in both French and English; "
+            "other for any other language, other multilingual content, or unclear language. "
             "Required candidate languages do not determine the offer language."
         ),
     )

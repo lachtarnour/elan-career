@@ -49,6 +49,21 @@ class _DraftCaptured(Exception):
 
 
 @pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("Vos missions : développement. Responsibilities.", "fr"),
+        ("Vos missions. Responsibilities and requirements: apply for this role.", "en"),
+        ("Vos missions. Responsibilities.", "fr"),
+        ("", "fr"),
+    ],
+)
+def test_mixed_french_english_selects_a_document_language_with_observation(body, expected):
+    assert resolve_document_language("mixed_fr_en", body) == (
+        expected, f"document_language_selected:{expected}:offer_language_mixed_fr_en",
+    )
+
+
+@pytest.mark.parametrize(
     ("extracted_language", "body", "expected_language", "warning"),
     [
         (
@@ -56,6 +71,10 @@ class _DraftCaptured(Exception):
             "document_language_detected:en:offer_language_unknown",
         ),
         ("other", "Python SQL", "fr", "document_language_default:fr:offer_language_other"),
+        (
+            "mixed_fr_en", "Vos missions. Responsibilities and requirements: apply.", "en",
+            "document_language_selected:en:offer_language_mixed_fr_en",
+        ),
         ("it", "Python SQL", "it", None),
         ("ja", "Python SQL", "ja", None),
     ],

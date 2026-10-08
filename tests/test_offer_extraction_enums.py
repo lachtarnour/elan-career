@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import asdict
 from types import SimpleNamespace
 
@@ -13,13 +14,15 @@ from smartapply.database import session_scope
 from smartapply.database.analysis_batches import AnalysisBatchRun
 from smartapply.database.analysis_checkpoints import AnalysisCheckpoint
 from smartapply.database.models import Job
+from smartapply.database.repository.llm_cache import cache_get
 from smartapply.llm import JobAnalysis, OfferAnalysis, OfferExtractionOutput, OpenAIProvider
-from smartapply.llm.batch import build_batch_request
+from smartapply.llm.batch import BatchResult, build_batch_request
 from smartapply.llm.fit_context import build_fit_context
 from smartapply.llm.provider import LLMValidationError
 from smartapply.offers import build_analyzer_input
 from smartapply.pipeline.batch_analysis.results import (
     accept_result,
+    import_result,
     item_request,
     new_item,
     validate_request_response,
@@ -29,12 +32,12 @@ from smartapply.profile import get_profile
 from tests.test_two_stage_analysis import insert_job, offer_result
 
 SENIORITIES = ("junior", "mid", "senior", "lead", "manager", "mixed", "unknown")
-LANGUAGES = ("fr", "en", "de", "es", "it", "nl", "pt", "other", "unknown")
+LANGUAGES = ("fr", "en", "mixed_fr_en", "other")
 
 
 def output(**updates):
     return OfferExtractionOutput.model_validate(
-        {**offer_result().model_dump(), "seniority": "unknown", "offer_language": "unknown", **updates}
+        {**offer_result().model_dump(), "seniority": "unknown", "offer_language": "other", **updates}
     )
 
 
@@ -51,17 +54,18 @@ def test_every_frozen_language_is_accepted(language):
 @pytest.mark.parametrize(
     "field,value",
     [("seniority", ""), ("seniority", "expert"), ("seniority", "Senior"),
-     ("offer_language", ""), ("offer_language", "French"), ("offer_language", "ja")],
+     ("offer_language", ""), ("offer_language", "French"), ("offer_language", "ja"),
+     *[("offer_language", language) for language in ("de", "es", "it", "nl", "pt", "unknown")]],
 )
 def test_new_outputs_refuse_values_outside_the_fixed_lists(field, value):
     with pytest.raises(ValidationError):
         output(**{field: value})
 
 
-def test_language_missing_from_a_local_new_output_is_unknown_not_assumed_french():
+def test_language_missing_from_a_local_new_output_is_other_not_assumed_french():
     data = output().model_dump()
     del data["offer_language"]
-    assert OfferExtractionOutput.model_validate(data).offer_language == "unknown"
+    assert OfferExtractionOutput.model_validate(data).offer_language == "other"
 
 
 def test_legacy_offer_and_assembled_analysis_keep_their_original_values():
@@ -97,7 +101,7 @@ def test_real_immediate_provider_sends_enums_and_reuses_the_exact_cache(isolated
             system="test", user="source", schema=OfferExtractionOutput,
             purpose="job_offer_analysis",
         )
-        assert result.seniority == "unknown" and result.offer_language == "unknown"
+        assert result.seniority == "unknown" and result.offer_language == "other"
     assert len(calls) == 1
     assert_closed_request(calls[0])
 
@@ -154,3 +158,42 @@ def test_legacy_batch_source_is_not_relabeled_with_the_new_extraction_key(isolat
         assert item.analyzer_input == asdict(build_analyzer_input(job))
         assert load_extraction(session, job, current_key) is None
         assert item.offer_data == old.model_dump(mode="json")
+
+
+@pytest.mark.parametrize("language", ["de", "unknown"])
+def test_previous_nine_language_batch_retains_its_facts_cache_and_checkpoint(isolated_db, language):
+    job_id = insert_job()
+    model = get_settings().openai_model_cheap
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        run = AnalysisBatchRun(
+            id="previous-language-contract", model=model,
+            profile_data=get_profile().model_dump(mode="json"),
+        )
+        item = new_item(run.id, job)
+        session.add(run)
+        session.flush()
+        session.add(item)
+        session.flush()
+        current = item_request(item, run, "extraction", 6000)
+        body = copy.deepcopy(current.body)
+        body["response_format"]["json_schema"]["schema"]["properties"]["offer_language"].update(
+            enum=["fr", "en", "de", "es", "it", "nl", "pt", "other", "unknown"],
+            default="unknown",
+        )
+        old = OfferAnalysis.model_validate({
+            **offer_result().model_dump(), "seniority": "unknown", "offer_language": language,
+        })
+        cache_key = "recorded-nine-language-request"
+        import_result(
+            session, run, "extraction",
+            {"body": body, "cache_key": cache_key, "item_ids": [item.id]},
+            BatchResult(custom_id=current.custom_id, content=old.model_dump_json()),
+        )
+        assert item.state == "evaluation_pending" and item.error == ""
+        assert item.offer_data == old.model_dump(mode="json")
+        checkpoint = session.get(AnalysisCheckpoint, job_id)
+        assert checkpoint.extraction_key == cache_key != current.cache_key
+        assert cache_get(session, cache_key).response == old.model_dump_json()
+        assert load_extraction(session, job, current.cache_key) is None
+        assert item.analyzer_input == asdict(build_analyzer_input(job))
