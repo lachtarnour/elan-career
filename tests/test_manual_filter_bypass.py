@@ -12,7 +12,7 @@ from smartapply.database.models import Application, Job, JobDuplicateStatus
 from smartapply.desktop.classification_explanation import classification_explanation
 from smartapply.desktop.services import DesktopService
 from smartapply.filtering.manual_policy import has_manual_filter_bypass
-from smartapply.llm import JobFitAssessment, MockLLMProvider, OfferAnalysis
+from smartapply.llm import MockLLMProvider, OfferAnalysis
 from smartapply.maintenance import filter_labels
 from smartapply.offers import ManualOfferInput, RawJob
 from smartapply.pipeline import Pipeline
@@ -21,6 +21,7 @@ from smartapply.pipeline.process.analysis_admission import analysis_queue_job_id
 from smartapply.pipeline.process.filter_state import is_current_hard_reject_survivor
 from smartapply.ranking import MockEmbeddingsProvider
 from smartapply.scrapers import ManualScraper
+from tests.fit_fixtures import evaluation_from_user
 
 
 def _must_not_filter(*args, **kwargs):
@@ -112,7 +113,10 @@ def test_manual_bypass_allows_analysis_without_suppressing_fit_risks(isolated_db
                 required_skills=["Python"], main_tasks=["Build machine learning models"],
                 nice_to_have=[], cv_keywords_to_include=["Python"],
             )
-        return JobFitAssessment(fit_score=0.1, risks=["Eight years required"], match_reasons=[])
+        evaluation = evaluation_from_user(kwargs["user"], levels=(0, 0, 2))
+        for issue in evaluation.issues:
+            issue.text = "Core responsibilities are not documented"
+        return evaluation
 
     pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=SimpleNamespace(
         cheap_model="mock", complete_json=complete,
@@ -123,7 +127,12 @@ def test_manual_bypass_allows_analysis_without_suppressing_fit_risks(isolated_db
     with session_scope() as session:
         job = session.get(Job, job_id)
         assert job.archived_at is None and job.analysis.fit_score == 0.1
-        assert job.analysis.risks == ["Eight years required"]
+        assert job.analysis.risks == [
+            "Appui candidat à préciser : Core responsibilities are not documented"
+        ]
+        assert job.analysis.fit_diagnostics["used_levels"] == {
+            "missions": 0, "essentials": 0, "responsibilities": 2,
+        }
         assert has_manual_filter_bypass(job.score.components)
 
 
