@@ -1015,7 +1015,7 @@ def test_disposition_filter_rejects_non_new_statuses(isolated_db) -> None:
         service.list_jobs(status=JobStatus.ANALYZED, filter_disposition="pending_relevance")
 
 
-def test_duplicate_pending_filter_requires_both_offers_to_be_pending(isolated_db) -> None:
+def test_duplicate_active_filter_accepts_legacy_non_rejected_offers(isolated_db) -> None:
     both_parent = _job(external_id="manual:duplicate-both-parent")
     both_child = _job(external_id="manual:duplicate-both-child")
     legacy_parent = _job(external_id="manual:duplicate-legacy-parent")
@@ -1051,10 +1051,76 @@ def test_duplicate_pending_filter_requires_both_offers_to_be_pending(isolated_db
     assert {
         row.id for row in service.list_jobs(status=JobStatus.DUPLICATE_REVIEW)
     } == {both_child, legacy_child, legacy_child_child}
-    assert [row.id for row in service.list_jobs(
+    assert {row.id for row in service.list_jobs(
         status=JobStatus.DUPLICATE_REVIEW,
         only_pending_duplicates=True,
-    )] == [both_child]
+    )} == {both_child, legacy_child, legacy_child_child}
+    page = service.list_jobs_page(
+        status=JobStatus.DUPLICATE_REVIEW, only_pending_duplicates=True,
+        page=1, page_size=1,
+    )
+    assert page["total"] == 3 and len(page["rows"]) == 1
+
+
+@pytest.mark.parametrize(
+    "child_disposition,parent_disposition,child_state,parent_state,visible",
+    [
+        ("pending_relevance", "rejected", "filtered", "filtered", True),
+        ("rejected", "pending_relevance", "filtered", "filtered", True),
+        ("rejected", "rejected", "filtered", "filtered", False),
+        ("pending_relevance", "pending_relevance", "archived", "filtered", True),
+        ("pending_relevance", "pending_relevance", "filtered", "archived", True),
+        ("pending_relevance", "pending_relevance", "archived", "archived", False),
+        ("rejected", "pending_relevance", "filtered", "archived", False),
+        (None, None, "analyzed", "ready_for_form_submission", True),
+        ("rejected_history", None, "analyzed", "archived", False),
+        ("pending_relevance", "rejected", "application_archived", "filtered", False),
+        ("pending_relevance", "pending_relevance", "application_rejected", "rejected", False),
+        (None, "uncertain", "filtered", "filtered", True),
+    ],
+)
+def test_duplicate_active_filter_requires_one_non_rejected_non_archived_offer(
+    isolated_db, child_disposition, parent_disposition, child_state, parent_state, visible,
+) -> None:
+    parent_id = _job(external_id="manual:active-pair-parent")
+    child_id = _job(external_id="manual:active-pair-child")
+    with session_scope() as session:
+        for job_id, disposition, state in (
+            (child_id, child_disposition, child_state),
+            (parent_id, parent_disposition, parent_state),
+        ):
+            components = (
+                {"completed_filter_routing": {"disposition": "rejected"}}
+                if disposition == "rejected_history" else
+                {"filter_disposition": disposition} if disposition else {}
+            )
+            set_score(session, job_id, final_score=0.0, components=components)
+            job = session.get(Job, job_id)
+            if state.startswith("application_"):
+                create_or_get_application(session, job_id).status = state.removeprefix("application_")
+            else:
+                job.status = state
+            if state == "archived":
+                job.archived_at = datetime.now(timezone.utc)
+        child = session.get(Job, child_id)
+        child.possible_duplicate_of_id = parent_id
+        child.duplicate_review_status = "pending"
+
+    def snapshot():
+        with session_scope() as session:
+            return [
+                (job.id, job.status, job.archived_at, job.possible_duplicate_of_id,
+                 job.duplicate_review_status, job.score.components,
+                 job.application.status if job.application else None)
+                for job in (session.get(Job, parent_id), session.get(Job, child_id))
+            ]
+
+    before = snapshot()
+    rows = DesktopService().list_jobs(
+        status=JobStatus.DUPLICATE_REVIEW, only_pending_duplicates=True,
+    )
+    assert [row.id for row in rows] == ([child_id] if visible else [])
+    assert snapshot() == before
 
 
 def test_shortlist_filter_excludes_generated_applications(isolated_db) -> None:

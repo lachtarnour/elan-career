@@ -19,6 +19,7 @@ from smartapply.database.repository import (
     set_shortlisted,
 )
 from smartapply.filtering.hard_reject.types import HardRejectDisposition
+from smartapply.filtering.manual_policy import evaluate_or_bypass
 from smartapply.pipeline.process.analysis_admission import has_protected_workflow_history
 from smartapply.pipeline.process.filter_state import (
     current_hard_reject_disposition,
@@ -145,7 +146,7 @@ class RankingMixin:
                 )
             )
             if needs_filter:
-                result = self.filter.evaluate(job)
+                result = evaluate_or_bypass(self.filter, job)
                 filter_results[job_id] = result
                 protected_complete_rank = (
                     self._has_protected_filter_history(job)

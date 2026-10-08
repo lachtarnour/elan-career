@@ -18,9 +18,10 @@ vert pour l’envoi, ambre pour l’archivage et les avertissements.
 - Tableau Offres : grille commune aux en-têtes et aux cellules, proportions calculées sur la largeur du panneau, postes et lieux sur deux lignes au maximum. Scores IA/Match neutres sans contour, sélection légère et lignes sans séparateurs décoratifs.
 - Dans la vue Nouvelle, la colonne `Décision` remplace IA/Match. Le rejet déterministe produit seulement `Rejeté` ou `À classer`; la future classification de pertinence reste une étape séparée. L'action `Analyser (N)` ne traite que la sélection sans créer de shortlist persistante.
 - Le filtre de classe de Nouvelle propose `Toutes les classes`, `Rejeté` et `À classer`. Il s'applique à la liste complète du statut choisi, avant le tri. Le détail explique la décision enregistrée, sans recalculer la classification. Les anciennes décisions `Pertinent` et `Incertain` sont migrées vers ces deux états ; elles restent seulement dans l'historique d'audit.
-- Doublons : le filtre `Deux offres à classer` conserve uniquement les paires dont les deux offres sont `À classer`. Ce statut indique l'absence de rejet déterministe, avant l'évaluation de pertinence. Une republication confirmée devient principale, tandis que le dossier envoyé, les documents et l'historique des anciennes sources restent liés au groupe.
+- Doublons : le filtre `Au moins une offre active` conserve les paires dont au moins une offre n'est ni rejetée ni archivée, même si elle est déjà analysée ou possède un dossier. Le rejet déterministe est lu dans la décision enregistrée, y compris son historique ; le statut d'archive ou de refus tient aussi compte du dossier. Les couples dont les deux offres sont rejetées ou archivées sont masqués par ce filtre. Les doublons restent à décider avant l'analyse ; afficher une paire ne confirme pas son identité. Une republication confirmée devient principale, tandis que le dossier envoyé, les documents et l'historique des anciennes sources restent liés au groupe.
 - Les copies de contenu peuvent être regroupées dans une carte dépliable, sans confirmation ni modification des offres. L'interrupteur `Regrouper les copies` restaure immédiatement la liste par rapprochement. Chaque décision indique les deux offres concernées ; les compteurs distinguent rapprochements et cartes. Voir [les règles de dédoublonnage](duplicate-review.md).
 - Analyse : tableau à gauche, offre à droite, suivi transparent en bas avec un simple séparateur. Les détails des Batch restent sans carte ni bordure. Les libellés utilisent « analyse en cours », « Analyse n° » et « Offres de l’analyse ».
+- Dans Analyse, « Archiver (N) » archive uniquement les offres sélectionnées après confirmation. « Archiver », à côté d’« Offre d’origine », agit uniquement sur l’offre ouverte. Les analyses et journaux existants sont conservés ; une offre réservée par une analyse immédiate ou un Batch ne peut pas être archivée par ces actions. L’archivage groupé est atomique, sans suppression ni archivage automatique des copies. La sélection restante, la recherche et le contexte de la page Offres sont conservés.
 - Zoom de l’offre : sans déplacement du titre, effet immédiat et valeur initiale de 1,15 à chaque lancement.
 - Notifications : toasts superposés en haut et tâche active en bas à droite, sans modifier la géométrie du contenu.
 - Profil, descriptions, diagnostics : retour à la ligne et hauteur adaptée au contenu.
@@ -35,6 +36,10 @@ alias sont protégés pendant leur traitement, avec un motif explicite en cas de
 conflit. La navigation, les notes et les actions sur les autres offres restent disponibles.
 L’ajout manuel enregistre d’abord l’offre, puis programme sa candidature. Une shortlist
 non analysée reste une intention annulable jusqu’au succès de l’analyse.
+L’ajout manuel constitue un choix explicite de conserver l’offre : les filtres de
+rejet automatiques ne sont pas exécutés, y compris lors des traitements suivants.
+Le détail signale cette exemption sans affirmer que les critères ont été validés.
+Les contrôles de doublons, d’envoi et de réservation restent inchangés.
 
 Les changements enregistrés regroupent les actualisations sur 200 ms ; la progression
 ne recharge pas les listes. Chaque vue conserve une seule lecture active et la dernière

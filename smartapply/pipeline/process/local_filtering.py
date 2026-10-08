@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from smartapply.database import session_scope, write_session_scope
 from smartapply.database.models import Job, JobStatus
@@ -15,6 +16,11 @@ from smartapply.database.repository import (
 from smartapply.filtering.hard_reject.types import (
     HardRejectDisposition,
     HardRejectResult,
+)
+from smartapply.filtering.manual_policy import (
+    evaluate_or_bypass,
+    has_manual_filter_bypass,
+    manual_filter_bypass_result,
 )
 from smartapply.pipeline.process.audit import _rejection_audit_components
 from smartapply.pipeline.process.filter_state import MANUAL_KEEP_OVERRIDE_REASON
@@ -74,12 +80,14 @@ class LocalFilterMixin:
     ) -> bool:
         """Repair filter metadata without rewriting protected workflow history."""
 
+        previous_components = (
+            dict(job.score.components) if job.score is not None and job.score.components else {}
+        )
+        if has_manual_filter_bypass(previous_components):
+            result = manual_filter_bypass_result()
         kept, current_components = cls._filter_decision_components(
             result,
             force_keep=force_keep,
-        )
-        previous_components = (
-            dict(job.score.components) if job.score is not None and job.score.components else {}
         )
         set_score(
             session,
@@ -105,14 +113,18 @@ class LocalFilterMixin:
     ) -> bool:
         """Persist one filter decision and return whether the job was kept."""
 
+        previous_components = (
+            dict(job.score.components) if job.score is not None and job.score.components else {}
+        )
+        if has_manual_filter_bypass(previous_components):
+            # A keep choice recorded during evaluation supersedes that stale
+            # automatic result as well as future filtering passes.
+            result = manual_filter_bypass_result()
         kept, current_components = cls._filter_decision_components(
             result,
             force_keep=force_keep,
         )
 
-        previous_components = (
-            dict(job.score.components) if job.score is not None and job.score.components else {}
-        )
         components = replace_filter_components(previous_components, current_components)
         # Filtering invalidates every downstream ranking/selection artifact.
         # A later rank pass must compute a fresh score from this filter result.
@@ -153,7 +165,7 @@ class LocalFilterMixin:
             if self._persist_filter_result(
                 session,
                 job,
-                self.filter.evaluate(job),
+                evaluate_or_bypass(self.filter, job),
                 force_keep=job.id in override_ids,
                 update_pipeline_status=True,
             ):
@@ -176,7 +188,7 @@ class LocalFilterMixin:
                 Job.archived_at.is_(None), Job.status != JobStatus.ARCHIVED,
                 Job.canonical_job_id.is_(None), Job.analyzed_at.is_(None),
                 Job.filtered_at.is_(None),
-            )))
+            ).options(selectinload(Job.score))))
             if job_ids is not None:
                 selected_ids = set(job_ids)
                 pending = [job for job in pending if job.id in selected_ids]
@@ -185,7 +197,7 @@ class LocalFilterMixin:
         results = []
         for job in pending:
             check_cancelled(stop_requested)
-            results.append((int(job.id), self.filter.evaluate(job)))
+            results.append((int(job.id), evaluate_or_bypass(self.filter, job)))
         kept_ids: list[int] = []
         pending_relevance_ids: list[int] = []
         rejected_ids: list[int] = []

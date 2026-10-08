@@ -33,11 +33,11 @@ class FitEvaluationResponse:
 
 
 class _JSONObject(dict):
-    def __init__(self, pairs, *, incomplete_keys=(), unread_key=False):
+    def __init__(self, pairs, *, incomplete_keys=(), unread_key_prefix=None):
         super().__init__(pairs)
         self.variants = {}
         self.incomplete_keys = incomplete_keys
-        self.unread_key = unread_key
+        self.unread_key_prefix = unread_key_prefix
         for key, value in pairs:
             self.variants.setdefault(key, []).append(value)
 
@@ -46,8 +46,10 @@ def _variants(value, key):
     if not isinstance(value, _JSONObject):
         return [value.get(key)]
     values = list(value.variants.get(key, []))
-    # An unfinished key here could introduce another dimensions/axis/level key.
-    if key in value.incomplete_keys or value.unread_key:
+    # Only a compatible prefix can introduce another occurrence of this key.
+    if key in value.incomplete_keys or (
+        value.unread_key_prefix is not None and value.unread_key_prefix.could_match(key)
+    ):
         values.append(None)
     return values or [None]
 

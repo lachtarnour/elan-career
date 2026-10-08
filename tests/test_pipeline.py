@@ -47,6 +47,17 @@ def _isolated_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yield
 
 
+def _ingest_search_offer(*, text, title, company, location=None, application_url=None):
+    """Mock a fetched offer when testing automatic filters, not a user addition."""
+    from smartapply.pipeline.ingestor import Ingestor
+
+    return Ingestor()._persist("test_search", [RawJob(
+        external_id=f"test_search:{company}:{title}", source="test_search",
+        title=title, company=company, location=location, description=text,
+        application_url=application_url,
+    )])
+
+
 def _register_llm_responses() -> None:
     MockLLMProvider.clear()
     MockLLMProvider.register(
@@ -683,13 +694,13 @@ def test_rank_pending_scores_without_llm_analysis() -> None:
     from smartapply.pipeline import Pipeline
 
     p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
-    first = p.ingest_text(
+    first = _ingest_search_offer(
         text="Construire des modèles Machine Learning avec Python, SQL et PyTorch. CDI Paris.",
         title="Data Scientist",
         company="ScoreCo",
         location="Paris",
     )
-    second = p.ingest_text(
+    second = _ingest_search_offer(
         text="Analyser des données produit avec Python, SQL et expérimentation. CDI Lyon.",
         title="Product Data Analyst",
         company="RankCo",
@@ -792,7 +803,7 @@ def test_explicit_override_revalidates_already_ranked_current_rejection() -> Non
     from smartapply.pipeline.process.filter_state import MANUAL_KEEP_OVERRIDE_REASON
 
     pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
-    ingested = pipeline.ingest_text(
+    ingested = _ingest_search_offer(
         text="Stage de six mois en data science.",
         title="Data Scientist Stage",
         company="Override Co",
@@ -885,13 +896,13 @@ def test_nonarchived_rejected_scores_never_enter_ranking_selection() -> None:
     from smartapply.pipeline import Pipeline
 
     pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
-    survivor = pipeline.ingest_text(
+    survivor = _ingest_search_offer(
         text="Construire des modèles de machine learning avec Python. CDI à Paris.",
         title="Machine Learning Engineer",
         company="Survivor Co",
         location="Paris",
     ).job_ids[0]
-    rejected = pipeline.ingest_text(
+    rejected = _ingest_search_offer(
         text="Stage de six mois en data science.",
         title="Data Scientist Stage",
         company="Rejected Co",
@@ -1071,13 +1082,13 @@ def test_filter_pending_archives_internships_before_llm() -> None:
     from smartapply.pipeline import Pipeline
 
     p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
-    stage = p.ingest_text(
+    stage = _ingest_search_offer(
         text="Stage de six mois en data science.",
         title="Data Scientist Stage",
         company="StageCo",
         location="Paris",
     )
-    cdi = p.ingest_text(
+    cdi = _ingest_search_offer(
         text="Build ML pipelines with Python and PyTorch.",
         title="Data Scientist",
         company="GoodCo",
@@ -1109,7 +1120,7 @@ def test_filter_pending_persists_offer_for_future_relevance_classification() -> 
     from smartapply.pipeline import Pipeline
 
     p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
-    ingested = p.ingest_text(
+    ingested = _ingest_search_offer(
         text="Concevoir des architectures neurosymboliques pour l'aide à la décision.",
         title="Ingénieur en systèmes décisionnels avancés",
         company="DecisionCo",
@@ -1204,8 +1215,8 @@ def test_full_pipeline_with_mocked_dependencies() -> None:
 
     p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
 
-    # Manually ingest two different jobs (skipping the scrapers HTTP layer)
-    p.ingest_text(
+    # Mock two fetched jobs without HTTP; automatic filtering remains in scope.
+    _ingest_search_offer(
         text=(
             "Construire des pipelines RAG avec PyTorch et Hugging Face. "
             "Travailler sur du multimodal AI pour HealthTech. CDI Paris."
@@ -1215,7 +1226,7 @@ def test_full_pipeline_with_mocked_dependencies() -> None:
         location="Paris, France",
         application_url="https://example.com/jobs/42",
     )
-    p.ingest_text(
+    _ingest_search_offer(
         text="Vous gérez l'équipe commerciale. Atteindre 200% des quotas.",
         title="Sales Director",
         company="BetaSales",

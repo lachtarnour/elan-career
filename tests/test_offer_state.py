@@ -141,7 +141,9 @@ def test_pending_duplicates_cannot_make_a_completed_offer_pending_again(isolated
         recent.possible_duplicate_of_id = reference.id
         recent_id = recent.id
     service = DesktopService()
-    assert not service.list_jobs(status="duplicate_review", only_pending_duplicates=True)
+    assert [row.id for row in service.list_jobs(
+        status="duplicate_review", only_pending_duplicates=True,
+    )] == [recent_id]
     assert [row.id for row in service.list_jobs(status="duplicate_review")] == [recent_id]
     assert not service.get_job(reference.id).filter_disposition
 

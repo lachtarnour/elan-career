@@ -18,9 +18,34 @@ _DIGITS = "0123456789"
 
 
 @dataclass(frozen=True)
+class JSONKeyPrefix:
+    """Decoded characters and any unfinished escape in an interrupted key."""
+
+    decoded: str
+    pending_escape: str = ""
+
+    def could_match(self, key: str) -> bool:
+        if not key.startswith(self.decoded):
+            return False
+        if not self.pending_escape:
+            return True
+        remaining = key[len(self.decoded) :]
+        if not remaining:
+            return False
+        if self.pending_escape == "\\":
+            # Any next character can still be encoded with a Unicode escape.
+            return True
+        codepoint = ord(remaining[0])
+        if codepoint > 0xFFFF:
+            codepoint = 0xD800 + ((codepoint - 0x10000) >> 10)
+        return f"{codepoint:04x}".startswith(self.pending_escape[2:].lower())
+
+
+@dataclass(frozen=True)
 class _Value:
     value: Any = _MISSING
     complete: bool = False
+    key_prefix: JSONKeyPrefix | None = None
 
 
 class _PrefixReader:
@@ -74,9 +99,10 @@ class _PrefixReader:
                 raise ValueError("Invalid JSON string control character")
             if char != "\\":
                 continue
+            escape_start = self.position - 1
             escape = self.peek()
             if not escape:
-                return _Value()
+                return self.unfinished_string(start, escape_start)
             self.position += 1
             if escape == "u":
                 digits = self.text[self.position : self.position + 4]
@@ -84,10 +110,16 @@ class _PrefixReader:
                     raise ValueError("Invalid JSON unicode escape")
                 self.position += len(digits)
                 if len(digits) < 4:
-                    return _Value()
+                    return self.unfinished_string(start, escape_start)
             elif escape not in '\\"/bfnrt':
                 raise ValueError("Invalid JSON escape")
-        return _Value()
+        return self.unfinished_string(start, self.position)
+
+    def unfinished_string(self, start: int, escape_start: int) -> _Value:
+        # Decode only complete characters; never complete the pending escape.
+        decoded = json.loads(self.text[start:escape_start] + '"')
+        pending_escape = self.text[escape_start : self.position]
+        return _Value(key_prefix=JSONKeyPrefix(decoded, pending_escape))
 
     def number(self) -> _Value:
         start = self.position
@@ -126,7 +158,7 @@ class _PrefixReader:
     def object(self) -> _Value:
         self.position += 1
         pairs, incomplete_keys = [], []
-        unread_key = False
+        unread_key_prefix = None
         self.whitespace()
         if self.peek() == "}":
             self.position += 1
@@ -136,7 +168,7 @@ class _PrefixReader:
                 raise ValueError("Invalid JSON object key")
             key = self.string()
             if not key.complete:
-                unread_key = True
+                unread_key_prefix = key.key_prefix
                 break
             self.whitespace()
             if not self.peek():
@@ -164,7 +196,9 @@ class _PrefixReader:
             self.position += 1
             self.whitespace()
         return _Value(
-            self.object_factory(pairs, incomplete_keys=incomplete_keys, unread_key=unread_key)
+            self.object_factory(
+                pairs, incomplete_keys=incomplete_keys, unread_key_prefix=unread_key_prefix
+            )
         )
 
     def array(self) -> _Value:

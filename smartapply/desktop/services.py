@@ -19,7 +19,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import joinedload, load_only, undefer
 from sqlalchemy.orm.attributes import set_committed_value
 
-from smartapply.concurrency import job_operation
+from smartapply.concurrency import TaskConflictError, job_operation
 from smartapply.config import ENV_FILE, get_settings, get_source_settings
 from smartapply.database import init_db, session_scope, write_session_scope
 from smartapply.database.display_metadata import display_metadata_current
@@ -70,6 +70,7 @@ from smartapply.jobsearch.offer_state import (
 from smartapply.jobsearch.offer_state import (
     completed_offer_expression,
     offer_state,
+    recorded_filter_disposition,
 )
 from smartapply.jobsearch.offer_state import (
     is_reusable_reservation as _is_reusable_reservation,
@@ -787,7 +788,7 @@ class DesktopService(AnalysisServiceMixin):
                     if not self._duplicate_pair_is_fully_archived(session, job)
                     and (
                         not only_pending_duplicates
-                        or self._duplicate_pair_is_pending(session, job)
+                        or self._duplicate_pair_has_active_offer(session, job)
                     )
                 ]
                 total = len(jobs)
@@ -941,17 +942,23 @@ class DesktopService(AnalysisServiceMixin):
         )
 
     @staticmethod
-    def _duplicate_pair_is_pending(session, job: Job) -> bool:
-        """Keep a review pair only when both offers still await classification."""
+    def _duplicate_pair_has_active_offer(session, job: Job) -> bool:
+        """Keep an unresolved pair if either offer is neither rejected nor archived.
+
+        Completed offers remain eligible: analysis or a prepared dossier does
+        not remove the need to resolve a duplicate. Read historical filter
+        evidence too, without recalculating or changing either offer.
+        """
         if job.possible_duplicate_of_id is None:
             return False
         candidate = canonical_job(session, int(job.possible_duplicate_of_id))
         if candidate is None:
             return False
-        return all(
-            offer_state(offer).awaits_classification
-            and offer.score is not None
-            and (offer.score.components or {}).get("filter_disposition") == "pending_relevance"
+        return any(
+            offer_state(offer).workflow_status not in {JobStatus.ARCHIVED, JobStatus.REJECTED}
+            and recorded_filter_disposition(
+                offer.score.components if offer.score is not None else None
+            ) != FilterDisposition.REJECTED.value
             for offer in (job, candidate)
         )
 
@@ -1943,18 +1950,42 @@ class DesktopService(AnalysisServiceMixin):
             job = session.get(Job, job_id)
             if job is None:
                 return
-            components = (
-                dict(job.score.components) if job.score is not None and job.score.components else {}
-            )
-            components.update(
-                {
-                    "rejection_stage": "manual",
-                    "rejection_reasons": ["manual_archive"],
-                    "rejection_summary": "manual_archive",
-                }
-            )
-            set_score(session, job_id, components=components)
-            mark_archived(session, job_id)
+            self._archive_job_in_session(session, job)
+
+    def archive_analysis_offers(self, job_ids: list[int]) -> list[int]:
+        """Archive the exact selection atomically, without touching analysis journals."""
+        from smartapply.pipeline.process.analysis_admission import reserved_analysis_job_ids
+
+        ids = list(dict.fromkeys(int(value) for value in job_ids if int(value) > 0))
+        if not ids:
+            return []
+        with job_operation(ids, operation="archivage"), write_session_scope() as session:
+            reserved = reserved_analysis_job_ids(session)
+            for job_id in ids:
+                if job_id in reserved:
+                    raise TaskConflictError(job_id, "analyse Batch")
+            archived = []
+            for job_id in ids:
+                job = session.get(Job, job_id)
+                if job is not None and offer_state(job).workflow_status != JobStatus.ARCHIVED:
+                    self._archive_job_in_session(session, job)
+                    archived.append(job_id)
+            return archived
+
+    @staticmethod
+    def _archive_job_in_session(session, job: Job) -> None:
+        components = (
+            dict(job.score.components) if job.score is not None and job.score.components else {}
+        )
+        components.update(
+            {
+                "rejection_stage": "manual",
+                "rejection_reasons": ["manual_archive"],
+                "rejection_summary": "manual_archive",
+            }
+        )
+        set_score(session, job.id, components=components)
+        mark_archived(session, job.id)
 
     def delete_ready_offer(self, job_id: int):
         from smartapply.desktop.offer_deletion import delete_ready_offer
