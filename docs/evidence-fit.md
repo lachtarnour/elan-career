@@ -29,10 +29,10 @@ Les scores historiques, les faits réutilisés pour un fit seul et les documents
 existants ne sont pas convertis. Aucun nouveau filtre de rejet n'est activé.
 
 Pour les futures lettres, `mixed_fr_en`, `other` et l'ancien `unknown` restent
-enregistrés tels quels. Pour `mixed_fr_en`, la rédaction choisit français ou
-anglais avec la détection locale existante (français en cas d'égalité), avec
-une observation explicite.
-La langue de rédaction est résolue localement depuis le texte de l'annonce ;
+enregistrés tels quels. Pour `mixed_fr_en`, la lettre est toujours rédigée en
+français, avec une observation explicite, même si l'annonce contient davantage
+d'anglais. Pour `other` et l'ancien `unknown`, la langue de rédaction est
+résolue localement depuis le texte de l'annonce ;
 sans détection confiante, le français est un choix documentaire explicite avec
 une observation, pas une affirmation sur la langue de l'offre. Les étiquettes
 HTML des lettres restent limitées au français et à l'anglais comme auparavant.
