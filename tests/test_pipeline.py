@@ -18,7 +18,7 @@ from smartapply.llm import (
     ApplicationTexts,
     CVSelection,
     DocumentTextReview,
-    JobFitEvaluation,
+    JobFitDecisionEvaluation,
     MockLLMProvider,
     MotivationLetter,
     OfferAnalysis,
@@ -1436,7 +1436,7 @@ def test_application_selects_cv_then_generates_summary_and_letter_then_persists_
         "job_offer_analysis",
         "job_fit_assessment",
     ]
-    assert [call["schema"] for call in calls] == [OfferAnalysis, JobFitEvaluation]
+    assert [call["schema"] for call in calls] == [OfferAnalysis, JobFitDecisionEvaluation]
     assert all(call["model"] == pipeline.llm.cheap_model for call in calls)
     calls.clear()
     with session_scope() as session:

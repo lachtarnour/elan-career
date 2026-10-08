@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 
 import pytest
@@ -19,7 +19,7 @@ from smartapply.database.analysis_batches import (
 from smartapply.database.models import Job, JobAnalysis, JobScore, LLMCache, LLMUsage
 from smartapply.database.repository.llm_cache import cache_set
 from smartapply.filtering.hard_reject.types import HardRejectResult
-from smartapply.llm import JobFitEvaluation, MockLLMProvider, OfferAnalysis
+from smartapply.llm import JobFitDecisionEvaluation, MockLLMProvider, OfferAnalysis
 from smartapply.llm.batch import BatchResult, BatchSnapshot
 from smartapply.llm.cache import make_cache_key
 from smartapply.llm.prompts import job_analysis, job_fit
@@ -517,7 +517,7 @@ def test_retry_failed_evaluation_reuses_successful_extraction():
     coordinator.retry(run_id)
     assert len(transport.created) == 3
     request = transport.requests(transport.created[-1])[0]
-    assert request["body"]["response_format"]["json_schema"]["name"] == "JobFitEvaluation"
+    assert request["body"]["response_format"]["json_schema"]["name"] == "JobFitDecisionEvaluation"
     finish_next(transport, coordinator)
     assert journal(run_id)[0].state == "completed"
     assert counts()["analyses"] == 1
@@ -772,15 +772,18 @@ def _write_sync_cache(job_id, *, extraction=True, evaluation=False):
                 )
             )
         if evaluation:
+            fit_user = job_fit.build_user_prompt(
+                profile=profile,
+                offer_analysis=offer(),
+                extraction_provenance={"analyzer_input": asdict(build_analyzer_input(job))},
+            )
             requests.append(
                 (
                     "job_fit_assessment",
-                    JobFitEvaluation,
+                    JobFitDecisionEvaluation,
                     job_fit.build_system_prompt(),
-                    job_fit.build_user_prompt(profile=profile, offer_analysis=offer()),
-                    evaluation_from_user(
-                        job_fit.build_user_prompt(profile=profile, offer_analysis=offer())
-                    ),
+                    fit_user,
+                    evaluation_from_user(fit_user),
                 )
             )
         for purpose, schema, system, user, answer in requests:

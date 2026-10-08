@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from smartapply.llm.fit_response import FitEvaluationResponse, read_fit_response
 from smartapply.llm.provider import LLMError, LLMProvider
-from smartapply.llm.schemas import JobFitEvaluation
+from smartapply.llm.schemas import JobFitDecisionEvaluation, JobFitEvaluation
 
 T = TypeVar("T", bound=BaseModel)
 MockResponse = BaseModel | FitEvaluationResponse | dict | str
@@ -75,8 +75,8 @@ class MockLLMProvider(LLMProvider):
             response = response(
                 system=system, user=user, schema=schema, purpose=purpose, job_id=job_id
             )
-        if schema is JobFitEvaluation:
-            return read_fit_response(response)
+        if schema in {JobFitEvaluation, JobFitDecisionEvaluation}:
+            return read_fit_response(response, schema=schema)
         if not isinstance(response, schema):
             raise LLMError(
                 f"Registered response type {type(response).__name__} does not "

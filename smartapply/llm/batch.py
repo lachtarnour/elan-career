@@ -19,7 +19,7 @@ from smartapply.llm.cache import make_cache_key
 from smartapply.llm.fit_response import FitEvaluationResponse, read_fit_response
 from smartapply.llm.openai_provider import OpenAIProvider, _to_strict_schema
 from smartapply.llm.provider import LLMError, LLMValidationError
-from smartapply.llm.schemas import JobFitEvaluation
+from smartapply.llm.schemas import JobFitDecisionEvaluation, JobFitEvaluation
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -279,8 +279,11 @@ class BatchResult:
 
     def validate(self, schema: type[T]) -> T | FitEvaluationResponse:
         if not self.successful:
-            if schema is JobFitEvaluation and self.error_code in {"refusal", "incomplete_output"}:
-                parsed = read_fit_response(self.content)
+            if schema in {JobFitEvaluation, JobFitDecisionEvaluation} and self.error_code in {
+                "refusal",
+                "incomplete_output",
+            }:
+                parsed = read_fit_response(self.content, schema=schema)
                 return replace(
                     parsed,
                     observations=parsed.observations

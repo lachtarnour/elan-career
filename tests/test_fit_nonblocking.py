@@ -16,7 +16,8 @@ from smartapply.database.repository.llm_cache import cache_set
 from smartapply.llm import JobFitEvaluation, OpenAIProvider
 from smartapply.llm.batch import BatchResult, parse_results
 from smartapply.llm.cache import make_cache_key
-from smartapply.llm.fit_context import POLICY, build_fit_user
+from smartapply.llm.fit_context import LEGACY_POLICY as POLICY
+from smartapply.llm.fit_context import build_fit_user
 from smartapply.llm.fit_request import complete_fit
 from smartapply.llm.fit_response import read_fit_response
 from smartapply.llm.fit_scoring import calculate_fit_score, evaluate_fit
@@ -24,7 +25,7 @@ from smartapply.llm.provider import LLMValidationError
 from smartapply.pipeline.batch_analysis.results import accept_cache, import_result
 from smartapply.pipeline.process.analysis import _assemble_analysis, persist_job_analysis
 from smartapply.pipeline.rescore import execute_rescore_plan, prepare_rescore_plan
-from tests.fit_fixtures import evaluation_from_user
+from tests.fit_fixtures import decision_response, evaluation_from_user
 from tests.test_batch_analysis import seed_jobs
 from tests.test_evidence_fit import batch_fixture, fixture, seeded_analysis, snapshot
 
@@ -358,7 +359,7 @@ def test_approved_rescore_preserves_previous_result_only_when_levels_unusable(is
     before = snapshot(job_id)
     plan = prepare_rescore_plan(job_ids=[job_id])
     calls = []
-    raw = minimal() if usable else {"fit_score": 0.99}
+    raw = decision_response() if usable else {"fit_score": 0.99}
 
     def complete(**kwargs):
         calls.append(kwargs["purpose"])
@@ -442,7 +443,7 @@ def test_new_offer_pipeline_saves_score_despite_malformed_annotations(isolated_d
     monkeypatch.setattr(provider, "_call_openai", api)
     job_id = insert_job()
     runner(provider)._analyze_one(job_id=job_id)
-    assert calls == ["OfferAnalysis", "JobFitEvaluation"]
+    assert calls == ["OfferAnalysis", "JobFitDecisionEvaluation"]
     with session_scope() as session:
         saved = session.get(Job, job_id).analysis
         assert saved.fit_score == 0.88 and saved.fit_diagnostics["diagnostic_checks"]["warnings"]

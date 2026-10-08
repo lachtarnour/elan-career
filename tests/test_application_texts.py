@@ -147,3 +147,49 @@ def test_invalid_cv_structure_prevents_second_llm_call(text_inputs, invalid_part
         writer.generate_texts(cv, analysis, **context)
 
     provider.complete_json.assert_not_called()
+
+
+def test_fit_revision_preserves_nonfit_generation_inputs(text_inputs):
+    from smartapply.llm.prompts import (
+        application_draft,
+        application_texts,
+        cv_adaptation,
+        motivation_letter,
+    )
+
+    profile, cv, analysis, context = text_inputs
+    old = analysis.model_copy(
+        update={
+            "fit_score": 0.2,
+            "match_reasons": ["OLD_REASON"],
+            "risks": ["OLD_RISK"],
+        }
+    )
+    new = analysis.model_copy(
+        update={
+            "fit_score": 0.95,
+            "match_reasons": ["NEW_REASON"],
+            "risks": ["NEW_RISK"],
+        }
+    )
+    common = {key: context[key] for key in ("job_title", "job_company", "job_description")}
+    selection = dict(
+        profile=profile,
+        selected_experiences=profile.experiences,
+        selected_projects=profile.projects,
+        **common,
+    )
+    assert cv_adaptation.build_user_prompt(
+        analysis=old, **selection
+    ) == cv_adaptation.build_user_prompt(analysis=new, **selection)
+    for prompt in (application_texts, motivation_letter):
+        args = dict(profile=profile, adapted_cv=cv, reference_date=date(2026, 10, 8), **common)
+        assert prompt.build_user_prompt(analysis=old, **args) == prompt.build_user_prompt(
+            analysis=new, **args
+        )
+    # This existing consumer legitimately sees updated reasons/risks, and nothing else changes.
+    old_prompt = application_draft.build_user_prompt(analysis=old, **selection)
+    new_prompt = application_draft.build_user_prompt(analysis=new, **selection)
+    assert old_prompt == new_prompt.replace("NEW_REASON", "OLD_REASON").replace(
+        "NEW_RISK", "OLD_RISK"
+    )

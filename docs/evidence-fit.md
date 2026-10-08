@@ -1,4 +1,133 @@
-# Évaluation de pertinence `evidence_fit_v5`
+# Évaluation de pertinence `evidence_fit_v6`
+
+## Contrat envoyé et source figée
+
+Le premier appel reste `OfferAnalysis` : prompt, schéma, champs, clé de cache,
+checkpoints et sauvegarde inchangés. L'unique deuxième appel utilise
+`JobFitDecisionEvaluation` (`job_fit_evaluation_v2`), le prompt
+`llm/prompts/templates/job_fit/system.j2` et le template `user.j2` de ce dossier.
+Les versions du lecteur et du calcul sont `fit_decisions_reader_v2` et
+`evidence_fit_calculation_v3`.
+
+Le corps normalisé `offer_body` issu de la provenance figée est transmis une
+seule fois avec les métadonnées déjà fournies à l'extraction. `fit_source` conserve
+sa disponibilité explicite, sa référence `offer_source:body`, son texte et son
+empreinte. La source est sauvegardée par offre, sans entrer dans le fingerprint
+candidat global. En absence de source, le modèle dispose des faits et extraits ;
+aucune réextraction implicite n'est demandée. Les protections d'association de
+`reusable_offer` et `_source_matches` restent en place.
+
+L'annonce peut expliciter une option, une alternative ou une condition que les
+faits structurés ont mal restituée. Le modèle conserve la citation et son
+interprétation dans `offer_interpretations`, sans corriger les champs partagés.
+La validation de citation et la couverture sont uniquement consultatives.
+
+## Quatre décisions nécessaires
+
+Le nouveau minimum est **trois décisions d'axe plus `preference_conflict`**.
+Un quatrième champ absent n'est remplacé ni par `none` ni par `unknown` ; aucune
+nouvelle note n'est publiée, l'ancienne évaluation réussie reste intacte. Cette
+règle remplace « trois niveaux suffisent » uniquement pour le nouveau contrat.
+
+```json
+{
+  "decision": {
+    "missions": "strong_fit",
+    "essentials": "strong_fit",
+    "responsibilities": "credible_limited_adaptation",
+    "preference_conflict": "unknown"
+  },
+  "dimensions": {
+    "missions": {"findings": []},
+    "essentials": {"findings": []},
+    "responsibilities": {"findings": []}
+  },
+  "issues": [],
+  "neutral_offer_refs": [],
+  "offer_interpretations": []
+}
+```
+
+Ce JSON synthétique donne 95 %, avec observations sur les annotations absentes.
+L'enveloppe est placée avant les annotations pour permettre la récupération
+après une coupure. Le parseur de JSON partiel existant n'est pas modifié ; le
+lecteur traite les doublons, les préfixes de clés échappées et les décisions
+réellement absentes, hors enum ou contradictoires sans inventer de valeur.
+
+| État | Niveau dérivé |
+| --- | --- |
+| `very_low_support` | 0 |
+| `weak_support` | 1 |
+| `partial_core_fit` | 2 |
+| `credible_material_question` | 3, avec plafond 0,79 |
+| `credible_limited_adaptation` | 3 |
+| `strong_fit` | 4 |
+
+Python calcule `(50 × missions + 30 × essentials + 20 × responsibilities) / 400`,
+applique le minimum avec les plafonds (missions ≤ 1 : 0,39 ; un axe ≤ 2 : 0,59 ;
+question matérielle : 0,79 ; conflit de préférence confirmé : 0,19), puis un seul
+arrondi `Decimal / ROUND_HALF_UP` à 0,01. `unknown` n'impose pas 0,19.
+Les anciens codes injectés dans une annotation n'ont aucune autorité numérique.
+Les références, preuves, neutralisations, couverture, citations et explications
+ne modifient jamais les décisions ou le résultat et ne provoquent aucune relance.
+Les exceptions des vérificateurs et convertisseurs restent des observations.
+
+## Raccordements et sauvegarde
+
+- `build_fit_context` sélectionne prompt, template, schéma et politique versionnés.
+- `build_fit_user` et `complete_fit` utilisent les mêmes faits et la même source
+  immuables ; le budget vérifie le schéma réellement envoyé, sans troncature.
+- Le Batch utilise la source `item.analyzer_input` pour la requête, la comparaison
+  à l'import et le diagnostic. Le lecteur est sélectionné par schéma enregistré.
+- Le cache existant dépend des messages et du schéma : aucun cache parallèle.
+- Le recalcul autorisé conserve son plan figé et vérifie la source dans
+  `already_compatible`. Il écrit atomiquement les seules données du fit : score,
+  raisons, risques, diagnostic et leurs copies publiques dans `raw_response`.
+- Une raison positive par axe est retenue si elle existe, avant de compléter
+  jusqu'à cinq raisons distinctes. Les qualifications des preuves sont conservées.
+
+Les templates v5 sont conservés dans `templates/job_fit_v5`. Les anciens contextes
+rendent leur template figé sans nouveau bloc source ; les lecteurs/calculs
+historiques ne remappent pas les anciennes réponses en décisions v6.
+
+## Acceptation de l'extraction : référence fixée de main
+
+Les deux durcissements par rapport à `main` **6a9309d** sont retirés pour
+`OfferAnalysis` uniquement : en immédiat, le contenu valide selon Pydantic décide
+de l'acceptation, sans nouveau veto `finish_reason/refusal` ; à l'import et dans
+le cache Batch, la couche JSON Schema supplémentaire ne rejette plus un champ
+omis disposant d'une valeur par défaut Pydantic. Le Batch continue de rejeter
+les erreurs de transport, refus et sorties signalées incomplètes comme dans main.
+Les autres schémas de candidature gardent leurs contrôles actuels.
+Un échec de publication/contexte après lecture d'un cache valide est propagé
+sans supprimer ce cache et sans provoquer de nouvelle extraction.
+
+## Limites et validation
+
+`tests/test_fit_decisions.py` couvre le calcul, les quatre entrées nécessaires,
+les troncatures et doublons, le non-blocage, les sources et versions, le routage
+immédiat/Batch/cache, la sauvegarde et les comportements d'extraction de la
+référence fixée. Les tests historiques continuent de vérifier leurs anciens
+codes/plafonds. Les tests de candidature vérifient leurs contrats existants.
+
+Ces tests utilisent exclusivement des diagnostics simulés. Ils prouvent le
+fonctionnement du code et les données envoyées, pas une amélioration mesurée du
+jugement LLM. Une extraction historique erronée reste inchangée pour les autres
+consommateurs. Les ex æquo et la zone inaccessible 60–74 % subsistent. Les raisons
+corrigées pourront influencer les appels futurs qui les utilisent, notamment
+`application_draft` et `motivation_letter_repair`, sans régénération automatique.
+Aucune migration, ouverture d'application ou nouvelle version ne lance de
+recalcul, import ou génération. Les 589 anciennes réponses ne mesurent pas v6.
+
+Validation locale du 8 octobre 2026 : `make check` réussi, **2 713 tests**
+(hors marqueurs `integration` et `llm`) et Ruff sans erreur ; `git diff --check`
+réussi. Aucun appel fournisseur réel, recalcul historique, import en production,
+régénération de candidature réelle ou rebuild n'a été lancé pour cette révision.
+
+---
+
+## Documentation historique — v5 (ne décrit pas le nouveau contrat)
+
 
 ## Fonctionnement
 

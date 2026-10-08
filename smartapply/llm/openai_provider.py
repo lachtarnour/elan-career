@@ -21,7 +21,7 @@ from smartapply.database.repository import (
 from smartapply.llm.cache import make_cache_key
 from smartapply.llm.fit_response import FitEvaluationResponse, read_fit_response
 from smartapply.llm.provider import LLMError, LLMProvider, LLMValidationError
-from smartapply.llm.schemas import JobFitEvaluation
+from smartapply.llm.schemas import JobFitDecisionEvaluation, JobFitEvaluation, OfferAnalysis
 from smartapply.llm.usage import estimate_cost_usd
 from smartapply.logging_setup import get_logger
 
@@ -243,7 +243,7 @@ class OpenAIProvider(LLMProvider):
                 if refusal:
                     observations.append("Provider refusal flag; usable levels retained")
                 validated = replace(validated, observations=observations)
-            else:
+            elif schema is not OfferAnalysis:
                 if finish not in {None, "stop"}:
                     raise LLMValidationError("Incomplete LLM response; no evaluation published")
                 if refusal:
@@ -294,8 +294,8 @@ class OpenAIProvider(LLMProvider):
 
     @staticmethod
     def _validate(raw: str, schema: type[T]) -> T | FitEvaluationResponse:
-        if schema is JobFitEvaluation:
-            return read_fit_response(raw)
+        if schema in {JobFitEvaluation, JobFitDecisionEvaluation}:
+            return read_fit_response(raw, schema=schema)
         try:
             return schema.model_validate(json.loads(raw))
         except (json.JSONDecodeError, ValidationError) as e:

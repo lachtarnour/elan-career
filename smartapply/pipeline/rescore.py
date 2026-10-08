@@ -15,7 +15,12 @@ from smartapply.config import get_settings
 from smartapply.database import session_scope, write_session_scope
 from smartapply.database.analysis_batches import AnalysisBatchItem
 from smartapply.database.models import Job, JobStatus
-from smartapply.llm.fit_context import build_fit_context, context_is_current, fingerprint
+from smartapply.llm.fit_context import (
+    build_fit_context,
+    context_is_current,
+    fingerprint,
+    fit_source,
+)
 from smartapply.llm.fit_request import complete_fit
 from smartapply.llm.prompts import job_analysis
 from smartapply.llm.schemas import JobAnalysis, OfferAnalysis
@@ -196,6 +201,7 @@ def prepare_rescore_plan(
                 and offer is not None
                 and diagnostics.get("offer_fingerprint")
                 == fingerprint(offer.model_dump(mode="json"))
+                and diagnostics.get("source_fingerprint") == fit_source(provenance)["fingerprint"]
             )
             operation = (
                 "already_compatible"
@@ -216,6 +222,7 @@ def prepare_rescore_plan(
                     "analysis_fingerprint": _analysis_key(job),
                     "offer_facts": offer.model_dump(mode="json") if offer else None,
                     "extraction_provenance": provenance,
+                    "source_fingerprint": fit_source(provenance)["fingerprint"],
                     "analyzer_input": asdict(build_analyzer_input(job)),
                     "extraction_user": job_analysis.build_user_prompt_from_input(
                         analyzer_input=build_analyzer_input(job)

@@ -302,7 +302,7 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(
         nonlocal fail_fit_once
         schema_name = kwargs["response_format"]["json_schema"]["name"]
         calls.append((schema_name, kwargs))
-        if schema_name == "JobFitEvaluation" and fail_fit_once:
+        if schema_name == "JobFitDecisionEvaluation" and fail_fit_once:
             fail_fit_once = False
             raise RuntimeError("Temporary matching failure")
         result = (
@@ -328,7 +328,11 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(
     # An explicit internal rerun can reuse extraction; normal analyze_jobs still
     # skips history and never silently rewrites a previously displayed score.
     instance._analyze_one(job_id=job_id)
-    assert [name for name, _ in calls] == ["OfferAnalysis", "JobFitEvaluation", "JobFitEvaluation"]
+    assert [name for name, _ in calls] == [
+        "OfferAnalysis",
+        "JobFitDecisionEvaluation",
+        "JobFitDecisionEvaluation",
+    ]
     assert all(kwargs["model"] == "gpt-5.4-mini" for _, kwargs in calls)
     assert "NEW_DECLARED_SKILL" not in calls[0][1]["messages"][1]["content"]
     if not retry_after_failure:

@@ -10,14 +10,12 @@ from typing import Any
 
 from smartapply.config import get_settings
 from smartapply.llm.prompts.loader import load_prompt
-from smartapply.llm.schemas import JobFitEvaluation, OfferAnalysis
+from smartapply.llm.schemas import JobFitDecisionEvaluation, JobFitEvaluation, OfferAnalysis
 from smartapply.profile import Bullet, Profile
 
-POLICY_VERSION = "evidence_fit_v5"
-CALCULATION_VERSION = "evidence_fit_calculation_v2"
-POLICY = {
-    "version": POLICY_VERSION,
-    "calculation_version": CALCULATION_VERSION,
+LEGACY_POLICY = {
+    "version": "evidence_fit_v5",
+    "calculation_version": "evidence_fit_calculation_v2",
     "weights": [50, 30, 20],
     "caps": {
         "confirmed_constraint_conflict": "0.19",
@@ -30,6 +28,63 @@ POLICY = {
     "rounding": "ROUND_HALF_UP:0.01",
     "diagnostic_checks": "advisory",
 }
+POLICY_VERSION = "evidence_fit_v6"
+CALCULATION_VERSION = "evidence_fit_calculation_v3"
+DECISION_LEVELS = {
+    "very_low_support": 0,
+    "weak_support": 1,
+    "partial_core_fit": 2,
+    "credible_material_question": 3,
+    "credible_limited_adaptation": 3,
+    "strong_fit": 4,
+}
+POLICY = {
+    "version": POLICY_VERSION,
+    "calculation_version": CALCULATION_VERSION,
+    "weights": [50, 30, 20],
+    "decision_levels": DECISION_LEVELS,
+    "caps": {"material_core_question": "0.79", "confirmed_preference_conflict": "0.19"},
+    "guards": {"missions_le_1": "0.39", "any_dimension_le_2": "0.59"},
+    "rounding": "ROUND_HALF_UP:0.01",
+    "diagnostic_checks": "advisory",
+}
+
+
+def fit_schema(context: dict):
+    """Select the actual generation contract, including frozen legacy requests."""
+    version = context.get("schema_version")
+    if version == "job_fit_evaluation_v1":
+        return JobFitEvaluation
+    if version == "job_fit_evaluation_v2":
+        return JobFitDecisionEvaluation
+    raise ValueError(f"Unknown fit schema version: {version}")
+
+
+def fit_source(provenance: dict | None) -> dict:
+    """Snapshot only the source actually associated with the retained extraction."""
+    analyzer = (provenance or {}).get("analyzer_input")
+    analyzer = analyzer if isinstance(analyzer, dict) else {}
+    body = analyzer.get("offer_body")
+    available = isinstance(body, str) and bool(body.strip())
+    source = {
+        "available": available,
+        "reference": "offer_source:body",
+        "offer_body": body if available else "",
+        "metadata": {
+            key: copy.deepcopy(analyzer[key])
+            for key in (
+                "title",
+                "company",
+                "location",
+                "application_url",
+                "source",
+                "source_metadata",
+            )
+            if key in analyzer
+        },
+    }
+    source["fingerprint"] = fingerprint(source)
+    return source
 
 
 def fingerprint(value: Any) -> str:
@@ -164,23 +219,29 @@ def offer_references(offer: OfferAnalysis) -> dict:
     return refs
 
 
-def build_fit_context(profile: Profile, model: str, *, max_completion_tokens=None) -> dict:
+def build_fit_context(
+    profile: Profile, model: str, *, max_completion_tokens=None, version=POLICY_VERSION
+) -> dict:
     from smartapply.llm.openai_provider import _to_strict_schema
 
     settings = get_settings()
     facts = copy.deepcopy(candidate_facts(profile))
+    if version not in {POLICY_VERSION, LEGACY_POLICY["version"]}:
+        raise ValueError(f"Unknown fit policy: {version}")
+    legacy = version == LEGACY_POLICY["version"]
+    template = "job_fit_v5" if legacy else "job_fit"
     result = {
-        "policy": json.loads(json.dumps(POLICY)),
+        "policy": copy.deepcopy(LEGACY_POLICY if legacy else POLICY),
         "candidate_facts": facts,
         "candidate_refs": candidate_references(facts),
         "declared_experience": settings.declared_experience,
         "declared_experience_source": "settings.declared_experience",
-        "system_prompt": load_prompt("job_fit/system.j2"),
-        "user_template": load_prompt("job_fit/user.j2"),
-        "prompt_version": "evidence_fit_v5",
-        "schema_version": "job_fit_evaluation_v1",
-        "response_reader_version": "fit_levels_reader_v1",
-        "schema": _to_strict_schema(JobFitEvaluation),
+        "system_prompt": load_prompt(f"{template}/system.j2"),
+        "user_template": load_prompt(f"{template}/user.j2"),
+        "prompt_version": version,
+        "schema_version": "job_fit_evaluation_v1" if legacy else "job_fit_evaluation_v2",
+        "response_reader_version": "fit_levels_reader_v1" if legacy else "fit_decisions_reader_v2",
+        "schema": _to_strict_schema(JobFitEvaluation if legacy else JobFitDecisionEvaluation),
         "model": model,
         "temperature": 0.2,
         "configured_context_window": settings.openai_context_window_tokens,
@@ -209,11 +270,11 @@ def context_is_current(context: dict, profile: Profile) -> bool:
     unsigned = {key: value for key, value in context.items() if key != "context_fingerprint"}
     if fingerprint(unsigned) != context.get("context_fingerprint"):
         return False
-    current = build_fit_context(profile, context["model"])
+    current = build_fit_context(profile, context["model"], version=context["policy"]["version"])
     return current["context_fingerprint"] == context["context_fingerprint"]
 
 
-def build_fit_user(context: dict, offer: OfferAnalysis) -> str:
+def build_fit_user(context: dict, offer: OfferAnalysis, *, extraction_provenance=None) -> str:
     # Render the frozen template, rather than reloading it halfway through a Batch.
     from smartapply.llm.prompts.loader import _environment
 
@@ -235,5 +296,6 @@ def build_fit_user(context: dict, offer: OfferAnalysis) -> str:
                 },
                 ensure_ascii=False,
             ),
+            source_json=json.dumps(fit_source(extraction_provenance), ensure_ascii=False),
         )
     )

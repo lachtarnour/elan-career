@@ -8,13 +8,17 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from smartapply.llm.fit_context import (
+    DECISION_LEVELS,
+    LEGACY_POLICY,
     POLICY,
-    POLICY_VERSION,
     fingerprint,
+    fit_schema,
+    fit_source,
     offer_references,
     resolve,
 )
 from smartapply.llm.fit_response import (
+    FitDecisionResponse,
     annotation_dicts,
     annotation_view,
     dimension_annotations,
@@ -34,23 +38,66 @@ def calculate_fit_score(
     codes = {code for code in issue_codes if isinstance(code, str)}
     raw = (
         sum(
+            Decimal(weight * level)
+            for weight, level in zip(LEGACY_POLICY["weights"], levels, strict=True)
+        )
+        / 400
+    )
+    caps = {
+        code: Decimal(LEGACY_POLICY["caps"][code])
+        for code in sorted(codes)
+        if code in LEGACY_POLICY["caps"]
+    }
+    if missions <= 1:
+        caps["weak_mission_support"] = Decimal(LEGACY_POLICY["guards"]["missions_le_1"])
+    if min(levels) <= 2:
+        caps["partial_dimension_support"] = Decimal(LEGACY_POLICY["guards"]["any_dimension_le_2"])
+    capped = min([raw, *caps.values()])
+    score = capped.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return float(score), {
+        "policy_version": LEGACY_POLICY["version"],
+        "calculation_version": LEGACY_POLICY["calculation_version"],
+        "raw_score": str(raw),
+        "applied_caps": {k: str(v) for k, v in caps.items()},
+        "limiting_caps": [k for k, v in caps.items() if v == capped and v < raw],
+        "final_score": str(score),
+    }
+
+
+def calculate_fit_decisions(decisions, preference_conflict) -> tuple[float, dict]:
+    """One table controls levels and caps; annotations never enter this function."""
+    if len(decisions) != 3 or any(state not in DECISION_LEVELS for state in decisions):
+        raise ValueError("Invalid fit decisions")
+    if preference_conflict not in {"none", "unknown", "confirmed"}:
+        raise ValueError("Invalid preference conflict decision")
+    levels = tuple(DECISION_LEVELS[state] for state in decisions)
+    raw = (
+        sum(
             Decimal(weight * level) for weight, level in zip(POLICY["weights"], levels, strict=True)
         )
         / 400
     )
-    caps = {code: Decimal(POLICY["caps"][code]) for code in sorted(codes) if code in POLICY["caps"]}
-    if missions <= 1:
+    caps = {}
+    if levels[0] <= 1:
         caps["weak_mission_support"] = Decimal(POLICY["guards"]["missions_le_1"])
     if min(levels) <= 2:
         caps["partial_dimension_support"] = Decimal(POLICY["guards"]["any_dimension_le_2"])
+    if "credible_material_question" in decisions:
+        caps["material_core_question"] = Decimal(POLICY["caps"]["material_core_question"])
+    if preference_conflict == "confirmed":
+        caps["confirmed_preference_conflict"] = Decimal(
+            POLICY["caps"]["confirmed_preference_conflict"]
+        )
     capped = min([raw, *caps.values()])
     score = capped.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     return float(score), {
-        "policy_version": POLICY_VERSION,
+        "policy_version": POLICY["version"],
         "calculation_version": POLICY["calculation_version"],
+        "used_decisions": dict(zip(AXES, decisions, strict=True)),
+        "preference_conflict": preference_conflict,
         "raw_score": str(raw),
-        "applied_caps": {k: str(v) for k, v in caps.items()},
-        "limiting_caps": [k for k, v in caps.items() if v == capped and v < raw],
+        "applied_caps": {key: str(value) for key, value in caps.items()},
+        "limiting_caps": [key for key, value in caps.items() if value == capped and value < raw],
         "final_score": str(score),
     }
 
@@ -62,10 +109,16 @@ def evaluate_fit(
     *,
     extraction_provenance: dict | None = None,
 ) -> tuple[JobFitAssessment, dict]:
-    if context["policy"] != POLICY:
+    expected = POLICY if context.get("schema_version") == "job_fit_evaluation_v2" else LEGACY_POLICY
+    if context["policy"] != expected:
         raise ValueError("Scoring policy has changed; this result requires explicit resumption")
-    response = read_fit_response(evaluation)
-    score, calculation = calculate_fit_score(*response.levels, list(response.issue_codes))
+    response = read_fit_response(evaluation, schema=fit_schema(context))
+    if isinstance(response, FitDecisionResponse):
+        score, calculation = calculate_fit_decisions(
+            response.decisions, response.preference_conflict
+        )
+    else:
+        score, calculation = calculate_fit_score(*response.levels, list(response.issue_codes))
     warnings = list(response.observations)
 
     # Permanent boundary: future diagnostic checks/converters may report errors,
@@ -91,7 +144,7 @@ def evaluate_fit(
         "Evidence inspection",
         lambda: inspect_evaluation(
             annotation_view(copy.deepcopy(response)),
-            copy.deepcopy(context),
+            {**copy.deepcopy(context), "offer_source": fit_source(extraction_provenance)},
             offer.model_copy(deep=True),
         ),
     )
@@ -122,7 +175,7 @@ def evaluate_fit(
         "used_levels": dict(zip(AXES, response.levels, strict=True)),
         "recognized_issue_codes": sorted(
             set(response.issue_codes)
-            & (set(POLICY["caps"]) | {"limited_question", "offer_clarity"})
+            & (set(LEGACY_POLICY["caps"]) | {"limited_question", "offer_clarity"})
         ),
         "diagnostic_checks": {
             "mode": "advisory",
@@ -136,13 +189,19 @@ def evaluate_fit(
         "extraction_provenance": copy.deepcopy(extraction_provenance or {}),
         "evaluated_at": datetime.now(timezone.utc).isoformat(),
     }
+    if isinstance(response, FitDecisionResponse):
+        source = fit_source(extraction_provenance)
+        diagnostics["offer_source"] = source
+        diagnostics["source_fingerprint"] = source["fingerprint"]
     return public, diagnostics
 
 
 def _explanations(raw: dict, context: dict, offer: OfferAnalysis) -> tuple[list[str], list[str]]:
     """Use available text; never invent missing reasons or repair model judgements."""
     reasons = []
+    by_axis = []
     for axis in AXES:
+        axis_reasons = []
         for finding in annotation_dicts(dimension_annotations(raw, axis).get("findings")):
             support = finding.get("support")
             if isinstance(support, str) and support in POSITIVE:
@@ -153,6 +212,8 @@ def _explanations(raw: dict, context: dict, offer: OfferAnalysis) -> tuple[list[
                 prefix = {"declared_only": "Déclaré : ", "transferable": "Transférable : "}.get(
                     support, ""
                 )
+                if support == "partial_support":
+                    prefix = "Appui partiel, à confirmer : "
                 refs = [
                     context["candidate_refs"][ref]
                     for ref in _references(finding.get("candidate_refs"))
@@ -167,6 +228,11 @@ def _explanations(raw: dict, context: dict, offer: OfferAnalysis) -> tuple[list[
                     prefix = "Autodéclaré : " + prefix
                 if text and prefix + text not in reasons:
                     reasons.append(prefix + text)
+                    axis_reasons.append(prefix + text)
+        by_axis.append(axis_reasons)
+    if "decision" in raw:
+        first = list(dict.fromkeys(items[0] for items in by_axis if items))
+        reasons = first + [text for text in reasons if text not in first]
     risks = list(offer.offer_risks)
     for issue in annotation_dicts(raw.get("issues")):
         text = issue.get("text")

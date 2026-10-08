@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from smartapply.llm.fit_context import offer_references, resolve
-from smartapply.llm.schemas import JobFitEvaluation, OfferAnalysis
+from smartapply.llm.schemas import JobFitDecisionEvaluation, JobFitEvaluation, OfferAnalysis
 
 AXES = ("missions", "essentials", "responsibilities")
-POSITIVE = {"direct", "transferable", "declared_only"}
+POSITIVE = {"direct", "transferable", "declared_only", "partial_support"}
 SUBSTANTIAL = {"distant_core_work", "substantial_core_gap", "unclear_core_work"}
 MATERIAL = SUBSTANTIAL | {"material_core_question"}
 PREFERENCE_FIELDS = {"accepted_contract_types", "accepted_remote_policies", "deal_breakers"}
@@ -20,6 +20,10 @@ def inspect_evaluation(
     The provider/schema parses the three numeric levels. Interpretation of tenure,
     obligations and candidate ability belongs to the model, not a Python grammar.
     """
+    if isinstance(evaluation, JobFitDecisionEvaluation):
+        from smartapply.llm.fit_decision_validation import inspect_decisions
+
+        return inspect_decisions(evaluation, context, offer)
     candidate = context["candidate_refs"]
     offers = offer_references(offer)
     facts = context["candidate_facts"]

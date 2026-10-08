@@ -21,10 +21,18 @@ def build_system_prompt() -> str:
 
 
 def build_user_prompt(
-    *, profile: Profile, offer_analysis: OfferAnalysis, reference_date: date | None = None
+    *,
+    profile: Profile,
+    offer_analysis: OfferAnalysis,
+    reference_date: date | None = None,
+    extraction_provenance: dict | None = None,
 ) -> str:
     """reference_date is kept for callers; it is not a scoring criterion."""
-    return build_fit_user(build_fit_context(profile, "prompt-preview"), offer_analysis)
+    return build_fit_user(
+        build_fit_context(profile, "prompt-preview"),
+        offer_analysis,
+        extraction_provenance=extraction_provenance,
+    )
 
 
 __all__ = ["build_system_prompt", "build_user_prompt", "_candidate_facts"]

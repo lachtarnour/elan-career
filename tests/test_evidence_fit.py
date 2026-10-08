@@ -56,9 +56,9 @@ from tests.fit_fixtures import evaluation_from_user
 from tests.test_batch_analysis import offer, seed_jobs
 
 
-def fixture(*, levels=(4, 3, 3), skills=None, constraints=None):
+def fixture(*, levels=(4, 3, 3), skills=None, constraints=None, version="evidence_fit_v5"):
     profile = get_profile().model_copy(deep=True)
-    context = build_fit_context(profile, get_settings().openai_model_cheap)
+    context = build_fit_context(profile, get_settings().openai_model_cheap, version=version)
     facts = offer().model_copy(
         update={
             "required_skills": skills or ["Python"],

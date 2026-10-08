@@ -2,7 +2,18 @@
 
 import json
 
-from smartapply.llm.schemas import JobFitEvaluation
+from smartapply.llm.schemas import JobFitDecisionEvaluation, JobFitEvaluation
+
+
+def decision_response(
+    *, states=("strong_fit", "strong_fit", "credible_limited_adaptation"), conflict="unknown"
+):
+    return {
+        "decision": {
+            **dict(zip(("missions", "essentials", "responsibilities"), states, strict=True)),
+            "preference_conflict": conflict,
+        }
+    }
 
 
 def evaluation_from_user(user, *, levels=(4, 3, 3), reasons=None):
@@ -65,6 +76,30 @@ def evaluation_from_user(user, *, levels=(4, 3, 3), reasons=None):
                     "text": "Appui central partiel dans cette fixture",
                 }
             )
+    if user.startswith("=== SCORING POLICY VERSION ===\nevidence_fit_v6"):
+        states = (
+            "very_low_support",
+            "weak_support",
+            "partial_core_fit",
+            "credible_limited_adaptation",
+            "strong_fit",
+        )
+        return JobFitDecisionEvaluation.model_validate(
+            {
+                "decision": {
+                    **{axis: states[level] for axis, level in zip(dimensions, levels, strict=True)},
+                    "preference_conflict": "unknown",
+                },
+                "dimensions": {
+                    axis: {"findings": item["findings"]} for axis, item in dimensions.items()
+                },
+                "issues": [
+                    {key: value for key, value in item.items() if key != "code"} for item in issues
+                ],
+                "neutral_offer_refs": [],
+                "offer_interpretations": [],
+            }
+        )
     return JobFitEvaluation.model_validate(
         {"dimensions": dimensions, "issues": issues, "neutral_offer_refs": []}
     )

@@ -181,6 +181,77 @@ class JobFitEvaluation(BaseModel):
     neutral_offer_refs: list[NeutralOfferReference]
 
 
+FitDecisionState = Literal[
+    "very_low_support",
+    "weak_support",
+    "partial_core_fit",
+    "credible_material_question",
+    "credible_limited_adaptation",
+    "strong_fit",
+]
+
+
+class FitDecisions(BaseModel):
+    model_config = _strict
+    missions: FitDecisionState
+    essentials: FitDecisionState
+    responsibilities: FitDecisionState
+    preference_conflict: Literal["none", "unknown", "confirmed"]
+
+
+class FitDecisionFinding(FitFinding):
+    support: Literal[
+        "direct",
+        "transferable",
+        "declared_only",
+        "partial_support",
+        "not_documented",
+        "contradicted",
+    ]
+
+
+class FitDecisionDimension(BaseModel):
+    model_config = _strict
+    findings: list[FitDecisionFinding]
+
+
+class FitDecisionAnnotations(BaseModel):
+    model_config = _strict
+    missions: FitDecisionDimension
+    essentials: FitDecisionDimension
+    responsibilities: FitDecisionDimension
+
+
+class FitReservation(BaseModel):
+    model_config = _strict
+    axis: Literal["missions", "essentials", "responsibilities", "context"]
+    origin: Literal["candidate_evidence", "offer_information", "preference_alignment"]
+    offer_refs: list[str]
+    candidate_refs: list[str]
+    text: str
+
+
+class FitOfferInterpretation(BaseModel):
+    model_config = _strict
+    offer_refs: list[str]
+    source_ref: Literal["offer_source:body"]
+    source_quote: str
+    meaning: Literal["mandatory", "optional", "alternative", "conditional", "uncertain"]
+    origin: Literal["offer_information"]
+    text: str
+
+
+class JobFitDecisionEvaluation(BaseModel):
+    """V2 generation contract; only the four decisions are required at runtime."""
+
+    model_config = _strict
+    decision: FitDecisions
+    dimensions: FitDecisionAnnotations
+    issues: list[FitReservation]
+    neutral_offer_refs: list[NeutralOfferReference]
+    offer_interpretations: list[FitOfferInterpretation]
+
+
 class JobFitAssessment(BaseModel):
     """The matching call cannot return or overwrite extracted offer fields."""
 

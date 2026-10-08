@@ -13,12 +13,18 @@ from smartapply.config import get_settings
 from smartapply.database.analysis_batches import AnalysisBatchItem, AnalysisBatchRun
 from smartapply.database.models import Job
 from smartapply.database.repository.llm_cache import cache_get, cache_set, record_usage
-from smartapply.llm import JobFitAssessment, JobFitEvaluation, OfferAnalysis
+from smartapply.llm import (
+    JobFitAssessment,
+    JobFitDecisionEvaluation,
+    JobFitEvaluation,
+    OfferAnalysis,
+)
 from smartapply.llm.batch import BatchRequest, BatchResult, build_batch_request
 from smartapply.llm.fit_context import (
     build_fit_user,
     candidate_facts,
     context_is_current,
+    fit_schema,
 )
 from smartapply.llm.fit_request import check_request_budget
 from smartapply.llm.fit_response import FitEvaluationResponse, read_fit_response
@@ -42,7 +48,7 @@ from smartapply.pipeline.process.analysis_checkpoint import (
 from smartapply.pipeline.snapshots import job_snapshot_key
 from smartapply.profile import Profile, get_profile
 
-PHASE_SCHEMA = {"extraction": OfferAnalysis, "evaluation": JobFitEvaluation}
+PHASE_SCHEMA = {"extraction": OfferAnalysis, "evaluation": JobFitDecisionEvaluation}
 PHASE_PURPOSE = {"extraction": "job_offer_analysis", "evaluation": "job_fit_assessment"}
 
 
@@ -106,7 +112,12 @@ def item_request(
                 "Ancien lot sans contexte d'évaluation figé : reprise explicite nécessaire."
             )
         system = run.fit_context["system_prompt"]
-        user = build_fit_user(run.fit_context, OfferAnalysis.model_validate(item.offer_data))
+        schema = fit_schema(run.fit_context)
+        user = build_fit_user(
+            run.fit_context,
+            OfferAnalysis.model_validate(item.offer_data),
+            extraction_provenance={"analyzer_input": item.analyzer_input},
+        )
         check_request_budget(run.fit_context, user)
         max_completion_tokens = run.fit_context["max_completion_tokens"]
     return build_batch_request(
@@ -143,12 +154,18 @@ def accept_result(
     else:
         offer = OfferAnalysis.model_validate(item.offer_data)
         diagnostics = None
-        if isinstance(validated, (JobFitEvaluation, FitEvaluationResponse)):
+        if isinstance(
+            validated, (JobFitEvaluation, JobFitDecisionEvaluation, FitEvaluationResponse)
+        ):
             if run.fit_context is None:
                 raise LLMValidationError("Diagnostic sans contexte figé")
             if request_body is not None and request_body["messages"][1][
                 "content"
-            ] != build_fit_user(run.fit_context, offer):
+            ] != build_fit_user(
+                run.fit_context,
+                offer,
+                extraction_provenance={"analyzer_input": item.analyzer_input},
+            ):
                 raise LLMValidationError("Réponse associée à une autre extraction d’offre.")
             validated, diagnostics = evaluate_fit(
                 validated,
@@ -159,7 +176,11 @@ def accept_result(
             diagnostics["request_user"] = (
                 request_body["messages"][1]["content"]
                 if request_body
-                else build_fit_user(run.fit_context, offer)
+                else build_fit_user(
+                    run.fit_context,
+                    offer,
+                    extraction_provenance={"analyzer_input": item.analyzer_input},
+                )
             )
             diagnostics["request_budget"] = check_request_budget(
                 run.fit_context, diagnostics["request_user"]
@@ -188,10 +209,12 @@ def accept_cache(
         return False
     try:
         validated = validate_request_response(request.body, cached.response)
-        accept_result(session, item, run, phase, validated, request_body=request.body)
     except (ValueError, LLMValidationError):
         session.delete(cached)
         return False
+    # Publication/context failures are not invalid cached content. Keep the entry
+    # and propagate the error, rather than scheduling another extraction.
+    accept_result(session, item, run, phase, validated, request_body=request.body)
     record_usage(
         session,
         purpose=PHASE_PURPOSE[phase],
@@ -269,10 +292,11 @@ def import_result(
 def schema_for_request(body: dict, content: str | None = None):
     stored = body.get("response_format", {}).get("json_schema", {})
     classes = {
-        model.__name__: model for model in (OfferAnalysis, JobFitAssessment, JobFitEvaluation)
+        model.__name__: model
+        for model in (OfferAnalysis, JobFitAssessment, JobFitEvaluation, JobFitDecisionEvaluation)
     }
-    if stored.get("name") == JobFitEvaluation.__name__:
-        return JobFitEvaluation
+    if stored.get("name") in {JobFitEvaluation.__name__, JobFitDecisionEvaluation.__name__}:
+        return classes[stored["name"]]
     if stored.get("name") not in classes or not stored.get("schema"):
         if content is not None:
             try:
@@ -290,13 +314,13 @@ def schema_for_request(body: dict, content: str | None = None):
 def validate_request_response(body: dict, content: str):
     schema = schema_for_request(body, content)
     saved = body.get("response_format", {}).get("json_schema", {}).get("schema")
-    if schema is JobFitEvaluation:
-        parsed = read_fit_response(content)
+    if schema in {JobFitEvaluation, JobFitDecisionEvaluation}:
+        parsed = read_fit_response(content, schema=schema)
         observations = list(parsed.observations)
         try:
             if not saved:
                 observations.append(
-                    "Generation schema unavailable; three levels identified without ambiguity"
+                    "Generation schema unavailable; required scoring inputs identified without ambiguity"
                 )
             else:
                 observations.extend(
@@ -310,7 +334,8 @@ def validate_request_response(body: dict, content: str):
         return replace(parsed, observations=observations)
     try:
         data = json.loads(content)
-        Draft202012Validator(saved).validate(data)
+        if schema is not OfferAnalysis:
+            Draft202012Validator(saved).validate(data)
         return schema.model_validate(data)
     except Exception as exc:
         raise LLMValidationError(f"Réponse incompatible avec le schéma enregistré : {exc}") from exc
