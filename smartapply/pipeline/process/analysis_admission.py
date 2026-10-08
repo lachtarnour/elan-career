@@ -24,6 +24,7 @@ from smartapply.database.models import (
     JobStatus,
 )
 from smartapply.filtering.hard_reject.types import HardRejectDisposition
+from smartapply.filtering.manual_policy import evaluate_or_bypass
 from smartapply.jobsearch.offer_state import offer_state
 from smartapply.pipeline.process.filter_state import (
     current_hard_reject_disposition,
@@ -303,7 +304,9 @@ class AnalysisAdmissionMixin:
         results = []
         for job, snapshot, components, force_keep in prepared:
             check_cancelled(stop_requested)
-            results.append((int(job.id), snapshot, components, force_keep, self.filter.evaluate(job)))
+            results.append((
+                int(job.id), snapshot, components, force_keep, evaluate_or_bypass(self.filter, job),
+            ))
         check_cancelled(stop_requested)
         with write_session_scope() as session:
             reserved = (

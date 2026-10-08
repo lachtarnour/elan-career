@@ -16,6 +16,7 @@ from smartapply.database.models import Job, JobDuplicateStatus, JobStatus
 from smartapply.database.repository import (
     get_known_external_ids,
     list_known_jobs,
+    set_score,
     upsert_job,
 )
 from smartapply.dedup import (
@@ -25,6 +26,11 @@ from smartapply.dedup import (
 )
 from smartapply.dedup.deduplicator import linked_duplicate_components
 from smartapply.dedup.review_decisions import automatic_match_reason, automatic_state
+from smartapply.filtering.manual_policy import (
+    evaluate_or_bypass,
+    has_manual_filter_bypass,
+    manual_filter_bypass_result,
+)
 from smartapply.logging_setup import get_logger
 from smartapply.offer_identity import is_direct_offer_url
 from smartapply.offers import ManualOfferInput, RawJob
@@ -197,10 +203,10 @@ class Ingestor:
         return report
 
     def from_url(self, url: str) -> IngestReport:
-        return self._persist("manual", [ManualScraper().from_url(url)])
+        return self._persist("manual", [ManualScraper().from_url(url)], manual_addition=True)
 
     def from_manual_offer(self, offer: ManualOfferInput) -> IngestReport:
-        return self._persist("manual", [ManualScraper().from_structured(offer)])
+        return self._persist("manual", [ManualScraper().from_structured(offer)], manual_addition=True)
 
     def from_text(
         self,
@@ -218,7 +224,7 @@ class Ingestor:
             location=location,
             application_url=application_url,
         )
-        return self._persist("manual", [raw])
+        return self._persist("manual", [raw], manual_addition=True)
 
     def _persist(
         self,
@@ -232,6 +238,7 @@ class Ingestor:
         cancelled: bool = False,
         warnings: list[str] | None = None,
         completed_source_run_ids: list[str] | None = None,
+        manual_addition: bool = False,
     ) -> IngestReport:
         from smartapply.maintenance.duplicate_reviews import (
             DuplicateReviewSnapshotChanged,
@@ -322,7 +329,10 @@ class Ingestor:
                 snapshots = {int(job.id): _ingest_snapshot_key(job) for job in known_jobs
                              if int(job.id) in dependencies}
                 if existing is None and raw_filter_result is None:
-                    raw_filter_result = self._get_job_filter().evaluate(raw)
+                    raw_filter_result = (
+                        manual_filter_bypass_result() if manual_addition
+                        else self._get_job_filter().evaluate(raw)
+                    )
                 refreshed = []
                 refresh_scope = set()
                 retry = False
@@ -384,8 +394,26 @@ class Ingestor:
                                 source=raw.source, source_data=raw.source_data,
                                 published_date=raw.published_date,
                             )
-                            if needs_filter_label(job.score.components if job.score else None):
-                                result = raw_filter_result if current is None else self._get_job_filter().evaluate(job)
+                            if manual_addition and job.canonical_job_id is None:
+                                from smartapply.pipeline.process.local_filtering import (
+                                    LocalFilterMixin,
+                                )
+
+                                previous = dict(job.score.components or {}) if job.score else {}
+                                if not has_manual_filter_bypass(previous):
+                                    previous["manual_filter_bypass"] = {
+                                        "schema_version": 1, "origin": "manual_addition",
+                                        "added_at": datetime.now(timezone.utc).isoformat(),
+                                    }
+                                job.score = set_score(session, job.id, components=previous)
+                                LocalFilterMixin._persist_filter_state_only(
+                                    session, job, manual_filter_bypass_result(),
+                                )
+                            elif needs_filter_label(job.score.components if job.score else None):
+                                result = (
+                                    raw_filter_result if current is None
+                                    else evaluate_or_bypass(self._get_job_filter(), job)
+                                )
                                 persist_filter_label(session, job, result)
                             if current is not None and current.canonical_job_id is not None:
                                 skipped_existing += 1

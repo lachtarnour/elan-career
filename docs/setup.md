@@ -248,6 +248,14 @@ explicit manual keep remains recorded with the blocker it overrides. Repairing
 protected history changes filter metadata without erasing prior applications,
 analyses, scores or manual selections.
 
+An offer explicitly added by the user (pasted text, structured manual input or
+manual URL import) bypasses automatic rejection gates. This choice is stored as
+`manual_filter_bypass` and persists through later ranking, analysis and metadata
+repairs. The audit records the gates as skipped, not successfully evaluated.
+Fit analysis can still report risks; duplicates, sent applications, active
+reservations and manual archives remain protected. A source named `manual`
+alone is not an exemption. Existing archived offers are not automatically reopened.
+
 To migrate persisted legacy `uncertain` decisions, run the dedicated command
 against the active database. It previews changes by default; add `--apply` to
 create a backup and apply exactly the reviewed plan atomically:

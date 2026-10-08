@@ -36,6 +36,10 @@ alias sont protégés pendant leur traitement, avec un motif explicite en cas de
 conflit. La navigation, les notes et les actions sur les autres offres restent disponibles.
 L’ajout manuel enregistre d’abord l’offre, puis programme sa candidature. Une shortlist
 non analysée reste une intention annulable jusqu’au succès de l’analyse.
+L’ajout manuel constitue un choix explicite de conserver l’offre : les filtres de
+rejet automatiques ne sont pas exécutés, y compris lors des traitements suivants.
+Le détail signale cette exemption sans affirmer que les critères ont été validés.
+Les contrôles de doublons, d’envoi et de réservation restent inchangés.
 
 Les changements enregistrés regroupent les actualisations sur 200 ms ; la progression
 ne recharge pas les listes. Chaque vue conserve une seule lecture active et la dernière
