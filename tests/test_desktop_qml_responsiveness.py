@@ -36,6 +36,8 @@ class Bridge(QObject):
     applicationNotesSaved = Signal(int, int)
     applicationNotesSaveFailed = Signal(int, int, str)
     analysisOfferChanged = Signal()
+    analysisArchivingChanged = Signal()
+    analysisOffersArchived = Signal("QVariantList")
     analysisWorkspaceChanged = Signal()
     analysisWorkspaceLoadingChanged = Signal()
     analysisWorkspaceOperationChanged = Signal()
@@ -60,6 +62,8 @@ class Bridge(QObject):
         self.list_loading = self.detail_loading = False
         self.analysis_offer = {}
         self.analysis_offer_id = 0
+        self.analysis_archiving = False
+        self.analysis_archives = []
         self.analysis_workspace = {"candidates": [], "runs": [], "active_run_id": ""}
         self.analysis_loading = False
         self.analysis_operation = ""
@@ -108,6 +112,7 @@ class Bridge(QObject):
     analysisOffer = Property("QVariantMap", lambda self: self.analysis_offer, notify=analysisOfferChanged)
     analysisOfferId = Property(int, lambda self: self.analysis_offer_id, notify=analysisOfferChanged)
     analysisOfferLoading = Property(bool, lambda self: False, notify=analysisOfferChanged)
+    analysisArchiving = Property(bool, lambda self: self.analysis_archiving, notify=analysisArchivingChanged)
     analysisWorkspace = Property("QVariantMap", lambda self: self.analysis_workspace, notify=analysisWorkspaceChanged)
     analysisWorkspaceLoading = Property(bool, lambda self: self.analysis_loading, notify=analysisWorkspaceLoadingChanged)
     analysisWorkspaceOperation = Property(str, lambda self: self.analysis_operation, notify=analysisWorkspaceOperationChanged)
@@ -118,6 +123,12 @@ class Bridge(QObject):
         self.analysis_offer_id = job_id
         self.analysis_offer = {**offer(job_id, 0), "application": {}}
         self.analysisOfferChanged.emit()
+
+    @Slot("QVariantList")
+    def archiveAnalysisOffers(self, job_ids):
+        self.analysis_archives.append(job_ids)
+        self.analysis_archiving = True
+        self.analysisArchivingChanged.emit()
 
     @Slot()
     def refreshAnalysisWorkspace(self):
@@ -1027,6 +1038,89 @@ assert [row["id"] for row in table.property("sortedOffers").toVariant()] == [2, 
 table.setProperty("ascending", False)
 app.processEvents()
 assert [row["id"] for row in table.property("sortedOffers").toVariant()] == [1, 2]
+"""
+
+_SCENARIOS["analysis_archiving_confirms_exact_selection_and_protects_active_work"] = r"""
+bridge.protected = []
+bridge.analysis_workspace = {"candidates": [
+    {"id": i, "title": "AI Engineer", "company": "Example"} for i in range(1, 5)
+], "runs": []}
+analysis = load_page("AnalysisPage.qml")
+host = QQuickWindow()
+analysis.setParentItem(host.contentItem())
+host.show()
+bulk = analysis.findChild(QQuickItem, "analysisArchiveSelectionAction")
+single = analysis.findChild(QQuickItem, "analysisArchiveOfferAction")
+confirm = analysis.findChild(QObject, "analysisArchiveConfirm")
+assert not bulk.property("enabled")
+invoke(analysis, "setSelected", 1, True)
+invoke(analysis, "setSelected", 2, True)
+assert bulk.property("enabled") and bulk.property("text") == "Archiver (2)"
+invoke(bulk, "clicked")
+assert confirm.property("ids").toVariant() == [1, 2]
+assert bridge.analysis_archives == []
+invoke(confirm, "reject")
+assert analysis.property("selectedIds").toVariant() == [1, 2]
+invoke(bulk, "clicked")
+# Confirmation retains the exact requested IDs, not a subsequently changed selection.
+invoke(analysis, "setSelected", 3, True)
+invoke(confirm, "accept")
+assert bridge.analysis_archives == [[1, 2]]
+assert not bulk.property("enabled") and not single.property("enabled")
+assert analysis.property("selectedIds").toVariant() == [1, 2, 3]
+bridge.analysis_archiving = False
+bridge.analysisArchivingChanged.emit()
+bridge.analysisOffersArchived.emit([1, 2])
+assert analysis.property("selectedIds").toVariant() == [3]
+bridge.analysis_workspace["candidates"] = bridge.analysis_workspace["candidates"][2:]
+bridge.analysisWorkspaceChanged.emit()
+bridge.selectAnalysisOffer(4)
+bridge.analysis_offer["url"] = "https://example.org/jobs/4"
+bridge.analysisOfferChanged.emit()
+app.processEvents()
+assert single.property("enabled")
+invoke(single, "clicked")
+assert confirm.property("ids").toVariant() == [4]
+invoke(confirm, "accept")
+assert bridge.analysis_archives == [[1, 2], [4]]
+bridge.analysis_archiving = False
+bridge.analysisArchivingChanged.emit()
+bridge.analysisOffersArchived.emit([4])
+assert analysis.property("selectedIds").toVariant() == [3]
+assert bridge.queries == [] and bridge.selections == []
+
+bridge.protected = [4]
+bridge.busyJobIdsChanged.emit()
+assert not single.property("enabled")
+bridge.protected = []
+bridge.busyJobIdsChanged.emit()
+assert single.property("enabled")
+bridge.analysis_workspace["runs"] = [{"id": "blocked-run", "status": "blocked",
+    "is_active": False, "can_cancel": True, "items": [{"id": 4}]}]
+bridge.analysisWorkspaceChanged.emit()
+assert not single.property("enabled")
+bridge.analysis_workspace["runs"] = []
+bridge.analysisWorkspaceChanged.emit()
+assert single.property("enabled")
+
+bar = analysis.findChild(QQuickItem, "analysisActionBar")
+source = analysis.findChild(QQuickItem, "analysisOfferSourceAction")
+for width, height in [(1100, 720), (1320, 820), (1480, 920), (1800, 1000), (2524, 1000)]:
+    host.resize(width, height)
+    analysis.setProperty("width", width)
+    analysis.setProperty("height", height)
+    app.processEvents()
+    for name in ("analysisArchiveSelectionAction", "analysisStartImmediateAction", "analysisStartBatchAction"):
+        button = analysis.findChild(QQuickItem, name)
+        x = button.mapToItem(bar, QPointF()).x()
+        assert x >= 0 and x + button.width() <= bar.width() + 1, (width, name, x, bar.width())
+    assert single.mapToItem(analysis, QPointF()).x() > source.mapToItem(analysis, QPointF()).x()
+bridge.analysis_offer["status"] = "archived"
+bridge.analysisOfferChanged.emit()
+assert not single.property("enabled") and single.property("text") == "Archivée"
+bridge.closing = True
+bridge.shutdownRequestedChanged.emit()
+assert not bulk.property("enabled")
 """
 
 _TEARDOWN = r"""

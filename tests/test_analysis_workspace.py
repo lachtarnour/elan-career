@@ -10,6 +10,7 @@ import pytest
 from PySide6.QtCore import QCoreApplication
 from sqlalchemy import event
 
+from smartapply.concurrency import TaskConflictError
 from smartapply.database import session_scope
 from smartapply.database.analysis_batches import (
     AnalysisBatchItem,
@@ -27,6 +28,7 @@ from smartapply.database.models import (
 from smartapply.database.session import get_engine
 from smartapply.desktop.analysis_services import AnalysisServiceMixin
 from smartapply.desktop.bridge import DesktopBridge
+from smartapply.desktop.services import DesktopService
 from smartapply.filtering.hard_reject.types import HardRejectResult
 from smartapply.pipeline.batch_analysis.presentation import analysis_workspace
 from smartapply.pipeline.errors import TaskCancelledError
@@ -163,6 +165,53 @@ def test_analysis_preview_handles_missing_offer_and_shutdown(make_bridge):
     assert bridge.analysisOffer == {}
     bridge.selectAnalysisOffer(88)
     assert bridge.analysisOfferId == 77
+
+
+def test_analysis_archive_refreshes_its_workspace_without_resetting_offers(make_bridge):
+    bridge = make_bridge()
+    bridge._current_job = {"id": 42, "application": {"notes": "Unsaved draft"}}
+    original = deepcopy(bridge.currentJob)
+    calls, notifications, archived, states = [], [], [], []
+    bridge.service.get_job = lambda job_id: {"id": job_id, "status": "archived"}
+    bridge.service.archive_analysis_offers = lambda ids: calls.append(ids) or ids
+    bridge.toastRequested.connect(lambda *args: notifications.append(args))
+    bridge.analysisOffersArchived.connect(archived.append)
+    bridge.analysisArchivingChanged.connect(lambda: states.append(bridge.analysisArchiving))
+    bridge.selectAnalysisOffer(7)
+    bridge._read_pool.finish_next()
+
+    bridge.archiveAnalysisOffers([7, 8, 7, 0])
+    bridge.archiveAnalysisOffers([9])  # No second operation while archiving.
+    assert bridge.analysisArchiving and len(bridge._mutation_pool.pending) == 1
+    bridge._mutation_pool.finish_next()
+    assert calls == [[7, 8]] and archived == [[7, 8]]
+    assert states == [True, False]
+    bridge._analysis_controller._pool.finish_next()
+    bridge._read_pool.finish_next()
+    assert bridge.analysisOfferId == 7 and bridge.analysisOffer["status"] == "archived"
+    assert bridge.currentJob == original
+    assert not bridge.busy
+    assert notifications == [("2 offres archivées", "", "success")]
+
+
+def test_analysis_archive_failure_keeps_selection_and_can_be_retried(make_bridge):
+    bridge = make_bridge()
+    archived, failures = [], []
+    bridge.analysisOffersArchived.connect(archived.append)
+    bridge._task_error = lambda message, trace: failures.append(message)
+
+    def fail(ids):
+        raise ValueError("Offre réservée par une analyse")
+
+    bridge.service.archive_analysis_offers = fail
+    bridge.archiveAnalysisOffers([])
+    assert not bridge._mutation_pool.pending
+    bridge.archiveAnalysisOffers([7])
+    bridge._mutation_pool.finish_next()
+    assert not bridge.analysisArchiving and archived == []
+    assert failures == ["Offre réservée par une analyse"]
+    bridge.archiveAnalysisOffers([7])
+    assert bridge.analysisArchiving and len(bridge._mutation_pool.pending) == 1
 
 
 def test_analysis_worker_preserves_offer_browser_and_global_busy(make_bridge):
@@ -446,6 +495,74 @@ def test_workspace_counts_exclude_aliases_duplicates_history_and_reserved_offers
     assert data["candidates_count"] == data["pending_count"] == 1
     assert [job["id"] for job in data["candidates"]] == [available_id]
     assert data["active_run_id"] == "run-test"
+
+
+def test_archive_analysis_selection_preserves_history_and_unselected_offers(isolated_db):
+    with session_scope() as session:
+        first = _job("archive-first", analysis=JobAnalysis(fit_score=0.7),
+                     analyzed_at=datetime.now(timezone.utc))
+        second = _job("archive-second")
+        other = _job("archive-unselected", application=Application(notes="Keep draft"))
+        session.add_all([first, second, other])
+        session.flush()
+        alias = _job("archive-alias", canonical_job_id=first.id)
+        session.add(alias)
+        run, items = _run_items(session, [first], state="completed", item_states=["completed"])
+        session.flush()
+        first_id, second_id, other_id, alias_id = first.id, second.id, other.id, alias.id
+        run_id, item_id, analysis_id = run.id, items[0].id, first.analysis.id
+        analyzed_at = first.analyzed_at
+
+    service = DesktopService()
+    assert service.archive_analysis_offers([first_id, second_id, first_id, 0, 999999]) == [first_id, second_id]
+    assert service.archive_analysis_offers([first_id]) == []
+    with session_scope() as session:
+        first, second = session.get(Job, first_id), session.get(Job, second_id)
+        assert first.status == second.status == JobStatus.ARCHIVED
+        assert first.analysis.id == analysis_id and first.analysis.fit_score == 0.7
+        assert first.analyzed_at.replace(tzinfo=timezone.utc) == analyzed_at
+        assert first.score.components["rejection_reasons"] == ["manual_archive"]
+        assert session.get(Job, alias_id).archived_at is None
+        assert session.get(Job, other_id).archived_at is None
+        assert session.get(Job, other_id).application.notes == "Keep draft"
+        assert session.get(AnalysisBatchRun, run_id).state == "completed"
+        assert session.get(AnalysisBatchItem, item_id).state == "completed"
+
+
+@pytest.mark.parametrize("state", ["active", "attention", "blocked"])
+def test_archive_analysis_selection_is_atomic_when_a_batch_reserves_an_offer(isolated_db, state):
+    with session_scope() as session:
+        free, reserved = _job("archive-free"), _job("archive-reserved")
+        session.add_all([free, reserved])
+        session.flush()
+        _run_items(session, [reserved], state=state)
+        ids = [free.id, reserved.id]
+    with pytest.raises(TaskConflictError, match="analyse Batch"):
+        DesktopService().archive_analysis_offers(ids)
+    with session_scope() as session:
+        assert all(session.get(Job, job_id).archived_at is None for job_id in ids)
+        assert all("rejection_stage" not in session.get(Job, job_id).score.components for job_id in ids)
+
+
+def test_archive_analysis_selection_rolls_back_on_storage_failure(isolated_db, monkeypatch):
+    with session_scope() as session:
+        jobs = [_job("archive-rollback-first"), _job("archive-rollback-second")]
+        session.add_all(jobs)
+        session.flush()
+        ids = [job.id for job in jobs]
+    original = DesktopService._archive_job_in_session
+
+    def archive(session, job):
+        if job.id == ids[1]:
+            raise RuntimeError("Storage failure")
+        original(session, job)
+
+    monkeypatch.setattr(DesktopService, "_archive_job_in_session", staticmethod(archive))
+    with pytest.raises(RuntimeError, match="Storage failure"):
+        DesktopService().archive_analysis_offers(ids)
+    with session_scope() as session:
+        assert all(session.get(Job, job_id).archived_at is None for job_id in ids)
+        assert all("rejection_stage" not in session.get(Job, job_id).score.components for job_id in ids)
 
 
 def test_workspace_reports_active_phase_deadline_and_waiting_second_wave(isolated_db):

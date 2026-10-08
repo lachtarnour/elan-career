@@ -160,6 +160,8 @@ class DesktopBridge(QObject):
     dashboardChanged = Signal()
     shortlistChanged = Signal()
     analysisOfferChanged = Signal()
+    analysisArchivingChanged = Signal()
+    analysisOffersArchived = Signal("QVariantList")
     analysisWorkspaceChanged = Signal()
     analysisWorkspaceLoadingChanged = Signal()
     analysisWorkspaceErrorChanged = Signal()
@@ -218,6 +220,7 @@ class DesktopBridge(QObject):
         self._dirty_views: set[str] = set()
         self._shutdown_requested = False
         self._shutdown_ready = False
+        self._analysis_archiving = False
         self._notes_failures: dict[int, tuple[str, int]] = {}
         self._notes_latest: dict[int, int] = {}
         self._notes_epochs: dict[int, int] = {}
@@ -315,6 +318,41 @@ class DesktopBridge(QObject):
     @Slot(int)
     def selectAnalysisOffer(self, job_id):  # noqa: N802
         self._analysis_offer_controller.select(job_id)
+
+    @Property(bool, notify=analysisArchivingChanged)
+    def analysisArchiving(self):  # noqa: N802
+        return self._analysis_archiving
+
+    @Slot("QVariantList")
+    def archiveAnalysisOffers(self, job_ids):  # noqa: N802
+        if self.shutdownRequested or self._analysis_archiving:
+            return
+        ids = list(dict.fromkeys(int(value) for value in job_ids if int(value) > 0))
+        if not ids:
+            return
+        self._analysis_archiving = True
+        self.analysisArchivingChanged.emit()
+
+        def finished():
+            self._analysis_archiving = False
+            self.analysisArchivingChanged.emit()
+
+        def archived(result):
+            finished()
+            self.analysisOffersArchived.emit(result)
+            self._analysis_controller.refresh(sync=False)
+            self._analysis_offer_controller.refresh()
+            for job_id in result:
+                self._refresh_selected(job_id)
+            self._operation_done(
+                _count_text(len(result), "offre archivée", "offres archivées"), ""
+            )
+
+        def failed(message, trace):
+            finished()
+            self._task_error(message, trace)
+
+        self._mutate(self.service.archive_analysis_offers, ids, on_success=archived, on_error=failed)
 
     @Property("QVariantMap", notify=analysisWorkspaceChanged)
     def analysisWorkspace(self):  # noqa: N802
