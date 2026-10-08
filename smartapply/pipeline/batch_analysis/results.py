@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from jsonschema import Draft202012Validator
 from sqlalchemy.orm import Session
@@ -20,6 +21,7 @@ from smartapply.llm.fit_context import (
     context_is_current,
 )
 from smartapply.llm.fit_request import check_request_budget
+from smartapply.llm.fit_response import FitEvaluationResponse, read_fit_response
 from smartapply.llm.fit_scoring import evaluate_fit
 from smartapply.llm.prompts import job_analysis
 from smartapply.llm.provider import LLMValidationError
@@ -141,7 +143,7 @@ def accept_result(
     else:
         offer = OfferAnalysis.model_validate(item.offer_data)
         diagnostics = None
-        if isinstance(validated, JobFitEvaluation):
+        if isinstance(validated, (JobFitEvaluation, FitEvaluationResponse)):
             if run.fit_context is None:
                 raise LLMValidationError("Diagnostic sans contexte figé")
             if request_body is not None and request_body["messages"][1][
@@ -237,10 +239,13 @@ def import_result(
         cache_key=request["cache_key"],
     )
     try:
-        # Check refusal/truncation first, then the exact schema saved with this request.
-        schema = schema_for_request(request["body"])
-        result.validate(schema)
+        schema = schema_for_request(request["body"], result.content)
+        transport_validated = result.validate(schema)
         validated = validate_request_response(request["body"], result.content)
+        if isinstance(validated, FitEvaluationResponse):
+            validated = replace(
+                validated, observations=validated.observations + transport_validated.observations
+            )
         # Roll back all publications if one grouped item fails validation. Usage remains recorded.
         with session.begin_nested():
             for item in items:
@@ -261,12 +266,21 @@ def import_result(
     )
 
 
-def schema_for_request(body: dict):
+def schema_for_request(body: dict, content: str | None = None):
     stored = body.get("response_format", {}).get("json_schema", {})
     classes = {
         model.__name__: model for model in (OfferAnalysis, JobFitAssessment, JobFitEvaluation)
     }
+    if stored.get("name") == JobFitEvaluation.__name__:
+        return JobFitEvaluation
     if stored.get("name") not in classes or not stored.get("schema"):
+        if content is not None:
+            try:
+                read_fit_response(content)
+            except LLMValidationError:
+                pass
+            else:
+                return JobFitEvaluation
         raise LLMValidationError(
             "Schéma historique absent ou inconnu : reprise explicite nécessaire"
         )
@@ -274,8 +288,26 @@ def schema_for_request(body: dict):
 
 
 def validate_request_response(body: dict, content: str):
-    schema = schema_for_request(body)
-    saved = body["response_format"]["json_schema"]["schema"]
+    schema = schema_for_request(body, content)
+    saved = body.get("response_format", {}).get("json_schema", {}).get("schema")
+    if schema is JobFitEvaluation:
+        parsed = read_fit_response(content)
+        observations = []
+        try:
+            if not saved:
+                observations.append(
+                    "Generation schema unavailable; three levels identified without ambiguity"
+                )
+            else:
+                observations.extend(
+                    f"Stored schema annotation {error.json_path}: {error.message}"
+                    for error in Draft202012Validator(copy.deepcopy(saved)).iter_errors(
+                        copy.deepcopy(parsed.raw)
+                    )
+                )
+        except Exception as exc:
+            observations.append(f"Stored schema inspection: {type(exc).__name__}: {exc}")
+        return replace(parsed, observations=observations)
     try:
         data = json.loads(content)
         Draft202012Validator(saved).validate(data)

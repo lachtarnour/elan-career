@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 from pydantic import BaseModel
 
 T = TypeVar("T", bound=BaseModel)
 
+if TYPE_CHECKING:
+    from smartapply.llm.fit_response import FitEvaluationResponse
+
 
 class LLMProvider(ABC):
     """Abstract LLM provider with a single structured-output method.
 
-    Implementations must validate the returned object against ``schema``
-    before returning it, raising ``LLMError`` otherwise.
+    Implementations validate the returned data before returning it. Fit evaluation
+    is special: its generation schema guides the model, while the response reader
+    requires only three usable levels and preserves imperfect annotations.
     """
 
     name: str = ""
@@ -33,7 +37,7 @@ class LLMProvider(ABC):
         use_cache: bool = True,
         refresh_cache: bool = False,
         max_completion_tokens: int | None = None,
-    ) -> T: ...
+    ) -> T | FitEvaluationResponse: ...
 
     @property
     @abstractmethod

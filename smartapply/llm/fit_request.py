@@ -1,12 +1,9 @@
-"""Bounded evaluation request; correction only for unreadable structured output."""
+"""One evaluation request; usable levels are independent of annotation quality."""
 
 from __future__ import annotations
 
 import json
 
-from pydantic import ValidationError
-
-from smartapply.llm.cache import make_cache_key
 from smartapply.llm.fit_context import build_fit_user
 from smartapply.llm.fit_scoring import evaluate_fit
 from smartapply.llm.provider import LLMValidationError
@@ -62,69 +59,23 @@ def check_request_budget(context: dict, user: str) -> dict:
     }
 
 
-def invalidate_fit_cache(context: dict, user: str) -> None:
-    from sqlalchemy import select
-
-    from smartapply.database import write_session_scope
-    from smartapply.database.models import LLMCache
-
-    key = make_cache_key(
-        model=context["model"],
-        system=context["system_prompt"],
-        user=user,
-        schema_name=JobFitEvaluation.__name__,
-        extra={
-            "temperature": context["temperature"],
-            "schema": JobFitEvaluation.model_json_schema(),
-        },
-    )
-    with write_session_scope(notify=False) as session:
-        entry = session.scalar(select(LLMCache).where(LLMCache.cache_key == key))
-        if entry is not None:
-            session.delete(entry)
-
-
 def complete_fit(provider, context: dict, offer, *, job_id=None, extraction_provenance=None):
     """Return a score even when the evidence inspection reports warnings."""
-    original = build_fit_user(context, offer)
-    user = original
-    for attempt in range(2):
-        budget = check_request_budget(context, user)
-        diagnostic = None
-        try:
-            diagnostic = provider.complete_json(
-                system=context["system_prompt"],
-                user=user,
-                schema=JobFitEvaluation,
-                model=context["model"],
-                temperature=context["temperature"],
-                purpose="job_fit_assessment",
-                job_id=job_id,
-                use_cache=attempt == 0,
-                max_completion_tokens=context["max_completion_tokens"],
-            )
-            result, metadata = evaluate_fit(
-                diagnostic, context, offer, extraction_provenance=extraction_provenance
-            )
-            metadata["request_user"] = user
-            metadata["request_budget"] = budget
-            return result, metadata
-        except (LLMValidationError, ValidationError) as exc:
-            invalidate_fit_cache(context, user)
-            if attempt:
-                raise LLMValidationError(
-                    f"Fit evaluation failed after one correction: {exc}"
-                ) from exc
-            previous = (
-                diagnostic.model_dump_json()
-                if diagnostic is not None
-                else "Non conforme ou incomplète."
-            )
-            user = (
-                original
-                + "\n\n=== CORRECTION UNIQUE ===\n"
-                + str(exc)
-                + "\nRéponse précédente : "
-                + previous
-            )
-    raise AssertionError("unreachable")
+    user = build_fit_user(context, offer)
+    budget = check_request_budget(context, user)
+    diagnostic = provider.complete_json(
+        system=context["system_prompt"],
+        user=user,
+        schema=JobFitEvaluation,
+        model=context["model"],
+        temperature=context["temperature"],
+        purpose="job_fit_assessment",
+        job_id=job_id,
+        max_completion_tokens=context["max_completion_tokens"],
+    )
+    result, metadata = evaluate_fit(
+        diagnostic, context, offer, extraction_provenance=extraction_provenance
+    )
+    metadata["request_user"] = user
+    metadata["request_budget"] = budget
+    return result, metadata

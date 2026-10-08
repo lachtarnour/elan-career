@@ -13,9 +13,12 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
+from smartapply.llm.fit_response import FitEvaluationResponse, read_fit_response
 from smartapply.llm.provider import LLMError, LLMProvider
+from smartapply.llm.schemas import JobFitEvaluation
 
 T = TypeVar("T", bound=BaseModel)
+MockResponse = BaseModel | FitEvaluationResponse | dict | str
 
 
 class MockLLMProvider(LLMProvider):
@@ -23,9 +26,11 @@ class MockLLMProvider(LLMProvider):
 
     # Class-level defaults keep the terse test API, while each instance copies
     # them at construction time so later test setup cannot mutate existing mocks.
-    _default_registry: dict[str, BaseModel | Callable[..., BaseModel]] = {}
+    _default_registry: dict[str, MockResponse | Callable[..., MockResponse]] = {}
 
-    def __init__(self, registry: dict[str, BaseModel | Callable[..., BaseModel]] | None = None):
+    def __init__(
+        self, registry: dict[str, MockResponse | Callable[..., MockResponse]] | None = None
+    ):
         self._registry = dict(
             registry if registry is not None else self.__class__._default_registry
         )
@@ -39,7 +44,7 @@ class MockLLMProvider(LLMProvider):
         return "mock-cheap"
 
     @classmethod
-    def register(cls, purpose: str, response: BaseModel | Callable[..., BaseModel]) -> None:
+    def register(cls, purpose: str, response: MockResponse | Callable[..., MockResponse]) -> None:
         cls._default_registry[purpose] = response
 
     @classmethod
@@ -59,7 +64,7 @@ class MockLLMProvider(LLMProvider):
         use_cache: bool = True,
         refresh_cache: bool = False,
         max_completion_tokens: int | None = None,
-    ) -> T:
+    ) -> T | FitEvaluationResponse:
         if purpose not in self._registry:
             raise LLMError(
                 f"No mock response registered for purpose={purpose!r}. "
@@ -70,6 +75,8 @@ class MockLLMProvider(LLMProvider):
             response = response(
                 system=system, user=user, schema=schema, purpose=purpose, job_id=job_id
             )
+        if schema is JobFitEvaluation:
+            return read_fit_response(response)
         if not isinstance(response, schema):
             raise LLMError(
                 f"Registered response type {type(response).__name__} does not "

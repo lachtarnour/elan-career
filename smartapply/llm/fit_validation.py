@@ -93,16 +93,13 @@ def inspect_evaluation(
             if finding.support in POSITIVE:
                 if not sources or "identity" in types or "preference" in types:
                     fail(f"{axis}: positive capability needs appropriate candidate facts")
-                if axis != "essentials" and types - {"bullet"}:
+                if axis != "essentials" and "bullet" not in types:
                     fail(f"{axis}: accomplishments require experience/project bullets")
-                if finding.support == "declared_only" and types - {
-                    "declared_skill",
-                    "languages",
-                    "education",
-                    "certificates",
-                }:
-                    fail(f"{axis}: declared_only is not a realization")
-                if finding.support in {"direct", "transferable"} and "declared_skill" in types:
+                if (
+                    finding.support in {"direct", "transferable"}
+                    and "declared_skill" in types
+                    and "bullet" not in types
+                ):
                     fail(f"{axis}: ordinary declared skills must remain declared_only")
                 if finding.support == "direct" and any(
                     source["source_type"] == "bullet"

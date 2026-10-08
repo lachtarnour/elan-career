@@ -389,51 +389,24 @@ def test_evidence_warnings_keep_cached_score_without_correction(isolated_db):
         }
 
 
-def test_unreadable_output_gets_one_correction_and_exact_cache_eviction(isolated_db):
-    context, facts, evaluation = fixture()
-    key = make_cache_key(
-        model=context["model"],
-        system=context["system_prompt"],
-        user=build_fit_user(context, facts),
-        schema_name="JobFitEvaluation",
-        extra={"temperature": 0.2, "schema": JobFitEvaluation.model_json_schema()},
-    )
-    with session_scope() as session:
-        for cache_key in (key, "unrelated"):
-            cache_set(
-                session,
-                cache_key=cache_key,
-                model=context["model"],
-                response="{}",
-                prompt_tokens=1,
-                completion_tokens=1,
-            )
+def test_unreadable_output_does_not_trigger_automatic_correction(isolated_db):
+    context, facts, _ = fixture()
     calls = []
 
     def complete(**kwargs):
         calls.append(kwargs)
-        if len(calls) == 1:
-            raise LLMValidationError("Missing dimensions")
-        return evaluation
-
-    public, _ = complete_fit(SimpleNamespace(complete_json=complete), context, facts)
-    assert public.fit_score == 0.88 and len(calls) == 2
-    assert "CORRECTION UNIQUE" in calls[1]["user"] and calls[1]["use_cache"] is False
-    with session_scope() as session:
-        assert [entry.cache_key for entry in session.scalars(select(LLMCache))] == ["unrelated"]
-    calls.clear()
-
-    def always_invalid(**kwargs):
-        calls.append(kwargs)
         raise LLMValidationError("Missing dimensions")
 
-    with pytest.raises(LLMError, match="after one correction"):
-        complete_fit(SimpleNamespace(complete_json=always_invalid), context, facts)
-    assert len(calls) == 2
+    with pytest.raises(LLMValidationError, match="Missing dimensions"):
+        complete_fit(SimpleNamespace(complete_json=complete), context, facts)
+    assert len(calls) == 1
+    assert "CORRECTION UNIQUE" not in calls[0]["user"]
 
 
 @pytest.mark.parametrize("finish,refusal", [("length", None), ("stop", "Refused")])
-def test_truncated_or_refused_valid_json_is_not_cached(isolated_db, monkeypatch, finish, refusal):
+def test_provider_flags_with_usable_levels_are_observations(
+    isolated_db, monkeypatch, finish, refusal
+):
     context, facts, evaluation = fixture()
     provider = OpenAIProvider()
     calls = []
@@ -451,11 +424,14 @@ def test_truncated_or_refused_valid_json_is_not_cached(isolated_db, monkeypatch,
         )
 
     monkeypatch.setattr(provider, "_call_openai", api)
-    with pytest.raises(LLMError):
-        complete_fit(provider, context, facts)
-    assert len(calls) == 2
+    public, diagnostics = complete_fit(provider, context, facts)
+    assert public.fit_score == 0.88 and len(calls) == 1
+    assert any(
+        "usable levels retained" in warning
+        for warning in diagnostics["diagnostic_checks"]["warnings"]
+    )
     with session_scope() as session:
-        assert list(session.scalars(select(LLMCache))) == []
+        assert len(list(session.scalars(select(LLMCache)))) == 1
 
 
 def test_complete_request_budget_includes_schema_and_output_reserve():
@@ -747,7 +723,7 @@ def test_legacy_batch_uses_recorded_schema_without_invented_levels(isolated_db):
         assert "evaluation" not in saved.fit_diagnostics
 
 
-def test_missing_historical_batch_schema_requires_explicit_resumption(isolated_db):
+def test_missing_batch_schema_with_identifiable_levels_is_nonblocking(isolated_db):
     job_id = seed_jobs()[0]
     with session_scope() as session:
         run, item, request, _, evaluation = batch_fixture(session, job_id)
@@ -760,8 +736,13 @@ def test_missing_historical_batch_schema_requires_explicit_resumption(isolated_d
             {"body": body, "cache_key": request.cache_key, "item_ids": [item.id]},
             BatchResult(custom_id=request.custom_id, content=evaluation.model_dump_json()),
         )
-        assert item.state == "evaluation_failed" and "Schéma historique" in item.error
-        assert session.get(Job, job_id).analysis is None
+        assert item.state == "completed"
+        saved = session.get(Job, job_id).analysis
+        assert saved.fit_score == 0.88
+        assert any(
+            "schema unavailable" in warning
+            for warning in saved.fit_diagnostics["diagnostic_checks"]["warnings"]
+        )
 
 
 def test_grouped_batch_cannot_copy_response_to_different_offer(isolated_db):

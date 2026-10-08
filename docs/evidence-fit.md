@@ -15,11 +15,21 @@ leur portée. Il ne retourne aucune note finale. Python calcule
 `(50 × missions + 30 × essentials + 20 × responsibilities) / 400`, applique
 le minimum des plafonds et arrondit avec `Decimal` / `ROUND_HALF_UP`.
 
-Les contrôles de références, de couverture et de cohérence sont **consultatifs**.
-Une référence inconnue, des sources mélangées, une exigence non couverte ou un
-problème mal classé sont enregistrés dans `diagnostic_checks.warnings`. Ils ne
-refusent pas la note, ne changent pas les niveaux et ne déclenchent pas de nouvel
-appel. Le diagnostic original est conservé, sans réparation sémantique silencieuse.
+Le schéma strict `JobFitEvaluation` guide la **génération**, mais ne conditionne
+jamais la lecture des niveaux. `fit_response.read_fit_response` lit séparément les
+trois entiers non ambigus de 0 à 4. Des annotations absentes, des types incorrects,
+une origine manquante, un libellé inconnu ou des champs supplémentaires ne bloquent
+pas un résultat contenant ces trois niveaux. Une note libre `fit_score` est ignorée.
+
+Les contrôles de références, de preuves, de couverture, de neutralisation et de
+cohérence sont **définitivement consultatifs**. Le score est calculé avant leur
+exécution. Chaque contrôle reçoit une copie des données ; une exception ou un
+retour incorrect devient une observation dans `diagnostic_checks.warnings`.
+Ces contrôles, y compris ceux ajoutés ultérieurement, ne refusent pas la note, ne
+changent pas les niveaux, n'ajoutent aucune pénalité et ne déclenchent pas de nouvel
+appel. Les références Skill et bullet peuvent être citées ensemble sans transformer
+la Skill en réalisation. Le diagnostic original est conservé, sans réparation
+sémantique silencieuse.
 `diagnostic_checks.mode` vaut `advisory` et son statut vaut `ok` ou `warnings`.
 
 | Règle | Résultat |
@@ -32,7 +42,9 @@ appel. Le diagnostic original est conservé, sans réparation sémantique silenc
 | Skill déclarée sans projet associé | Source valable, aucun plafond de source |
 
 Le résultat public conserve les trois champs `fit_score`, `match_reasons`, `risks`.
-Le diagnostic est stocké séparément dans `job_analyses.fit_diagnostics` : faits
+Le diagnostic est stocké séparément dans `job_analyses.fit_diagnostics` : réponse
+brute originale (`evaluation` et texte exact `original_response` lorsqu'il est
+disponible), niveaux utilisés (`used_levels`), observations, faits
 immuables, références, extraction disponible, prompts, schéma, paramètres, politique,
 empreintes, calcul et horodatage. Les références historiques se résolvent dans cette
 copie des faits, indépendamment des modifications futures du profil.
@@ -40,22 +52,34 @@ copie des faits, indépendamment des modifications futures du profil.
 Les calculs immédiat, Batch et cache passent par les mêmes fonctions. Un lot garde
 son contexte dès sa création. Un changement factuel ou de politique bloque sa
 publication. Un changement de style ou de sélection du CV ne change pas ce contexte.
-L’import Batch vérifie le schéma enregistré dans chaque requête. Un ancien résultat
-valide conserve sa provenance ancienne ; ses niveaux ne sont jamais inventés. Une
-requête sans schéma identifiable reste en échec et nécessite une reprise explicite.
+L’import Batch inspecte le schéma enregistré à titre consultatif pour les diagnostics
+à trois niveaux. Un schéma manquant ou inconnu ne bloque pas trois niveaux
+identifiables dans un contexte figé. Si le schéma et les niveaux sont tous deux
+inidentifiables, la requête reste en échec explicite. Un ancien résultat compatible
+avec son schéma enregistré conserve sa provenance ancienne ; ses niveaux ne sont
+jamais inventés.
 
-Une réponse exploitable au schéma produit un score, même si son diagnostic présente
-des observations. Le prompt précise les types de preuves par axe, sépare compétences
+Une réponse contenant trois niveaux exploitables produit un score, même si son
+diagnostic ne respecte pas le schéma de génération. Le prompt précise les types de
+preuves par axe, distingue compétences
 déclarées et réalisations, et fournit une liste de couverture des exigences. Les
 années sont interprétées par le LLM : aucune grammaire Python ne prétend reconnaître
 ou rejeter les formulations d’ancienneté.
 
-Une réponse illisible ou incompatible avec le schéma (par exemple trois niveaux
-absents), un refus fournisseur ou une réponse tronquée restent des erreurs techniques.
-Le mode immédiat autorise alors une seule correction ; une absence de données
-numériques ne donne pas lieu à l’invention d’un score. Le Batch signale cette erreur
-technique sans nouvelle soumission automatique. Seul un cache techniquement invalide
-est écarté ; un diagnostic avec observations reste utilisable depuis le cache.
+Une réponse illisible ou sans trois niveaux exploitables produit une erreur explicite,
+sans score inventé et sans appel de correction automatique. L'ancien résultat réussi
+est conservé en cas d'échec d'un recalcul. Un indicateur fournisseur de refus ou de
+sortie incomplète reste une observation si le contenu contient effectivement les
+trois niveaux exploitables ; un contenu réellement tronqué qui empêche leur lecture
+reste inexploitable. Seul un cache privé des données minimales peut être rafraîchi
+de manière ciblée ; les erreurs d'annotations ne justifient jamais son éviction.
+
+Les codes métier reconnus sont lus indépendamment de leurs annotations : leur
+plafond reste applicable même si l'axe, l'origine ou les références sont incorrects.
+Un code inconnu est conservé et signalé, sans plafond inventé. Les vérificateurs ne
+peuvent ni ajouter ni supprimer un plafond. Les poids, plafonds, garde-fous et arrondi
+restent inchangés ; `evidence_fit_calculation_v2` trace la lecture désormais tolérante
+des codes inconnus, et `fit_levels_reader_v1` versionne la lecture des niveaux.
 
 ## Diagnostics et recalcul
 
@@ -177,10 +201,15 @@ ne démontrent pas la justesse sémantique de tous les futurs appels réels.
 make check
 ```
 
-Les scénarios dédiés sont dans `tests/test_evidence_fit.py`, complétés par les tests
+Les scénarios dédiés sont dans `tests/test_evidence_fit.py` et
+`tests/test_fit_nonblocking.py`, complétés par les tests
 du parcours immédiat, du Batch, du cache, de l’admission et du pipeline. Ils utilisent
 une base temporaire et des fournisseurs simulés. Aucun appel LLM réel ni recalcul de
-la base utilisateur n’est nécessaire à cette vérification.
+la base utilisateur n’est nécessaire à cette vérification. Les tests de non-régression
+font traverser des annotations incorrectes aux lecteurs réels, au mode immédiat,
+au Batch, au cache et à la sauvegarde. Ils injectent aussi des exceptions et des
+mutations dans les futurs contrôles, vérifient l'absence de nouvel appel, la conservation
+du barème et la préservation de l'ancien résultat lorsque les niveaux sont absents.
 
 ## Cause du problème observé dans v4
 

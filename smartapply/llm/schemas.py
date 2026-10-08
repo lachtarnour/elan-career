@@ -169,7 +169,11 @@ class NeutralOfferReference(BaseModel):
 
 
 class JobFitEvaluation(BaseModel):
-    """Internal evidence diagnostic. Python alone produces the public score."""
+    """Generation contract, never a prerequisite for reading usable fit levels.
+
+    Runtime scoring uses fit_response.read_fit_response; annotation conformity is
+    inspected after calculation and remains advisory on every path.
+    """
 
     model_config = _strict
     dimensions: FitDimensions

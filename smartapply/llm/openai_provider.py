@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TypeVar
 
 from openai import APIConnectionError, APITimeoutError, RateLimitError
@@ -18,7 +19,9 @@ from smartapply.database.repository import (
     record_usage,
 )
 from smartapply.llm.cache import make_cache_key
+from smartapply.llm.fit_response import FitEvaluationResponse, read_fit_response
 from smartapply.llm.provider import LLMError, LLMProvider, LLMValidationError
+from smartapply.llm.schemas import JobFitEvaluation
 from smartapply.llm.usage import estimate_cost_usd
 from smartapply.logging_setup import get_logger
 
@@ -111,7 +114,7 @@ class OpenAIProvider(LLMProvider):
         use_cache: bool = True,
         refresh_cache: bool = False,
         max_completion_tokens: int | None = None,
-    ) -> T:
+    ) -> T | FitEvaluationResponse:
         model_name = model or self.cheap_model
         cache_key = make_cache_key(
             model=model_name,
@@ -127,7 +130,7 @@ class OpenAIProvider(LLMProvider):
         )
 
         # --- Cache lookup ---
-        cached_result: T | None = None
+        cached_result: T | FitEvaluationResponse | None = None
         cached_token_counts: tuple[int, int] | None = None
         if use_cache:
             try:
@@ -228,11 +231,23 @@ class OpenAIProvider(LLMProvider):
         # so usage is recorded independently from the cache write.
         try:
             choice = response.choices[0]
-            if getattr(choice, "finish_reason", None) not in {None, "stop"}:
-                raise LLMValidationError("Incomplete LLM response; no evaluation published")
-            if getattr(choice.message, "refusal", None):
-                raise LLMValidationError("LLM refused the structured request")
             validated = self._validate(content, schema)
+            finish, refusal = (
+                getattr(choice, "finish_reason", None),
+                getattr(choice.message, "refusal", None),
+            )
+            if isinstance(validated, FitEvaluationResponse):
+                observations = []
+                if finish not in {None, "stop"}:
+                    observations.append(f"Provider finish reason {finish}; usable levels retained")
+                if refusal:
+                    observations.append("Provider refusal flag; usable levels retained")
+                validated = replace(validated, observations=observations)
+            else:
+                if finish not in {None, "stop"}:
+                    raise LLMValidationError("Incomplete LLM response; no evaluation published")
+                if refusal:
+                    raise LLMValidationError("LLM refused the structured request")
         except LLMValidationError:
             self._record_api_usage(
                 purpose=purpose,
@@ -278,7 +293,9 @@ class OpenAIProvider(LLMProvider):
     # -------------------- helpers --------------------
 
     @staticmethod
-    def _validate(raw: str, schema: type[T]) -> T:
+    def _validate(raw: str, schema: type[T]) -> T | FitEvaluationResponse:
+        if schema is JobFitEvaluation:
+            return read_fit_response(raw)
         try:
             return schema.model_validate(json.loads(raw))
         except (json.JSONDecodeError, ValidationError) as e:

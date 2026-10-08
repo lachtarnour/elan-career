@@ -9,15 +9,17 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
 from smartapply.config import get_settings
 from smartapply.llm.cache import make_cache_key
+from smartapply.llm.fit_response import FitEvaluationResponse, read_fit_response
 from smartapply.llm.openai_provider import OpenAIProvider, _to_strict_schema
 from smartapply.llm.provider import LLMError, LLMValidationError
+from smartapply.llm.schemas import JobFitEvaluation
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -275,8 +277,13 @@ class BatchResult:
     def successful(self) -> bool:
         return self.error_code is None and self.error_message is None
 
-    def validate(self, schema: type[T]) -> T:
+    def validate(self, schema: type[T]) -> T | FitEvaluationResponse:
         if not self.successful:
+            if schema is JobFitEvaluation and self.error_code in {"refusal", "incomplete_output"}:
+                parsed = read_fit_response(self.content)
+                return replace(
+                    parsed, observations=[f"Provider {self.error_code}; usable levels retained"]
+                )
             raise LLMValidationError(
                 f"Batch request {self.custom_id} failed: {self.error_message or self.error_code}"
             )
@@ -340,10 +347,16 @@ def _parse_result(raw: Mapping[str, Any]) -> BatchResult:
     message = _as_mapping(choice.get("message"))
     content = message.get("content")
     if message.get("refusal"):
-        return BatchResult(**common, error_code="refusal", error_message=str(message["refusal"]))
+        return BatchResult(
+            **common,
+            content=content if isinstance(content, str) else "",
+            error_code="refusal",
+            error_message=str(message["refusal"]),
+        )
     if choice.get("finish_reason") != "stop":
         return BatchResult(
             **common,
+            content=content if isinstance(content, str) else "",
             error_code="incomplete_output",
             error_message=f"Completion ended with {choice.get('finish_reason')!r}",
         )

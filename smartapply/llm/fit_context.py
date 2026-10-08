@@ -14,7 +14,7 @@ from smartapply.llm.schemas import JobFitEvaluation, OfferAnalysis
 from smartapply.profile import Bullet, Profile
 
 POLICY_VERSION = "evidence_fit_v5"
-CALCULATION_VERSION = "evidence_fit_calculation_v1"
+CALCULATION_VERSION = "evidence_fit_calculation_v2"
 POLICY = {
     "version": POLICY_VERSION,
     "calculation_version": CALCULATION_VERSION,
@@ -179,6 +179,7 @@ def build_fit_context(profile: Profile, model: str, *, max_completion_tokens=Non
         "user_template": load_prompt("job_fit/user.j2"),
         "prompt_version": "evidence_fit_v5",
         "schema_version": "job_fit_evaluation_v1",
+        "response_reader_version": "fit_levels_reader_v1",
         "schema": _to_strict_schema(JobFitEvaluation),
         "model": model,
         "temperature": 0.2,
