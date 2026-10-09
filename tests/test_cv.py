@@ -1,4 +1,4 @@
-"""Tests for the CV module — selector, adapter, validator, docx renderer."""
+"""Tests for the CV module — adapter, validator, docx renderer."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import pytest
 
 from smartapply.cv import (
     CvAdapter,
-    CvBlockSelector,
     CvDocxRenderer,
     CvValidator,
     HtmlApplicationRenderer,
@@ -30,11 +29,10 @@ from smartapply.llm import (
     MotivationLetter,
     MotivationLetterRepair,
 )
-from smartapply.llm.prompts import application_draft, cv_adaptation
+from smartapply.llm.prompts import cv_adaptation
 from smartapply.pipeline.apply.cv_writer import CvWriterMixin, _document_company_label
 from smartapply.pipeline.reports import ApplyReport
 from smartapply.profile import Degree, get_profile
-from smartapply.ranking import MockEmbeddingsProvider
 from smartapply.utils.skill_terms import skill_term_matches
 
 pytestmark = pytest.mark.usefixtures("isolated_db")
@@ -58,24 +56,6 @@ def _sample_analysis() -> JobAnalysis:
     )
 
 
-def test_selector_batches_all_embedding_inputs_into_one_call() -> None:
-    class CountingEmbeddings(MockEmbeddingsProvider):
-        def __init__(self):
-            self.calls: list[list[str]] = []
-
-        def embed(self, texts: list[str]) -> list[list[float]]:
-            self.calls.append(list(texts))
-            return super().embed(texts)
-
-    profile = get_profile()
-    embeddings = CountingEmbeddings()
-
-    result = CvBlockSelector(embeddings).select(profile, _sample_analysis())
-
-    assert result.experiences
-    assert result.projects
-    assert len(embeddings.calls) == 1
-    assert len(embeddings.calls[0]) == 1 + len(profile.experiences) + len(profile.projects)
 
 
 def _valid_adapted_cv() -> AdaptedCV:
@@ -123,9 +103,6 @@ def _selected_skill_map(cv: AdaptedCV) -> dict[str, list[str]]:
     return {block.category_id: list(block.skills) for block in cv.selected_skills}
 
 
-# ---------------- Selector ----------------
-
-
 # ---------------- Adapter ----------------
 
 
@@ -134,8 +111,7 @@ def test_offer_skill_matching_prefers_specific_nested_skills() -> None:
     adapter = CvAdapter(
         profile,
         llm=MockLLMProvider(),
-        embeddings=MockEmbeddingsProvider(),
-    )
+        )
 
     cases = [
         ("PySpark", "data_infra", ["PySpark"]),
@@ -170,7 +146,7 @@ def test_graph_theory_translation_survives_cv_skill_filters(term: str) -> None:
     analysis = _analysis_with_required_skills([]).model_copy(
         update={"cv_keywords_to_include": [term], "role_type": "Optimization Engineer"}
     )
-    adapter = CvAdapter(profile, llm=MockLLMProvider(), embeddings=MockEmbeddingsProvider())
+    adapter = CvAdapter(profile, llm=MockLLMProvider())
 
     adapted = adapter._ensure_supported_offer_skills(_empty_skills_cv(), analysis)
     assert _selected_skill_map(adapted) == {"stats_signal": ["Graph Theory"]}
@@ -228,14 +204,14 @@ def test_adapter_produces_letter_after_final_cv_and_review() -> None:
             issues=[],
         ),
     )
-    adapter = CvAdapter(get_profile(), embeddings=MockEmbeddingsProvider())
-    adapted, letter, selection = adapter.adapt_application(
+    adapter = CvAdapter(get_profile())
+    adapted, letter = adapter.adapt_application(
         _sample_analysis(), job_title="Data Scientist NLP", job_company="Acme"
     )
     assert adapted.cv_title.startswith("Data Scientist")
     assert adapted.professional_summary == cv.professional_summary
     assert letter.subject.startswith("Application")
-    assert len(selection.experiences) >= 1
+    assert adapted.selected_experiences
     assert adapted.selected_project_ids == cv.selected_project_ids
 
 
@@ -261,16 +237,14 @@ def test_adapter_keeps_three_final_projects_in_llm_order() -> None:
     adapter = CvAdapter(
         profile,
         llm=MockLLMProvider({"cv_adaptation": personalization}),
-        embeddings=MockEmbeddingsProvider(),
-    )
+        )
 
-    adapted, selection = adapter.adapt(
+    adapted = adapter.adapt(
         _sample_analysis(), job_title="Data Scientist NLP", job_company="Example"
     )
 
     assert "professional_summary" not in adapted.model_dump()
     assert adapted.selected_project_ids == chosen
-    assert [project.id for project in selection.projects] == chosen
 
 
 @pytest.mark.parametrize("available_count", [0, 1, 2, 5])
@@ -736,7 +710,7 @@ def test_cv_renderers_translate_french_university_label(tmp_path: Path) -> None:
     assert "09/2022 – 09/2024" in full_text
 
 
-def test_application_draft_prompt_separates_matching_keywords_from_display_skills() -> None:
+def test_cv_prompt_separates_matching_keywords_from_display_skills() -> None:
     profile = get_profile()
     analysis = _sample_analysis().model_copy(
         update={
@@ -758,15 +732,6 @@ def test_application_draft_prompt_separates_matching_keywords_from_display_skill
             ],
         }
     )
-    app_prompt = application_draft.build_user_prompt(
-        profile=profile,
-        analysis=analysis,
-        job_title="Clinical AI Engineer",
-        job_company="Acme Health",
-        selected_experiences=profile.experiences[:1],
-        selected_projects=profile.projects[:2],
-        language="en",
-    )
     cv_prompt = cv_adaptation.build_user_prompt(
         profile=profile,
         analysis=analysis,
@@ -775,17 +740,13 @@ def test_application_draft_prompt_separates_matching_keywords_from_display_skill
         selected_experiences=profile.experiences[:1],
         selected_projects=profile.projects[:2],
     )
-    for prompt in (app_prompt, cv_prompt):
-        assert "allowed_skills_by_category" in prompt
-        assert "core_skills_by_category" in prompt
-        assert "matching_keywords_for_profile_selection_not_display" in prompt
-        assert "project_selection_reasons" in prompt
-        profile_context, offer_context = prompt.split("=== JOB ===", 1)
-        for category in profile.skills.categories:
-            for skill in category.skills:
-                assert skill in profile_context
-        for term in analysis.required_skills + analysis.cv_keywords_to_include:
-            assert term in offer_context
-    assert analysis.company_context in app_prompt
-    for point in analysis.offer_interest_points:
-        assert point in app_prompt
+    assert "allowed_skills_by_category" in cv_prompt
+    assert "core_skills_by_category" in cv_prompt
+    assert "matching_keywords_for_profile_selection_not_display" in cv_prompt
+    assert "project_selection_reasons" in cv_prompt
+    profile_context, offer_context = cv_prompt.split("=== JOB ===", 1)
+    for category in profile.skills.categories:
+        for skill in category.skills:
+            assert skill in profile_context
+    for term in analysis.required_skills + analysis.cv_keywords_to_include:
+        assert term in offer_context

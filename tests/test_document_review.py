@@ -29,7 +29,6 @@ from smartapply.llm.schemas import DocumentReviewIssue, DocumentTextReview
 from smartapply.pipeline.apply.cv_writer import CvWriterMixin
 from smartapply.pipeline.reports import ApplyReport
 from smartapply.profile import load_profile
-from smartapply.ranking import MockEmbeddingsProvider
 
 
 class _SequentialProvider(MockLLMProvider):
@@ -58,7 +57,6 @@ class _ReviewHarness(CvWriterMixin):
         forbidden = Mock(side_effect=AssertionError("Text review must not rebuild selections"))
         self.adapter = SimpleNamespace(
             _ensure_supported_offer_skills=forbidden,
-            _ensure_summary_skills_visible=forbidden,
             _apply_role_family_contract=forbidden,
         )
         self.validator.auto_fix = Mock(
@@ -142,7 +140,6 @@ def _run(documents, responses, *, reference_date=None, initial_warnings=()):
     with ExitStack() as stack:
         for method in (
             "_ensure_supported_offer_skills",
-            "_ensure_summary_skills_visible",
             "_apply_role_family_contract",
         ):
             stack.enter_context(
@@ -490,7 +487,7 @@ def test_correction_outside_objective_limits_rolls_back_before_confirmation(docu
     assert reviewed_cv == cv and reviewed_letter == letter
 
 
-def test_legacy_adapt_application_no_longer_generates_a_joint_application_draft(documents):
+def test_adapt_application_uses_separate_selection_text_and_review_calls(documents):
     profile, cv, letter, analysis = documents
     personalization = CVSelection.model_validate(
         {
@@ -513,9 +510,9 @@ def test_legacy_adapt_application_no_longer_generates_a_joint_application_draft(
         motivation_letter_body=letter.body,
     )
     provider = _SequentialProvider([personalization, texts, _review()])
-    adapter = CvAdapter(profile, llm=provider, embeddings=MockEmbeddingsProvider())
+    adapter = CvAdapter(profile, llm=provider)
 
-    adapted, generated_letter, _ = adapter.adapt_application(
+    adapted, generated_letter = adapter.adapt_application(
         analysis,
         job_title="Data Scientist",
         job_company="Example",
@@ -532,7 +529,6 @@ def test_legacy_adapt_application_no_longer_generates_a_joint_application_draft(
         ApplicationTexts,
         DocumentTextReview,
     ]
-    assert all(call["purpose"] != "application_draft" for call in provider.calls)
     assert all(call["refresh_cache"] is True for call in provider.calls)
     assert adapted.cv_title in provider.calls[1]["user"]
     assert adapted.professional_summary not in provider.calls[1]["user"]
@@ -577,9 +573,9 @@ def test_legacy_adapt_application_keeps_documents_and_diagnostics_despite_review
         motivation_letter_body=invalid_letter.body,
     )
     provider = _SequentialProvider([personalization, texts, _review()])
-    adapter = CvAdapter(profile, llm=provider, embeddings=MockEmbeddingsProvider())
+    adapter = CvAdapter(profile, llm=provider)
 
-    adapted, generated_letter, _ = adapter.adapt_application(
+    adapted, generated_letter = adapter.adapt_application(
         analysis,
         job_title="Data Scientist",
         job_company="Example",

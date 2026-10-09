@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from smartapply.concurrency import job_operation
-from smartapply.config import get_settings
+from smartapply.config import get_llm_settings
 from smartapply.database import session_scope, write_session_scope
 from smartapply.database.analysis_batches import AnalysisBatchItem
 from smartapply.database.models import Job, JobStatus
@@ -23,6 +23,8 @@ from smartapply.llm.fit_context import (
 )
 from smartapply.llm.fit_request import complete_fit
 from smartapply.llm.prompts import job_analysis
+from smartapply.llm.request_options import stage_effort
+from smartapply.llm.routes import frozen_provider, resolve_route
 from smartapply.llm.schemas import JobAnalysis, OfferAnalysis, OfferExtractionOutput
 from smartapply.offers import build_analyzer_input
 from smartapply.pipeline.errors import StaleTaskResultError
@@ -37,7 +39,6 @@ from smartapply.profile import get_profile
 EXCLUDED_STATUSES = {
     JobStatus.SENT,
     JobStatus.INTERVIEW,
-    JobStatus.REJECTED,
     JobStatus.QUALITY_REJECTED,
     JobStatus.ARCHIVED,
     "closed",
@@ -46,7 +47,7 @@ EXCLUDED_STATUSES = {
 }
 SELECTION_DESCRIPTION = (
     "Active canonical offers with a successful analysis and fit; ready unsent applications included. "
-    "Sent/interview/rejected/archived/quality_rejected/closed/withdrawn/removed offers, "
+    "Sent/interview/archived/quality_rejected/closed/withdrawn/removed offers, "
     "secondary duplicates, pending duplicate groups and reserved workflows excluded."
 )
 
@@ -165,7 +166,15 @@ def prepare_rescore_plan(
 ) -> dict:
     if bool(job_ids) == bool(all_active):
         raise ValueError("Choose explicit job IDs or all-active, exclusively")
-    context = build_fit_context(profile or get_profile(), get_settings().openai_model_cheap)
+    settings = get_llm_settings()
+    fit_route = resolve_route(settings, "job_fit_assessment")
+    extraction_route = resolve_route(settings, "job_offer_extraction")
+    context = build_fit_context(
+        profile or get_profile(),
+        fit_route.model,
+        provider=fit_route.provider,
+        settings=settings,
+    )
     entries = []
     with session_scope() as session:
         reserved = reserved_analysis_job_ids(session)
@@ -244,9 +253,17 @@ def prepare_rescore_plan(
             "system": job_analysis.build_system_prompt(),
             "schema": OfferExtractionOutput.model_json_schema(),
             "temperature": 0.2,
-            "max_completion_tokens": get_settings().openai_max_completion_tokens,
+            "max_completion_tokens": extraction_route.max_output_tokens,
+            "provider": extraction_route.provider,
+            "model": extraction_route.model,
+            "reasoning": extraction_route.reasoning or "auto",
         },
     }
+    extraction_effort = stage_effort(
+        extraction_route.provider, extraction_route.model, "job_offer_extraction", settings=settings
+    )
+    if extraction_effort is not None:
+        plan["extraction_request"]["effort"] = extraction_effort
     plan["plan_fingerprint"] = fingerprint(plan)
     return plan
 
@@ -274,6 +291,21 @@ def execute_rescore_plan(plan: dict, provider, *, approved=False, profile=None) 
     if plan.get("plan_version") != 1 or fingerprint(unsigned) != plan.get("plan_fingerprint"):
         raise ValueError("Invalid or modified rescore plan")
     context = plan["context"]
+    fit_provider = frozen_provider(
+        provider, context.get("provider"), context.get("model"),
+        purpose="job_fit_assessment",
+        reasoning=context.get("configured_reasoning", context.get("effort")),
+        max_output_tokens=context.get("max_completion_tokens"),
+    )
+    extraction_request = plan["extraction_request"]
+    extraction_name = extraction_request.get("provider")
+    extraction_model = extraction_request.get("model")
+    extraction_provider = frozen_provider(
+        provider, extraction_name, extraction_model,
+        purpose="job_offer_extraction",
+        reasoning=extraction_request.get("reasoning", extraction_request.get("effort")),
+        max_output_tokens=extraction_request.get("max_completion_tokens"),
+    )
     results = []
     for entry in plan["entries"]:
         job_id = entry["job_id"]
@@ -285,11 +317,9 @@ def execute_rescore_plan(plan: dict, provider, *, approved=False, profile=None) 
             with job_operation([job_id], operation="recalcul fit"):
 
                 def validate_source(session, job_id=job_id, entry=entry):
-                    if context[
-                        "model"
-                    ] != get_settings().openai_model_cheap or not context_is_current(
-                        context, profile or get_profile()
-                    ):
+                    if not context_is_current(context, profile or get_profile()):
+                        raise StaleTaskResultError()
+                    if getattr(fit_provider, "name", None) != context["provider"]:
                         raise StaleTaskResultError()
                     job = session.get(Job, job_id)
                     reason = eligibility_reason(session, job, reserved_analysis_job_ids(session))
@@ -309,8 +339,6 @@ def execute_rescore_plan(plan: dict, provider, *, approved=False, profile=None) 
                         plan["extraction_request"]["system"] != job_analysis.build_system_prompt()
                         or plan["extraction_request"]["schema"]
                         != OfferExtractionOutput.model_json_schema()
-                        or plan["extraction_request"]["max_completion_tokens"]
-                        != get_settings().openai_max_completion_tokens
                     ):
                         raise StaleTaskResultError()
                     from smartapply.offers.analyzer_input import AnalyzerInput
@@ -320,25 +348,38 @@ def execute_rescore_plan(plan: dict, provider, *, approved=False, profile=None) 
                         analyzer_input=analyzer
                     ):
                         raise StaleTaskResultError()
-                    offer = provider.complete_json(
+                    if getattr(extraction_provider, "name", extraction_name) != extraction_name:
+                        raise StaleTaskResultError()
+                    offer = extraction_provider.complete_json(
                         system=plan["extraction_request"]["system"],
                         user=entry["extraction_user"],
                         schema=OfferExtractionOutput,
-                        model=context["model"],
-                        purpose="job_offer_analysis",
+                        model=extraction_model,
+                        purpose="job_offer_extraction",
                         job_id=job_id,
                         temperature=plan["extraction_request"]["temperature"],
                         max_completion_tokens=plan["extraction_request"]["max_completion_tokens"],
+                        effort=plan["extraction_request"].get("effort"),
                     )
                     offer = _ground_offer_excerpts(offer, analyzer.offer_body)
-                    provenance = {"analyzer_input": entry["analyzer_input"], "operation": operation}
+                    provenance = {
+                        "analyzer_input": entry["analyzer_input"],
+                        "operation": operation,
+                        "provider": extraction_name,
+                        "model": extraction_model,
+                        **(
+                            {"effort": plan["extraction_request"]["effort"]}
+                            if plan["extraction_request"].get("effort")
+                            else {}
+                        ),
+                    }
                 else:
                     offer = OfferAnalysis.model_validate(entry["offer_facts"])
                     provenance = entry["extraction_provenance"]
                 with session_scope() as session:
                     validate_source(session)
                 fit, diagnostics = complete_fit(
-                    provider, context, offer, job_id=job_id, extraction_provenance=provenance
+                    fit_provider, context, offer, job_id=job_id, extraction_provenance=provenance
                 )
                 with write_session_scope() as session:
                     job = validate_source(session)

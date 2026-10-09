@@ -151,10 +151,8 @@ def test_invalid_cv_structure_prevents_second_llm_call(text_inputs, invalid_part
 
 def test_fit_revision_preserves_nonfit_generation_inputs(text_inputs):
     from smartapply.llm.prompts import (
-        application_draft,
         application_texts,
         cv_adaptation,
-        motivation_letter,
     )
 
     profile, cv, analysis, context = text_inputs
@@ -182,14 +180,7 @@ def test_fit_revision_preserves_nonfit_generation_inputs(text_inputs):
     assert cv_adaptation.build_user_prompt(
         analysis=old, **selection
     ) == cv_adaptation.build_user_prompt(analysis=new, **selection)
-    for prompt in (application_texts, motivation_letter):
-        args = dict(profile=profile, adapted_cv=cv, reference_date=date(2026, 10, 8), **common)
-        assert prompt.build_user_prompt(analysis=old, **args) == prompt.build_user_prompt(
-            analysis=new, **args
-        )
-    # This existing consumer legitimately sees updated reasons/risks, and nothing else changes.
-    old_prompt = application_draft.build_user_prompt(analysis=old, **selection)
-    new_prompt = application_draft.build_user_prompt(analysis=new, **selection)
-    assert old_prompt == new_prompt.replace("NEW_REASON", "OLD_REASON").replace(
-        "NEW_RISK", "OLD_RISK"
-    )
+    args = dict(profile=profile, adapted_cv=cv, reference_date=date(2026, 10, 8), **common)
+    assert application_texts.build_user_prompt(
+        analysis=old, **args
+    ) == application_texts.build_user_prompt(analysis=new, **args)

@@ -236,34 +236,6 @@ def blocked_contract_tags_from_tags(
     return blocked
 
 
-def blocked_contract_tags(contract_type: str | None, accepted_values: list[str]) -> set[str]:
-    """Return incompatible tags that are not explicitly accepted.
-
-    CDD/fixed-term and intérim/temporary are profile-dependent: rejected by
-    default, but allowed when either CDD or intérim is accepted.
-    """
-    return blocked_contract_tags_from_tags(
-        contract_type_tags(contract_type),
-        accepted_values,
-    )
-
-
-def contract_matches_accepted(contract_type: str | None, accepted_values: list[str]) -> bool:
-    if not contract_type or not accepted_values:
-        return False
-
-    contract_tags = contract_type_tags(contract_type)
-    if blocked_contract_tags(contract_type, accepted_values):
-        return False
-    accepted_tags = contract_types_to_tags(accepted_values)
-    expanded_contract_tags = equivalent_contract_tags(contract_tags)
-    if expanded_contract_tags and accepted_tags and expanded_contract_tags & accepted_tags:
-        return True
-
-    contract_words = _contract_words(contract_type)
-    return any(_contains_marker(contract_words, value) for value in accepted_values)
-
-
 def should_filter_france_travail_to_cdi(accepted_values: list[str]) -> bool:
     """True when the accepted contracts are only permanent/full-time variants."""
     tags = contract_types_to_tags(accepted_values)

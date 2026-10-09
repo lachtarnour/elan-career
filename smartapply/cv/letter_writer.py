@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 
+from smartapply.config import get_llm_settings
 from smartapply.cv.motivation_validator import (
     MotivationLetterValidator,
     normalize_french_elisions,
@@ -25,8 +26,10 @@ from smartapply.llm import (
     LLMProvider,
     MotivationLetter,
 )
-from smartapply.llm.prompts import application_texts, document_review, motivation_letter
+from smartapply.llm.prompts import application_texts, document_review
 from smartapply.llm.prompts.document_context import allowed_source_ids
+from smartapply.llm.routes import provider_for
+from smartapply.llm_policy import resolve_route
 from smartapply.profile import Profile
 
 # Reuse the validators' findings; never estimate lengths or cut generated text here.
@@ -83,15 +86,21 @@ class ApplicationTextWriter:
             language=language,
             reference_date=self.reference_date,
         )
-        texts = self.llm.complete_json(
+        provider = provider_for(self.llm, "application_texts")
+        route = resolve_route(
+            getattr(self.llm, "_settings", None) or get_llm_settings(), "application_texts"
+        )
+        texts = provider.complete_json(
             system=application_texts.build_system_prompt(),
             user=prompt,
             schema=ApplicationTexts,
-            model=self.llm.smart_model,
+            model=route.model,
             temperature=0.3,
             purpose="application_texts",
             job_id=job_id,
             refresh_cache=refresh_cache,
+            effort=route.reasoning,
+            max_completion_tokens=route.max_output_tokens,
         )
         # Only the new summary enters the CV. No selection or skills pass runs
         # after this point, and an overlong summary is preserved for the review.
@@ -99,40 +108,6 @@ class ApplicationTextWriter:
             {**cv.model_dump(), "professional_summary": texts.professional_summary}
         )
         return adapted, self._normalize_letter(texts.to_motivation_letter(), language)
-
-    def generate_letter(
-        self,
-        cv: AdaptedCV,
-        analysis: JobAnalysis,
-        *,
-        job_title: str,
-        job_company: str,
-        job_description: str,
-        language: str,
-        job_id: int | None,
-        refresh_cache: bool = False,
-    ) -> MotivationLetter:
-        prompt = motivation_letter.build_user_prompt(
-            profile=self.profile,
-            analysis=analysis,
-            adapted_cv=cv,
-            job_title=job_title,
-            job_company=job_company,
-            job_description=job_description,
-            language=language,
-            reference_date=self.reference_date,
-        )
-        letter = self.llm.complete_json(
-            system=motivation_letter.build_system_prompt(),
-            user=prompt,
-            schema=MotivationLetter,
-            model=self.llm.smart_model,
-            temperature=0.3,
-            purpose="motivation_letter",
-            job_id=job_id,
-            refresh_cache=refresh_cache,
-        )
-        return self._normalize_letter(letter, language)
 
     @staticmethod
     def _normalize_letter(letter: MotivationLetter, language: str) -> MotivationLetter:
@@ -346,10 +321,13 @@ class ApplicationTextWriter:
                 result.attempts[-1].update(status="incomplete", decision="incomplete")
 
         for attempt in range(2):
+            route = resolve_route(
+                getattr(self.llm, "_settings", None) or get_llm_settings(), "document_review"
+            )
             trace = {
                 "schema_version": 2,
                 "attempt": attempt + 1,
-                "model": self.llm.smart_model,
+                "model": route.model,
                 "reference_date": self.reference_date.isoformat(),
             }
             prompt = document_review.build_user_prompt(
@@ -366,16 +344,19 @@ class ApplicationTextWriter:
                 reference_date=self.reference_date,
             )
             try:
-                review = self.llm.complete_json(
+                provider = provider_for(self.llm, "document_review")
+                review = provider.complete_json(
                     system=document_review.build_system_prompt(),
                     user=prompt,
                     schema=DocumentTextReview,
-                    model=self.llm.smart_model,
+                    model=route.model,
                     temperature=0.0,
                     purpose="document_review",
                     job_id=job_id,
                     use_cache=False,
                     refresh_cache=refresh_cache,
+                    effort=route.reasoning,
+                    max_completion_tokens=route.max_output_tokens,
                 )
             except LLMError:
                 # Provider errors may contain request contents. Persist only a
