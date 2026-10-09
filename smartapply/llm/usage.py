@@ -1,7 +1,7 @@
 """Token pricing and cost estimation.
 
-Prices are in USD per 1M tokens. Update as OpenAI changes them. Falls back
-to a safe estimate when a model is unknown.
+Prices are in USD per 1M tokens. Update as providers change them. Unknown
+models use a generic estimate, which is not a guaranteed upper bound.
 """
 
 from __future__ import annotations
@@ -20,8 +20,6 @@ OPENAI_PRICING: dict[str, tuple[float, float]] = {
     "gpt-4.1": (2.00, 8.00),
     "gpt-4.1-mini": (0.40, 1.60),
     "o4-mini": (1.10, 4.40),
-    "text-embedding-3-small": (0.02, 0.00),
-    "text-embedding-3-large": (0.13, 0.00),
 }
 
 # Cached input $/M. Models omitted here fall back to their normal input rate,
@@ -47,6 +45,34 @@ OPENAI_CACHE_WRITE_MULTIPLIER: dict[str, float] = {
     "gpt-5.6-sol": 1.25,
 }
 
+# Official first-party Claude pricing, checked 2026-10-09.
+# https://platform.claude.com/docs/en/about-claude/pricing
+# Only 5-minute ephemeral cache writes are requested by our transport.
+ANTHROPIC_PRICING: dict[str, tuple[float, float]] = {
+    "claude-haiku-4-5": (1.00, 5.00),
+    "claude-haiku-5-5": (0.10, 0.50),
+    "claude-sonnet-4-6": (3.00, 15.00),
+    "claude-sonnet-4-5": (3.00, 15.00),
+    "claude-opus-4-5": (5.00, 25.00),
+    "claude-opus-4-6": (5.00, 25.00),
+    "claude-opus-4-7": (5.00, 25.00),
+    "claude-opus-4-8": (5.00, 25.00),
+    "claude-opus-5": (5.00, 25.00),
+    "claude-opus-5-5": (4.00, 20.00),
+    "claude-sonnet-5": (2.00, 10.00),
+    "claude-sonnet-5-5": (2.00, 10.00),
+    "claude-fable-5": (10.00, 50.00),
+    "claude-fable-5-1": (10.00, 50.00),
+    "claude-mythos-5": (10.00, 50.00),
+    "claude-mythos-5-1": (10.00, 50.00),
+}
+ANTHROPIC_CACHE_READ_MULTIPLIER = {
+    "claude-opus-5-5": 0.05,
+    "claude-sonnet-5-5": 0.05,
+    "claude-fable-5-1": 0.025,
+    "claude-mythos-5-1": 0.025,
+}
+
 FALLBACK_PRICING = (1.00, 4.00)
 
 
@@ -68,6 +94,27 @@ def estimate_cost_usd(
     cached_prompt_tokens: int = 0,
     cache_write_prompt_tokens: int = 0,
 ) -> float:
+    claude_key = next(
+        (
+            key
+            for key in sorted(ANTHROPIC_PRICING, key=len, reverse=True)
+            if model == key or model.startswith(key + "-")
+        ),
+        None,
+    )
+    if claude_key is not None:
+        in_price, out_price = ANTHROPIC_PRICING[claude_key]
+        if claude_key == "claude-haiku-5-5" and prompt_tokens > 100_000:
+            in_price, out_price = (0.50, 2.50)
+        reads = min(max(cached_prompt_tokens, 0), max(prompt_tokens, 0))
+        writes = min(max(cache_write_prompt_tokens, 0), max(prompt_tokens, 0) - reads)
+        regular = max(prompt_tokens, 0) - reads - writes
+        return (
+            regular * in_price
+            + reads * in_price * ANTHROPIC_CACHE_READ_MULTIPLIER.get(claude_key, 0.1)
+            + writes * in_price * 1.25
+            + max(completion_tokens, 0) * out_price
+        ) / 1_000_000
     rate_key = _model_rate_key(model)
     in_price, out_price = OPENAI_PRICING[rate_key] if rate_key is not None else FALLBACK_PRICING
     cached_tokens = min(max(cached_prompt_tokens, 0), max(prompt_tokens, 0))

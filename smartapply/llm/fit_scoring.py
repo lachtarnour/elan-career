@@ -9,7 +9,6 @@ from typing import Any
 
 from smartapply.llm.fit_context import (
     DECISION_LEVELS,
-    LEGACY_POLICY,
     POLICY,
     fingerprint,
     fit_schema,
@@ -18,7 +17,6 @@ from smartapply.llm.fit_context import (
     resolve,
 )
 from smartapply.llm.fit_response import (
-    FitDecisionResponse,
     annotation_dicts,
     annotation_view,
     dimension_annotations,
@@ -29,75 +27,20 @@ from smartapply.llm.fit_validation import AXES, POSITIVE, inspect_evaluation
 from smartapply.llm.schemas import JobFitAssessment, OfferAnalysis
 
 
-def calculate_fit_score(
-    missions: int, essentials: int, responsibilities: int, issue_codes: list[str]
-) -> tuple[float, dict]:
-    levels = (missions, essentials, responsibilities)
-    if any(type(level) is not int or not 0 <= level <= 4 for level in levels):
-        raise ValueError("Invalid dimension level")
-    codes = {code for code in issue_codes if isinstance(code, str)}
-    raw = (
-        sum(
-            Decimal(weight * level)
-            for weight, level in zip(LEGACY_POLICY["weights"], levels, strict=True)
-        )
-        / 400
-    )
-    caps = {
-        code: Decimal(LEGACY_POLICY["caps"][code])
-        for code in sorted(codes)
-        if code in LEGACY_POLICY["caps"]
-    }
-    if missions <= 1:
-        caps["weak_mission_support"] = Decimal(LEGACY_POLICY["guards"]["missions_le_1"])
-    if min(levels) <= 2:
-        caps["partial_dimension_support"] = Decimal(LEGACY_POLICY["guards"]["any_dimension_le_2"])
-    capped = min([raw, *caps.values()])
-    score = capped.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    return float(score), {
-        "policy_version": LEGACY_POLICY["version"],
-        "calculation_version": LEGACY_POLICY["calculation_version"],
-        "raw_score": str(raw),
-        "applied_caps": {k: str(v) for k, v in caps.items()},
-        "limiting_caps": [k for k, v in caps.items() if v == capped and v < raw],
-        "final_score": str(score),
-    }
-
-
-def calculate_fit_decisions(decisions, preference_conflict) -> tuple[float, dict]:
-    """One table controls levels and caps; annotations never enter this function."""
+def calculate_fit_decisions(decisions) -> tuple[float, dict]:
+    """Transform three ordinal decisions into a weighted index without caps."""
     if len(decisions) != 3 or any(state not in DECISION_LEVELS for state in decisions):
         raise ValueError("Invalid fit decisions")
-    if preference_conflict not in {"none", "unknown", "confirmed"}:
-        raise ValueError("Invalid preference conflict decision")
     levels = tuple(DECISION_LEVELS[state] for state in decisions)
-    raw = (
-        sum(
-            Decimal(weight * level) for weight, level in zip(POLICY["weights"], levels, strict=True)
-        )
-        / 400
-    )
-    caps = {}
-    if levels[0] <= 1:
-        caps["weak_mission_support"] = Decimal(POLICY["guards"]["missions_le_1"])
-    if min(levels) <= 2:
-        caps["partial_dimension_support"] = Decimal(POLICY["guards"]["any_dimension_le_2"])
-    if "credible_material_question" in decisions:
-        caps["material_core_question"] = Decimal(POLICY["caps"]["material_core_question"])
-    if preference_conflict == "confirmed":
-        caps["confirmed_preference_conflict"] = Decimal(
-            POLICY["caps"]["confirmed_preference_conflict"]
-        )
-    capped = min([raw, *caps.values()])
-    score = capped.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    raw = sum(
+        Decimal(weight * level) for weight, level in zip(POLICY["weights"], levels, strict=True)
+    ) / 400
+    score = raw.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     return float(score), {
-        "policy_version": POLICY["version"],
-        "calculation_version": POLICY["calculation_version"],
+        "policy_name": POLICY["name"],
+        "policy_fingerprint": fingerprint(POLICY),
         "used_decisions": dict(zip(AXES, decisions, strict=True)),
-        "preference_conflict": preference_conflict,
         "raw_score": str(raw),
-        "applied_caps": {key: str(value) for key, value in caps.items()},
-        "limiting_caps": [key for key, value in caps.items() if value == capped and value < raw],
         "final_score": str(score),
     }
 
@@ -109,20 +52,12 @@ def evaluate_fit(
     *,
     extraction_provenance: dict | None = None,
 ) -> tuple[JobFitAssessment, dict]:
-    expected = POLICY if context.get("schema_version") == "job_fit_evaluation_v2" else LEGACY_POLICY
-    if context["policy"] != expected:
-        raise ValueError("Scoring policy has changed; this result requires explicit resumption")
     response = read_fit_response(evaluation, schema=fit_schema(context))
-    if isinstance(response, FitDecisionResponse):
-        score, calculation = calculate_fit_decisions(
-            response.decisions, response.preference_conflict
-        )
-    else:
-        score, calculation = calculate_fit_score(*response.levels, list(response.issue_codes))
+    score, calculation = calculate_fit_decisions(response.decisions)
     warnings = list(response.observations)
 
     # Permanent boundary: future diagnostic checks/converters may report errors,
-    # but cannot veto a score, change its levels/codes or cause a provider retry.
+    # but cannot veto a score, change its decisions or cause a provider retry.
     def observe(label, callback, fallback):
         try:
             return callback()
@@ -172,11 +107,9 @@ def evaluate_fit(
         **calculation,
         "evaluation": copy.deepcopy(response.raw),
         "original_response": response.original_text,
+        "admissibility": copy.deepcopy(response.raw.get("admissibility")),
+        "reliability": copy.deepcopy(response.raw.get("reliability")),
         "used_levels": dict(zip(AXES, response.levels, strict=True)),
-        "recognized_issue_codes": sorted(
-            set(response.issue_codes)
-            & (set(LEGACY_POLICY["caps"]) | {"limited_question", "offer_clarity"})
-        ),
         "diagnostic_checks": {
             "mode": "advisory",
             "status": "warnings" if warnings else "ok",
@@ -189,10 +122,9 @@ def evaluate_fit(
         "extraction_provenance": copy.deepcopy(extraction_provenance or {}),
         "evaluated_at": datetime.now(timezone.utc).isoformat(),
     }
-    if isinstance(response, FitDecisionResponse):
-        source = fit_source(extraction_provenance)
-        diagnostics["offer_source"] = source
-        diagnostics["source_fingerprint"] = source["fingerprint"]
+    source = fit_source(extraction_provenance)
+    diagnostics["offer_source"] = source
+    diagnostics["source_fingerprint"] = source["fingerprint"]
     return public, diagnostics
 
 
@@ -230,9 +162,8 @@ def _explanations(raw: dict, context: dict, offer: OfferAnalysis) -> tuple[list[
                     reasons.append(prefix + text)
                     axis_reasons.append(prefix + text)
         by_axis.append(axis_reasons)
-    if "decision" in raw:
-        first = list(dict.fromkeys(items[0] for items in by_axis if items))
-        reasons = first + [text for text in reasons if text not in first]
+    first = list(dict.fromkeys(items[0] for items in by_axis if items))
+    reasons = first + [text for text in reasons if text not in first]
     risks = list(offer.offer_risks)
     for issue in annotation_dicts(raw.get("issues")):
         text = issue.get("text")

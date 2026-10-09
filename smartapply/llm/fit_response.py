@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
@@ -12,37 +12,28 @@ from pydantic import BaseModel, ValidationError
 from smartapply.llm.fit_partial_json import recover_truncated_json
 from smartapply.llm.provider import LLMValidationError
 from smartapply.llm.schemas import (
+    FitAdmissibility,
     FitDecisionAnnotations,
     FitDecisionDimension,
     FitDecisionFinding,
     FitDecisions,
-    FitDimension,
-    FitDimensions,
-    FitFinding,
-    FitIssue,
     FitOfferInterpretation,
+    FitReliability,
     FitReservation,
     JobFitDecisionEvaluation,
-    JobFitEvaluation,
     NeutralOfferReference,
 )
 
 AXES = ("missions", "essentials", "responsibilities")
 
 
-@dataclass(frozen=True)
-class FitEvaluationResponse:
+@dataclass(frozen=True, kw_only=True)
+class FitDecisionResponse:
     levels: tuple[int, int, int]
     raw: dict[str, Any]
     original_text: str | None = None
-    issue_codes: tuple[str, ...] = ()
     observations: list[str] = field(default_factory=list)
-
-
-@dataclass(frozen=True, kw_only=True)
-class FitDecisionResponse(FitEvaluationResponse):
     decisions: tuple[str, str, str]
-    preference_conflict: str
 
 
 class _JSONObject(dict):
@@ -67,16 +58,6 @@ def _variants(value, key):
     return values or [None]
 
 
-def issue_codes(value) -> list[str]:
-    items = [value] if isinstance(value, dict) else value if isinstance(value, list) else []
-    codes = []
-    for item in items:
-        for code in _variants(item, "code") if isinstance(item, dict) else [item]:
-            if isinstance(code, str):
-                codes.append(code)
-    return codes
-
-
 def _read_object(value):
     original = value if isinstance(value, str) else None
     observations = []
@@ -94,36 +75,35 @@ def _read_object(value):
     return value, original, observations
 
 
-def read_fit_response(value: Any, *, schema=JobFitEvaluation) -> FitEvaluationResponse:
-    """Use the recorded contract; annotation conformity never controls scoring."""
-    if schema is JobFitDecisionEvaluation:
-        return read_fit_decisions(value)
-    if isinstance(value, FitDecisionResponse):
-        raise LLMValidationError("Decision response cannot be read as legacy levels")
-    if isinstance(value, FitEvaluationResponse):
-        return value
-    value, original, observations = _read_object(value)
-    if not isinstance(value, dict) or not isinstance(value.get("dimensions"), dict):
-        raise LLMValidationError("Fit response has no usable dimensions")
-    levels = []
-    for axis in AXES:
-        candidates = []
-        for dimensions in _variants(value, "dimensions"):
-            if not isinstance(dimensions, dict):
-                raise LLMValidationError("Ambiguous fit dimensions")
-            for dimension in _variants(dimensions, axis):
-                candidates.extend(
-                    _variants(dimension, "level") if isinstance(dimension, dict) else [dimension]
-                )
-        if any(type(level) is not int or not 0 <= level <= 4 for level in candidates):
-            raise LLMValidationError(f"Fit response has no usable {axis} level (integer 0..4)")
-        if len(set(candidates)) != 1:
-            raise LLMValidationError(f"Fit response has ambiguous {axis} levels")
-        levels.append(candidates[0])
-    codes = [code for group in _variants(value, "issues") for code in issue_codes(group)]
-    return FitEvaluationResponse(
-        tuple(levels), copy.deepcopy(value), original, tuple(codes), observations
-    )
+def read_fit_response(value: Any, *, schema=JobFitDecisionEvaluation) -> FitDecisionResponse:
+    """Read the three technical decisions; annotations never control scoring."""
+    if schema is not JobFitDecisionEvaluation:
+        raise LLMValidationError("Unsupported fit response schema")
+    response = read_fit_decisions(value)
+    if "elan_fit_transport" not in response.raw:
+        return response
+    # Read decisions first. No annotation adapter failure may veto them.
+    from smartapply.llm.anthropic_fit_transport import MARKER, decode_fit_transport
+
+    if MARKER in response.raw and any(
+        warning.startswith("Truncated JSON response") for warning in response.observations
+    ):
+        return replace(
+            response,
+            observations=response.observations
+            + [
+                "Claude fit transport: incomplete annotations retained raw, not interpreted as absent"
+            ],
+        )
+    try:
+        raw, warnings = decode_fit_transport(response.raw)
+    except Exception as exc:
+        return replace(
+            response,
+            observations=response.observations
+            + [f"Claude fit transport annotation conversion: {type(exc).__name__}: {exc}"],
+        )
+    return replace(response, raw=raw, observations=response.observations + warnings)
 
 
 def read_fit_decisions(value: Any) -> FitDecisionResponse:
@@ -131,33 +111,28 @@ def read_fit_decisions(value: Any) -> FitDecisionResponse:
 
     if isinstance(value, FitDecisionResponse):
         return value
-    if isinstance(value, FitEvaluationResponse):
-        raise LLMValidationError("Legacy levels cannot be remapped to decisions")
     value, original, observations = _read_object(value)
     if not isinstance(value, dict):
         raise LLMValidationError("Fit response has no usable decision envelope")
     states = []
-    for key in (*AXES, "preference_conflict"):
+    for key in AXES:
         candidates = []
         for decision in _variants(value, "decision"):
             if not isinstance(decision, dict):
                 raise LLMValidationError("Ambiguous fit decision envelope")
             candidates.extend(_variants(decision, key))
-        allowed = (
-            {"none", "unknown", "confirmed"} if key == "preference_conflict" else DECISION_LEVELS
-        )
+        allowed = DECISION_LEVELS
         if any(not isinstance(state, str) or state not in allowed for state in candidates):
             raise LLMValidationError(f"Fit response has no usable {key} decision")
         if len(set(candidates)) != 1:
             raise LLMValidationError(f"Fit response has ambiguous {key} decisions")
         states.append(candidates[0])
     return FitDecisionResponse(
-        levels=tuple(DECISION_LEVELS[state] for state in states[:3]),
+        levels=tuple(DECISION_LEVELS[state] for state in states),
         raw=copy.deepcopy(value),
         original_text=original,
         observations=observations,
-        decisions=tuple(states[:3]),
-        preference_conflict=states[3],
+        decisions=tuple(states),
     )
 
 
@@ -173,7 +148,7 @@ def dimension_annotations(raw: dict, axis: str) -> dict:
     return dimension if isinstance(dimension, dict) else {}
 
 
-def annotation_view(response: FitEvaluationResponse) -> JobFitEvaluation | JobFitDecisionEvaluation:
+def annotation_view(response: FitDecisionResponse) -> JobFitDecisionEvaluation:
     """Best-effort typed view for existing checks; discarded items remain in raw."""
 
     def items(value, schema):
@@ -185,53 +160,47 @@ def annotation_view(response: FitEvaluationResponse) -> JobFitEvaluation | JobFi
                 continue
         return parsed
 
-    if isinstance(response, FitDecisionResponse):
-        return JobFitDecisionEvaluation(
-            decision=FitDecisions(
-                **dict(zip(AXES, response.decisions, strict=True)),
-                preference_conflict=response.preference_conflict,
-            ),
-            dimensions=FitDecisionAnnotations(
-                **{
-                    axis: FitDecisionDimension(
-                        findings=items(
-                            dimension_annotations(response.raw, axis).get("findings"),
-                            FitDecisionFinding,
-                        )
+    def auxiliary(key, model):
+        try:
+            return model.model_validate(response.raw.get(key))
+        except ValidationError:
+            return None
+
+    return JobFitDecisionEvaluation(
+        admissibility=auxiliary("admissibility", FitAdmissibility),
+        reliability=auxiliary("reliability", FitReliability),
+        decision=FitDecisions(
+            **dict(zip(AXES, response.decisions, strict=True)),
+        ),
+        dimensions=FitDecisionAnnotations(
+            **{
+                axis: FitDecisionDimension(
+                    findings=items(
+                        dimension_annotations(response.raw, axis).get("findings"),
+                        FitDecisionFinding,
                     )
-                    for axis in AXES
-                }
-            ),
-            issues=items(response.raw.get("issues"), FitReservation),
-            neutral_offer_refs=items(response.raw.get("neutral_offer_refs"), NeutralOfferReference),
-            offer_interpretations=items(
-                response.raw.get("offer_interpretations"), FitOfferInterpretation
-            ),
-        )
-    dimensions = {}
-    for axis, level in zip(AXES, response.levels, strict=True):
-        dimensions[axis] = FitDimension(
-            level=level,
-            findings=items(dimension_annotations(response.raw, axis).get("findings"), FitFinding),
-        )
-    return JobFitEvaluation(
-        dimensions=FitDimensions(**dimensions),
-        issues=items(response.raw.get("issues"), FitIssue),
+                )
+                for axis in AXES
+            }
+        ),
+        issues=items(response.raw.get("issues"), FitReservation),
         neutral_offer_refs=items(response.raw.get("neutral_offer_refs"), NeutralOfferReference),
+        offer_interpretations=items(
+            response.raw.get("offer_interpretations"), FitOfferInterpretation
+        ),
     )
 
 
-def schema_observations(response: FitEvaluationResponse) -> list[str]:
+def schema_observations(response: FitDecisionResponse) -> list[str]:
+    observations = []
+    for name in ("admissibility", "reliability"):
+        if response.raw.get(name) is None:
+            observations.append(f"{name}: descriptive information unavailable")
     try:
-        schema = (
-            JobFitDecisionEvaluation
-            if isinstance(response, FitDecisionResponse)
-            else JobFitEvaluation
-        )
-        schema.model_validate(response.raw)
+        JobFitDecisionEvaluation.model_validate(response.raw)
     except ValidationError as exc:
-        return [
+        observations.extend(
             f"Annotation {'.'.join(map(str, error['loc']))}: {error['msg']}"
             for error in exc.errors(include_input=False, include_url=False)
-        ]
-    return []
+        )
+    return observations

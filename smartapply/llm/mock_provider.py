@@ -13,12 +13,14 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
-from smartapply.llm.fit_response import FitEvaluationResponse, read_fit_response
+from smartapply.llm.fit_response import FitDecisionResponse, read_fit_response
 from smartapply.llm.provider import LLMError, LLMProvider
-from smartapply.llm.schemas import JobFitDecisionEvaluation, JobFitEvaluation
+from smartapply.llm.schemas import (
+    JobFitDecisionEvaluation,
+)
 
 T = TypeVar("T", bound=BaseModel)
-MockResponse = BaseModel | FitEvaluationResponse | dict | str
+MockResponse = BaseModel | FitDecisionResponse | dict | str
 
 
 class MockLLMProvider(LLMProvider):
@@ -29,19 +31,23 @@ class MockLLMProvider(LLMProvider):
     _default_registry: dict[str, MockResponse | Callable[..., MockResponse]] = {}
 
     def __init__(
-        self, registry: dict[str, MockResponse | Callable[..., MockResponse]] | None = None
+        self,
+        registry: dict[str, MockResponse | Callable[..., MockResponse]] | None = None,
+        *,
+        model: str | None = None,
     ):
+        self._model = model
         self._registry = dict(
             registry if registry is not None else self.__class__._default_registry
         )
 
     @property
     def smart_model(self) -> str:
-        return "mock-smart"
+        return self._model or "mock-smart"
 
     @property
     def cheap_model(self) -> str:
-        return "mock-cheap"
+        return self._model or "mock-cheap"
 
     @classmethod
     def register(cls, purpose: str, response: MockResponse | Callable[..., MockResponse]) -> None:
@@ -64,7 +70,8 @@ class MockLLMProvider(LLMProvider):
         use_cache: bool = True,
         refresh_cache: bool = False,
         max_completion_tokens: int | None = None,
-    ) -> T | FitEvaluationResponse:
+        effort: str | None = "auto",
+    ) -> T | FitDecisionResponse:
         if purpose not in self._registry:
             raise LLMError(
                 f"No mock response registered for purpose={purpose!r}. "
@@ -75,7 +82,7 @@ class MockLLMProvider(LLMProvider):
             response = response(
                 system=system, user=user, schema=schema, purpose=purpose, job_id=job_id
             )
-        if schema in {JobFitEvaluation, JobFitDecisionEvaluation}:
+        if schema is JobFitDecisionEvaluation:
             return read_fit_response(response, schema=schema)
         if not isinstance(response, schema):
             raise LLMError(

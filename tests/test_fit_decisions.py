@@ -1,4 +1,4 @@
-"""V2 contracts and frozen-source isolation; every provider response is simulated."""
+"""Fit decisions and frozen-source isolation; all provider responses are simulated."""
 
 from __future__ import annotations
 
@@ -13,22 +13,29 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import select
 
-from smartapply.config import get_settings
+from smartapply.config import get_llm_settings
 from smartapply.database import session_scope
 from smartapply.database.analysis_batches import AnalysisBatchRun
 from smartapply.database.models import Job, LLMCache
 from smartapply.database.repository.llm_cache import cache_set
-from smartapply.llm import JobFitDecisionEvaluation, JobFitEvaluation, OfferAnalysis, OpenAIProvider
+from smartapply.llm import (
+    JobFitDecisionEvaluation,
+    OfferAnalysis,
+    OfferExtractionOutput,
+    OpenAIProvider,
+)
 from smartapply.llm.batch import BatchResult, build_batch_request
 from smartapply.llm.fit_context import (
     build_fit_context,
     build_fit_user,
+    fingerprint,
     fit_source,
 )
 from smartapply.llm.fit_request import check_request_budget, complete_fit
 from smartapply.llm.fit_response import read_fit_decisions
 from smartapply.llm.fit_scoring import calculate_fit_decisions, evaluate_fit
 from smartapply.llm.provider import LLMValidationError
+from smartapply.llm_policy import resolve_route
 from smartapply.pipeline.batch_analysis.results import (
     accept_cache,
     accept_result,
@@ -41,13 +48,39 @@ from smartapply.pipeline.process.analysis import _assemble_analysis
 from smartapply.pipeline.rescore import execute_rescore_plan, prepare_rescore_plan
 from smartapply.profile import get_profile
 from tests.fit_fixtures import decision_response, evaluation_from_user
+from tests.scope_fixtures import configured_scope_context
 from tests.test_batch_analysis import offer, seed_jobs
-from tests.test_evidence_fit import fixture, seeded_analysis, snapshot
+from tests.test_evidence_fit import seeded_analysis, snapshot
 from tests.test_fit_nonblocking import response
 
 
+@pytest.fixture(autouse=True)
+def explicit_fit_routes(monkeypatch, tmp_path):
+    from tests.scope_fixtures import set_test_routes
+
+    set_test_routes(
+        monkeypatch,
+        tmp_path,
+        {
+            purpose: {
+                "provider": "openai",
+                "model": "gpt-5.4-mini",
+                "reasoning": "medium",
+                "max_output_tokens": tokens,
+            }
+            for purpose, tokens in (
+                ("job_scope_screening", 6000),
+                ("job_offer_extraction", 6000),
+                ("job_fit_assessment", 12000),
+            )
+        },
+    )
+
+
 def inputs():
-    context = build_fit_context(get_profile(), get_settings().openai_model_cheap)
+    context = build_fit_context(
+        get_profile(), resolve_route(get_llm_settings(), "job_fit_assessment").model
+    )
     facts = offer()
     provenance = {
         "analyzer_input": {
@@ -60,49 +93,46 @@ def inputs():
 
 
 @pytest.mark.parametrize(
-    "states,conflict,score",
+    "states,score",
     [
-        (("strong_fit", "strong_fit", "credible_limited_adaptation"), "unknown", 0.95),
-        (("strong_fit", "strong_fit", "credible_material_question"), "none", 0.79),
-        (("strong_fit", "strong_fit", "partial_core_fit"), "unknown", 0.59),
-        (("weak_support", "strong_fit", "strong_fit"), "none", 0.39),
-        (("strong_fit", "strong_fit", "strong_fit"), "confirmed", 0.19),
-        (("very_low_support", "very_low_support", "very_low_support"), "confirmed", 0),
-        (
-            ("strong_fit", "credible_limited_adaptation", "credible_limited_adaptation"),
-            "none",
-            0.88,
-        ),
+        (("strong_fit", "strong_fit", "credible_fit"), 0.95),
+        (("strong_fit", "strong_fit", "partial_core_fit"), 0.90),
+        (("weak_support", "strong_fit", "strong_fit"), 0.63),
+        (("strong_fit", "very_low_support", "strong_fit"), 0.70),
+        (("strong_fit", "strong_fit", "strong_fit"), 1.0),
+        (("very_low_support", "very_low_support", "very_low_support"), 0),
+        (("strong_fit", "credible_fit", "credible_fit"), 0.88),
     ],
 )
-def test_single_decision_table_and_one_rounding(states, conflict, score):
-    public, diagnostic = evaluate_fit(
-        decision_response(states=states, conflict=conflict), *inputs()[:2]
-    )
+def test_single_decision_table_and_one_rounding(states, score):
+    public, diagnostic = evaluate_fit(decision_response(states=states), *inputs()[:2])
     assert public.fit_score == score
     assert diagnostic["used_decisions"] == dict(
         zip(("missions", "essentials", "responsibilities"), states, strict=True)
     )
-    assert diagnostic["preference_conflict"] == conflict
-    assert diagnostic["policy_version"] == "evidence_fit_v6"
+    assert diagnostic["policy_name"] == "evidence_fit"
+    assert not {"applied_caps", "limiting_caps", "preference_conflict"} & diagnostic.keys()
 
 
-def test_no_artificial_scores_between_60_and_74():
+@pytest.mark.parametrize("levels", list(itertools.product(range(5), repeat=3)))
+def test_all_125_combinations_use_only_the_ordinal_weighted_index(levels):
+    from decimal import ROUND_HALF_UP, Decimal
+
     states = (
         "very_low_support",
         "weak_support",
         "partial_core_fit",
-        "credible_material_question",
-        "credible_limited_adaptation",
+        "credible_fit",
         "strong_fit",
     )
-    scores = {
-        calculate_fit_decisions(value, conflict)[0]
-        for value in itertools.product(states, repeat=3)
-        for conflict in ("none", "unknown", "confirmed")
-    }
-    assert not any(0.60 <= score <= 0.74 for score in scores)
-    assert {0.59, 0.79, 0.95, 1.0} <= scores
+    expected = (
+        sum(Decimal(weight * level) for weight, level in zip((50, 30, 20), levels, strict=True))
+        / 400
+    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    score, diagnostic = calculate_fit_decisions(tuple(states[level] for level in levels))
+    assert score == float(expected)
+    assert diagnostic["final_score"] == str(expected)
+    assert diagnostic["policy_name"] == "evidence_fit"
 
 
 @pytest.mark.parametrize(
@@ -117,13 +147,21 @@ def test_no_artificial_scores_between_60_and_74():
         },
         {"issues": [{"code": "confirmed_constraint_conflict"}, {"code": "substantial_core_gap"}]},
         {"fit_score": 0.01, "offer_interpretations": [{"source_quote": "invented"}]},
+        {"admissibility": None, "reliability": None},
+        {"admissibility": {"mandatory_conditions": 7}, "reliability": "invalid"},
+        {
+            "admissibility": {
+                dimension: {"status": "incompatible", "findings": []}
+                for dimension in ("mandatory_conditions", "candidate_preferences")
+            },
+        },
     ],
 )
 def test_annotations_cannot_change_score_or_add_caps(annotations):
     context, facts, provenance = inputs()
     raw = {**decision_response(), **annotations}
     public, diagnostic = evaluate_fit(raw, context, facts, extraction_provenance=provenance)
-    assert public.fit_score == 0.95 and diagnostic["applied_caps"] == {}
+    assert public.fit_score == 0.95
     assert diagnostic["diagnostic_checks"]["warnings"]
     assert diagnostic["evaluation"] == raw
 
@@ -145,7 +183,7 @@ def test_future_inspection_exception_or_mutation_never_changes_decision(monkeypa
 
     monkeypatch.setattr(f"smartapply.llm.fit_scoring.{function}", broken)
     result, diagnostic = complete_fit(
-        SimpleNamespace(complete_json=lambda **kwargs: raw),
+        SimpleNamespace(name="openai", complete_json=lambda **kwargs: raw),
         context,
         facts,
         extraction_provenance=provenance,
@@ -159,9 +197,18 @@ def test_future_inspection_exception_or_mutation_never_changes_decision(monkeypa
 
 
 @pytest.mark.parametrize(
-    "suffix", [',"issues":[{"text":"cut', ',"offer_interpre', ',"iss', ',"trace', ',"\\u0069ss']
+    "suffix",
+    [
+        ',"issues":[{"text":"cut',
+        ',"admissibility":',
+        ',"reliability":',
+        ',"offer_interpre',
+        ',"iss',
+        ',"trace',
+        ',"\\u0069ss',
+    ],
 )
-def test_annotations_truncated_after_four_decisions_remain_recoverable(suffix):
+def test_annotations_truncated_after_three_decisions_remain_recoverable(suffix):
     content = json.dumps(decision_response())[:-1] + suffix
     parsed = read_fit_decisions(content)
     public, diagnostic = evaluate_fit(parsed, *inputs()[:2])
@@ -171,26 +218,14 @@ def test_annotations_truncated_after_four_decisions_remain_recoverable(suffix):
 @pytest.mark.parametrize(
     "content",
     [
-        json.dumps(
-            {
-                "decision": {
-                    "missions": "strong_fit",
-                    "essentials": "strong_fit",
-                    "responsibilities": "strong_fit",
-                }
-            }
-        ),
-        '{"decision":{"missions":"strong_fit","essentials":"strong_fit","responsibilities":"strong_fit","preference_conflict":"unk',
-        json.dumps(decision_response()).replace('"unknown"', '"unsupported"'),
+        '{"decision":{"missions":"strong_fit","essentials":"strong_fit"}}',
+        '{"decision":{"missions":"strong_fit","essentials":"strong_fit","responsibilities":"str',
+        json.dumps(decision_response()).replace('"credible_fit"', '"unsupported"'),
         json.dumps(decision_response()).replace('"strong_fit"', "4", 1),
         json.dumps(decision_response())[:-1] + ',"dec',
-        json.dumps(decision_response())[:-2] + ',"pref',
+        json.dumps(decision_response())[:-2] + ',"respon',
         json.dumps(decision_response()).replace(
             '"missions": "strong_fit"', '"missions":"strong_fit","missions":"weak_support"'
-        ),
-        json.dumps(decision_response()).replace(
-            '"preference_conflict": "unknown"',
-            '"preference_conflict":"unknown","preference_conflict":"confirmed"',
         ),
     ],
 )
@@ -206,6 +241,14 @@ def test_json_escapes_and_identical_duplicates_have_unambiguous_decisions():
     assert read_fit_decisions(content).levels == (4, 4, 3)
 
 
+def test_unrelated_policy_diagnostic_does_not_veto_three_valid_axes():
+    context, facts, _ = inputs()
+    context["policy"] = {"invalid_diagnostic": True}
+    public, diagnostics = evaluate_fit(decision_response(), context, facts)
+    assert public.fit_score == 0.95
+    assert diagnostics["used_decisions"] == decision_response()["decision"]
+
+
 def test_frozen_source_sent_once_and_snapshot_kept_even_if_caller_mutates():
     context, facts, provenance = inputs()
     original = copy.deepcopy(provenance)
@@ -217,7 +260,10 @@ def test_frozen_source_sent_once_and_snapshot_kept_even_if_caller_mutates():
         return decision_response()
 
     result, diagnostic = complete_fit(
-        SimpleNamespace(complete_json=complete), context, facts, extraction_provenance=provenance
+        SimpleNamespace(name="openai", complete_json=complete),
+        context,
+        facts,
+        extraction_provenance=provenance,
     )
     assert result.fit_score == 0.95 and len(calls) == 1
     call = calls[0]
@@ -249,28 +295,15 @@ def test_source_changes_fit_identity_without_changing_global_candidate_context()
         keys.append(request.cache_key)
     assert len(set(keys)) == 3 and context == before
     assert '"available": false' in users[-1]
-    assert context["schema_version"] == "job_fit_evaluation_v2"
+    assert context["schema_fingerprint"] == fingerprint(context["schema"])
+    assert not {"schema_version", "prompt_version", "response_reader_version"} & context.keys()
     assert check_request_budget(context, users[0])["output_reserved"] == 12000
 
 
-def test_legacy_context_and_contract_keep_original_meaning_and_request():
-    context, facts, evaluation = fixture()
-    user = build_fit_user(context, facts)
-    assert build_fit_user(context, facts, extraction_provenance=inputs()[2]) == user
-    assert "FROZEN OFFER SOURCE" not in user
-    raw = evaluation.model_dump()
-    raw["issues"] = [{"code": "substantial_core_gap"}]
-    public, diagnostic = evaluate_fit(raw, context, facts)
-    assert public.fit_score == 0.59 and diagnostic["policy_version"] == "evidence_fit_v5"
-    with pytest.raises(LLMValidationError):
-        read_fit_decisions(raw)
-    assert OpenAIProvider._validate(json.dumps(raw), JobFitEvaluation).levels == (4, 3, 3)
-
-
 @pytest.mark.parametrize("path", ["cache", "batch"])
-@pytest.mark.parametrize("conflict,expected", [("unknown", 0.95), ("confirmed", 0.19)])
+@pytest.mark.parametrize("admissibility", ["compatible", "unknown", "incompatible"])
 def test_immediate_batch_and_cache_share_source_decisions_and_nonblocking_annotations(
-    isolated_db, path, conflict, expected
+    isolated_db, path, admissibility
 ):
     job_id = seed_jobs()[0]
     context = inputs()[0]
@@ -279,22 +312,34 @@ def test_immediate_batch_and_cache_share_source_decisions_and_nonblocking_annota
             id="decision-test",
             state="active",
             model=context["model"],
+            provider="openai",
+            max_completion_tokens=6000,
+            extraction_effort="medium",
             profile_data=get_profile().model_dump(mode="json"),
             fit_context=context,
+            scope_context=configured_scope_context(),
         )
         session.add(run)
         session.flush()
-        item = new_item(run.id, session.get(Job, job_id))
+        item = new_item(run.id, session.get(Job, job_id), screening_context=run.scope_context)
         item.offer_data = offer().model_dump(mode="json")
         item.state = "evaluation_pending"
         session.add(item)
         session.flush()
         request = item_request(item, run, "evaluation", 6000)
-        raw = {**decision_response(conflict=conflict), "issues": [{"invalid": True}]}
+        raw = {
+            **decision_response(),
+            "admissibility": {
+                dimension: {"status": admissibility, "findings": []}
+                for dimension in ("mandatory_conditions", "candidate_preferences")
+            },
+            "reliability": 42,
+            "issues": [{"invalid": True}],
+        }
         content = json.dumps(raw)[:-1] + ',"trace'
         provenance = {"analyzer_input": item.analyzer_input}
         immediate, diagnostic = complete_fit(
-            SimpleNamespace(complete_json=lambda **kwargs: content),
+            SimpleNamespace(name="openai", complete_json=lambda **kwargs: content),
             context,
             offer(),
             extraction_provenance=provenance,
@@ -320,7 +365,9 @@ def test_immediate_batch_and_cache_share_source_decisions_and_nonblocking_annota
             )
         session.flush()
         saved = session.get(Job, job_id).analysis
-        assert saved.fit_score == immediate.fit_score == expected
+        assert saved.fit_score == immediate.fit_score == 0.95
+        assert saved.fit_diagnostics["diagnostic_checks"]["warnings"]
+        assert saved.fit_diagnostics["evaluation"]["admissibility"] == raw["admissibility"]
         assert saved.fit_diagnostics["offer_source"] == diagnostic["offer_source"]
         assert saved.fit_diagnostics["request_user"] == diagnostic["request_user"]
         assert (
@@ -337,12 +384,16 @@ def test_changed_source_after_submission_cannot_publish_under_another_context(is
             id="source-test",
             state="active",
             model=context["model"],
+            provider="openai",
+            max_completion_tokens=6000,
+            extraction_effort="medium",
             profile_data=get_profile().model_dump(mode="json"),
             fit_context=context,
+            scope_context=configured_scope_context(),
         )
         session.add(run)
         session.flush()
-        item = new_item(run.id, session.get(Job, job_id))
+        item = new_item(run.id, session.get(Job, job_id), screening_context=run.scope_context)
         item.offer_data = offer().model_dump(mode="json")
         session.add(item)
         session.flush()
@@ -367,7 +418,7 @@ def test_rescore_preserves_history_or_atomically_saves_only_fit(isolated_db, mis
     plan = prepare_rescore_plan(job_ids=[job_id])
     raw = decision_response()
     if missing:
-        del raw["decision"]["preference_conflict"]
+        del raw["decision"]["essentials"]
     calls = []
 
     def complete(**kwargs):
@@ -375,7 +426,9 @@ def test_rescore_preserves_history_or_atomically_saves_only_fit(isolated_db, mis
         assert kwargs["schema"] is JobFitDecisionEvaluation
         return raw
 
-    result = execute_rescore_plan(plan, SimpleNamespace(complete_json=complete), approved=True)
+    result = execute_rescore_plan(
+        plan, SimpleNamespace(name="openai", complete_json=complete), approved=True
+    )
     after = snapshot(job_id)
     assert len(calls) == 1 and calls[0]["purpose"] == "job_fit_assessment"
     if missing:
@@ -393,7 +446,7 @@ def test_rescore_preserves_history_or_atomically_saves_only_fit(isolated_db, mis
 def test_immediate_extraction_acceptance_matches_fixed_main(
     isolated_db, monkeypatch, finish, refusal
 ):
-    provider = OpenAIProvider()
+    provider = OpenAIProvider(model="gpt-5.4-mini")
     raw = offer().model_dump()
     del raw["supporting_excerpts"]
     # main 6a9309d accepts immediate extraction solely from this Pydantic content.
@@ -406,14 +459,14 @@ def test_immediate_extraction_acceptance_matches_fixed_main(
 
     monkeypatch.setattr(provider, "_call_openai", api)
     for _ in range(2):
-        got = provider.complete_json(system="baseline", user="source", schema=OfferAnalysis)
+        got = provider.complete_json(
+            system="baseline", user="source", schema=OfferAnalysis, purpose="job_offer_extraction"
+        )
         assert got == expected
     assert len(calls) == 1
 
 
-def test_historical_batch_extraction_defaults_and_valid_cache_publication_error_match_main(
-    isolated_db, monkeypatch
-):
+def test_current_extraction_cache_survives_publication_error(isolated_db, monkeypatch):
     job_id = seed_jobs()[0]
     context = inputs()[0]
     with session_scope() as session:
@@ -421,31 +474,28 @@ def test_historical_batch_extraction_defaults_and_valid_cache_publication_error_
             id="extraction-test",
             state="active",
             model=context["model"],
+            provider="openai",
+            max_completion_tokens=6000,
+            extraction_effort="medium",
             profile_data=get_profile().model_dump(mode="json"),
             fit_context=context,
+            scope_context=configured_scope_context(),
         )
         session.add(run)
         session.flush()
-        item = new_item(run.id, session.get(Job, job_id))
+        item = new_item(run.id, session.get(Job, job_id), screening_context=run.scope_context)
         session.add(item)
         session.flush()
-        current_request = item_request(item, run, "extraction", 6000)
-        # This regression concerns a persisted historical OfferAnalysis request.
-        request = build_batch_request(
-            custom_id=current_request.custom_id,
-            system="Historical offer-only extraction instructions",
-            user=current_request.body["messages"][1]["content"],
-            schema=OfferAnalysis,
-            model=run.model,
-            purpose="job_offer_analysis",
-            max_completion_tokens=6000,
-        )
-        raw = offer().model_dump()
+        request = item_request(item, run, "extraction", 6000)
+        raw = {**offer().model_dump(), "seniority": "unknown"}
         del raw["supporting_excerpts"]
         content = json.dumps(raw)
-        expected = OfferAnalysis.model_validate_json(content)  # fixed main's cache reader
+        expected = OfferExtractionOutput.model_validate_json(content)
         assert validate_request_response(request.body, content) == expected
-        assert BatchResult(custom_id="extract", content=content).validate(OfferAnalysis) == expected
+        assert (
+            BatchResult(custom_id="extract", content=content).validate(OfferExtractionOutput)
+            == expected
+        )
         cache_set(
             session,
             cache_key=request.cache_key,
@@ -491,16 +541,20 @@ def test_batch_transport_errors_still_reject_extraction_but_not_usable_fit(code)
 def test_other_schema_acceptance_and_invalid_extraction_are_unchanged(isolated_db, monkeypatch):
     from smartapply.llm import JobFitAssessment
 
-    provider = OpenAIProvider()
+    provider = OpenAIProvider(model="gpt-5.4-mini")
     monkeypatch.setattr(provider, "_call_openai", lambda **kwargs: response("{}", finish="length"))
     with pytest.raises(LLMValidationError):
-        provider.complete_json(system="test", user="source", schema=OfferAnalysis)
+        provider.complete_json(
+            system="test", user="source", schema=OfferAnalysis, purpose="job_offer_extraction"
+        )
     content = JobFitAssessment(fit_score=0.8, match_reasons=[], risks=[]).model_dump_json()
     monkeypatch.setattr(
         provider, "_call_openai", lambda **kwargs: response(content, finish="length")
     )
     with pytest.raises(LLMValidationError, match="Incomplete"):
-        provider.complete_json(system="test", user="source", schema=JobFitAssessment)
+        provider.complete_json(
+            system="test", user="source", schema=JobFitAssessment, purpose="job_fit_assessment"
+        )
 
 
 def test_reasons_include_each_positive_axis_and_generator_nonfit_inputs_are_preserved():
@@ -551,29 +605,24 @@ def test_historical_extraction_readers_and_source_input_remain_identical():
 
 
 @pytest.mark.parametrize(
-    "case,body,rule",
+    "case,body",
     [
-        ("optional", "Kubernetes : connaissances appréciées", "reste facultatif"),
+        ("optional", "Kubernetes : connaissances appréciées"),
         (
             "alternative",
             "Une ou plusieurs technologies parmi Python, FastAPI, TypeScript ou Node.js",
-            "une branche pertinente satisfaite suffit",
         ),
         (
             "mixed_tenure",
             "Trois ans d’expérience et maîtrise avancée de Kubernetes",
-            "years_component",
         ),
         (
             "qualification",
             "Bac + 5 obligatoire, formation initiale de trois mois, contrat initial de cinq ans",
-            "ne sont pas de l’ancienneté professionnelle",
         ),
     ],
 )
-def test_source_examples_check_inputs_rules_simulated_diagnostics_and_preserved_facts(
-    case, body, rule
-):
+def test_source_examples_check_inputs_rules_simulated_diagnostics_and_preserved_facts(case, body):
     context, facts, _ = inputs()
     if case == "optional":
         facts.required_skills = ["Kubernetes"]
@@ -621,36 +670,45 @@ def test_source_examples_check_inputs_rules_simulated_diagnostics_and_preserved_
         ]
     else:
         data["dimensions"]["essentials"]["findings"] = [
-            *data["dimensions"]["essentials"]["findings"],
-            {
-                "offer_refs": ["constraints[0]"],
-                "candidate_refs": [],
-                "support": "not_documented",
-                "text": "Qualification à confirmer ; contrat et formation restent distincts",
-            },
+            finding
+            for finding in data["dimensions"]["essentials"]["findings"]
+            if "constraints[0]" not in finding["offer_refs"]
         ]
-        data["decision"]["essentials"] = "credible_material_question"
+        data["admissibility"]["mandatory_conditions"] = {
+            "status": "unknown",
+            "findings": [
+                {
+                    "offer_refs": ["constraints[0]"],
+                    "candidate_refs": [],
+                    "status": "unknown",
+                    "text": "Qualification obligatoire à confirmer",
+                }
+            ],
+        }
         data["issues"] = [
             {
-                "axis": "essentials",
-                "origin": "candidate_evidence",
+                "axis": "context",
+                "origin": "offer_information",
                 "offer_refs": ["constraints[0]"],
                 "candidate_refs": [],
                 "text": "Qualification obligatoire à confirmer",
             }
         ]
     public, diagnostic = complete_fit(
-        SimpleNamespace(complete_json=lambda **kwargs: data),
+        SimpleNamespace(name="openai", complete_json=lambda **kwargs: data),
         context,
         facts,
         extraction_provenance=provenance,
     )
-    assert rule in context["system_prompt"]
     assert user.count(body) >= 1
     assert diagnostic["offer_source"]["offer_body"] == body
     assert diagnostic["evaluation"] == data
     assert diagnostic["offer_facts"] == facts.model_dump(mode="json") == original
-    assert public.fit_score == (0.79 if case == "qualification" else 0.88)
+    assert public.fit_score == 0.88
+    if case == "qualification":
+        assert (
+            diagnostic["evaluation"]["admissibility"]["mandatory_conditions"]["status"] == "unknown"
+        )
     assert not any("not covered" in text for text in diagnostic["diagnostic_checks"]["warnings"])
     # A simulated diagnostic proves wiring and isolation, not future LLM judgement.
 

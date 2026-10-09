@@ -117,6 +117,8 @@ class OfferAnalysis(BaseModel):
 
 ExtractionSeniority = Literal["junior", "mid", "senior", "lead", "manager", "mixed", "unknown"]
 ExtractionLanguage = Literal["fr", "en", "mixed_fr_en", "other"]
+MissionRelation = Literal["direct", "adjacent", "clearly_outside", "unknown"]
+MissionEvidence = Literal["sufficient", "insufficient", "contradictory"]
 
 
 class OfferExtractionOutput(OfferAnalysis):
@@ -139,42 +141,48 @@ class OfferExtractionOutput(OfferAnalysis):
     )
 
 
+class MissionScreen(BaseModel):
+    """Offer-only mission classification for the dedicated prefilter."""
+
+    model_config = _strict
+
+    mission_relation: MissionRelation = Field(
+        description=(
+            "Semantic relation of concrete responsibilities to AI/ML, data analysis, "
+            "quantitative analysis/research, analytics, "
+            "data/AI consulting or closely related data/AI delivery. Exact search terms "
+            "are not required; recognise synonymous or functionally equivalent duties. "
+            "Financial/economic work requires actual quantitative research or analysis; "
+            "general financial duties alone do not qualify, and sectors are not excluded wholesale. "
+            "Programming is not required. Generic software/IT work without substantive data/AI duties, "
+            "transferable skills or incidental tools do not establish proximity."
+        )
+    )
+    mission_evidence: MissionEvidence = Field(
+        description=(
+            "Whether the body establishes the actual duties clearly enough to classify their "
+            "relation; contradictory means conflicting missions prevent classification."
+        )
+    )
+
+
+class JobScopeScreening(BaseModel):
+    """Independent mission screen using the unchanged historical categories."""
+
+    model_config = _strict
+    mission_screen: MissionScreen = Field(
+        description=(
+            "Classify the offer's main duties independently of any candidate. "
+            "Use unknown with insufficient or contradictory evidence when the duties cannot be classified."
+        ),
+    )
+
+
 class FitFinding(BaseModel):
     model_config = _strict
     offer_refs: list[str]
     candidate_refs: list[str]
     support: Literal["direct", "transferable", "declared_only", "not_documented", "contradicted"]
-    text: str = Field(min_length=1)
-
-
-class FitDimension(BaseModel):
-    model_config = _strict
-    level: int = Field(ge=0, le=4, strict=True)
-    findings: list[FitFinding]
-
-
-class FitDimensions(BaseModel):
-    model_config = _strict
-    missions: FitDimension
-    essentials: FitDimension
-    responsibilities: FitDimension
-
-
-class FitIssue(BaseModel):
-    model_config = _strict
-    code: Literal[
-        "confirmed_constraint_conflict",
-        "distant_core_work",
-        "substantial_core_gap",
-        "unclear_core_work",
-        "material_core_question",
-        "limited_question",
-        "offer_clarity",
-    ]
-    axis: Literal["missions", "essentials", "responsibilities", "context"]
-    origin: Literal["candidate_evidence", "offer_information", "preference_alignment"]
-    offer_refs: list[str]
-    candidate_refs: list[str]
     text: str = Field(min_length=1)
 
 
@@ -192,25 +200,11 @@ class NeutralOfferReference(BaseModel):
     candidate_refs: list[str]
 
 
-class JobFitEvaluation(BaseModel):
-    """Generation contract, never a prerequisite for reading usable fit levels.
-
-    Runtime scoring uses fit_response.read_fit_response; annotation conformity is
-    inspected after calculation and remains advisory on every path.
-    """
-
-    model_config = _strict
-    dimensions: FitDimensions
-    issues: list[FitIssue]
-    neutral_offer_refs: list[NeutralOfferReference]
-
-
 FitDecisionState = Literal[
     "very_low_support",
     "weak_support",
     "partial_core_fit",
-    "credible_material_question",
-    "credible_limited_adaptation",
+    "credible_fit",
     "strong_fit",
 ]
 
@@ -220,7 +214,6 @@ class FitDecisions(BaseModel):
     missions: FitDecisionState
     essentials: FitDecisionState
     responsibilities: FitDecisionState
-    preference_conflict: Literal["none", "unknown", "confirmed"]
 
 
 class FitDecisionFinding(FitFinding):
@@ -265,11 +258,44 @@ class FitOfferInterpretation(BaseModel):
     text: str
 
 
+AdmissibilityState = Literal["compatible", "incompatible", "unknown"]
+
+
+class FitAdmissibilityFinding(BaseModel):
+    model_config = _strict
+    offer_refs: list[str]
+    candidate_refs: list[str]
+    status: AdmissibilityState
+    text: str
+
+
+class FitAdmissibilityDimension(BaseModel):
+    model_config = _strict
+    status: AdmissibilityState
+    findings: list[FitAdmissibilityFinding]
+
+
+class FitAdmissibility(BaseModel):
+    model_config = _strict
+    mandatory_conditions: FitAdmissibilityDimension
+    candidate_preferences: FitAdmissibilityDimension
+
+
+class FitReliability(BaseModel):
+    model_config = _strict
+    offer_information: str
+    candidate_information: str
+    traceability: str
+    business_uncertainties: list[str]
+
+
 class JobFitDecisionEvaluation(BaseModel):
-    """V2 generation contract; only the four decisions are required at runtime."""
+    """Three technical decisions suffice; auxiliary output is advisory at runtime."""
 
     model_config = _strict
     decision: FitDecisions
+    admissibility: FitAdmissibility | None = None
+    reliability: FitReliability | None = None
     dimensions: FitDecisionAnnotations
     issues: list[FitReservation]
     neutral_offer_refs: list[NeutralOfferReference]
@@ -284,7 +310,7 @@ class JobFitAssessment(BaseModel):
     fit_score: float = Field(
         ge=0.0,
         le=1.0,
-        description="Overall candidate fit from 0 to 1 using the fixed assessment rubric.",
+        description="Ordinal technical fit index from the three weighted decisions, not a probability.",
     )
     match_reasons: list[str] = Field(
         description="Concrete matches between immutable offer requirements and candidate facts."
@@ -399,7 +425,7 @@ class CVSelection(BaseModel):
 
 
 class CVPersonalization(CVSelection):
-    """Complete personalization retained for existing snapshots and legacy drafts."""
+    """Complete personalization retained for existing CV snapshots."""
 
     # None marks a snapshot created before certificate selection existed.
     selected_certificate_ids: list[str] | None = None
@@ -545,46 +571,3 @@ class DocumentTextReview(BaseModel):
             "Empty when none remain. Never include positive assessments or a clean verdict."
         )
     )
-
-
-class FormQuestionAnswer(BaseModel):
-    model_config = _strict
-
-    question: str = Field(description="Original form question, copied or normalized")
-    answer: str = Field(description="Candidate-ready answer, plain text, no markdown")
-    evidence_used: list[str] = Field(
-        description="Concrete profile/job evidence used to justify this answer"
-    )
-    warnings: list[str] = Field(
-        description="Grounding warnings, missing context or claims to verify manually"
-    )
-
-
-class FormQuestionAnswers(BaseModel):
-    model_config = _strict
-
-    answers: list[FormQuestionAnswer] = Field(
-        description="One answer per detected form question, preserving question order"
-    )
-    global_warnings: list[str] = Field(
-        description="Overall warnings that apply to the generated answer set"
-    )
-
-
-class ApplicationDraft(CVPersonalization):
-    """LLM-generated personalization and letter, without experience output."""
-
-    motivation_letter_subject: str = Field(description="Motivation letter subject line")
-    motivation_letter_body: str = Field(
-        description=(
-            "Natural and professional motivation letter, usually 250-350 words. "
-            "Must reuse evidence from read-only profile experiences or selected_project_ids "
-            "without going into project details."
-        )
-    )
-
-    def to_motivation_letter(self) -> MotivationLetter:
-        return MotivationLetter(
-            subject=self.motivation_letter_subject,
-            body=self.motivation_letter_body,
-        )

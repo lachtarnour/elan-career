@@ -7,10 +7,9 @@ import pytest
 from smartapply.cv.adapter import CvAdapter
 from smartapply.cv.role_contracts import _is_explicit_offer_skill
 from smartapply.llm import AdaptedCV, JobAnalysis, MockLLMProvider
-from smartapply.llm.prompts import application_draft
+from smartapply.llm.prompts import cv_adaptation
 from smartapply.profile import get_profile
 from smartapply.profile.schema import SkillCategory, Skills
-from smartapply.ranking import MockEmbeddingsProvider
 from smartapply.utils.skill_terms import skill_term_matches
 
 
@@ -68,7 +67,7 @@ def test_equivalent_offer_names_use_canonical_display_skill(skill: str, term: st
     assert skill_term_matches(term, skill)
     assert _is_explicit_offer_skill(skill, {term})
 
-    adapter = CvAdapter(profile, llm=MockLLMProvider(), embeddings=MockEmbeddingsProvider())
+    adapter = CvAdapter(profile, llm=MockLLMProvider())
     cv = AdaptedCV(
         cv_title="ML Engineer",
         professional_summary="Summary",
@@ -107,16 +106,16 @@ def test_related_terms_or_word_fragments_are_not_aliases(skill: str, term: str) 
     assert CvAdapter._matched_allowed_skill_keys(term, {skill.lower(): skill}) == []
 
 
-def test_summary_expanded_model_name_keeps_canonical_skill_visible() -> None:
-    assert CvAdapter._summary_mentions_skill("Built graph neural networks for segmentation.", "GNN")
-    assert not CvAdapter._summary_mentions_skill("Studied graph theory.", "GNN")
+def test_expanded_model_name_matches_canonical_skill_in_context() -> None:
+    assert skill_term_matches("Built graph neural networks for segmentation.", "GNN")
+    assert not skill_term_matches("Studied graph theory.", "GNN")
 
 
 @pytest.mark.parametrize("allowed", [False, True])
 def test_langgraph_follows_catalogue_without_obsolete_learning_note(allowed: bool) -> None:
     profile = _profile_with_skill("LangGraph" if allowed else "LangChain")
     analysis = _analysis("LangGraph")
-    prompt = application_draft.build_user_prompt(
+    prompt = cv_adaptation.build_user_prompt(
         profile=profile,
         analysis=analysis,
         job_title="Agentic AI Engineer",

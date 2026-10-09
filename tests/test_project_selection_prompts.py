@@ -1,4 +1,4 @@
-"""Project policy and selected-evidence boundaries in both drafting prompts."""
+"""Project policy and selected-evidence boundaries in CV and document prompts."""
 
 from __future__ import annotations
 
@@ -7,11 +7,9 @@ import pytest
 from smartapply.cv.assembly import assemble_cv
 from smartapply.llm import AssembledCV, CVPersonalization, JobAnalysis, MotivationLetter
 from smartapply.llm.prompts import (
-    application_draft,
     application_texts,
     cv_adaptation,
     document_review,
-    motivation_letter,
 )
 from smartapply.llm.prompts.document_context import build_document_context
 from smartapply.llm.prompts.loader import load_prompt
@@ -60,12 +58,9 @@ def selection_inputs():
     }
 
 
-@pytest.mark.parametrize("builder", [cv_adaptation, application_draft])
-def test_catalogue_exposes_fixed_selection_policy_without_mutating_profile(
-    builder, selection_inputs
-):
+def test_catalogue_exposes_fixed_selection_policy_without_mutating_profile(selection_inputs):
     before = selection_inputs["profile"].model_dump()
-    prompt = builder.build_user_prompt(**selection_inputs)
+    prompt = cv_adaptation.build_user_prompt(**selection_inputs)
     for tier in ("primary", "specialized", "disabled"):
         assert f'"tier": "{tier}"' in prompt
         assert f'"rationale": "Reviewed quality: {tier}"' in prompt
@@ -79,13 +74,10 @@ def test_cv_selection_prompt_exposes_certificates_without_extra_call(selection_i
         assert f"id={certificate.id} :: {certificate.name}" in prompt
 
 
-@pytest.mark.parametrize("builder", [cv_adaptation, application_draft])
-def test_full_offer_is_available_for_exact_evidence_only_after_cacheable_prefix(
-    builder, selection_inputs
-):
+def test_full_offer_is_available_for_exact_evidence_only_after_cacheable_prefix(selection_inputs):
     description = "Concevoir un système d'extraction d'entités cliniques."
-    first = builder.build_user_prompt(**selection_inputs, job_description=description)
-    second = builder.build_user_prompt(
+    first = cv_adaptation.build_user_prompt(**selection_inputs, job_description=description)
+    second = cv_adaptation.build_user_prompt(
         **selection_inputs,
         job_description="Build image classification models for quality control.",
     )
@@ -93,14 +85,13 @@ def test_full_offer_is_available_for_exact_evidence_only_after_cacheable_prefix(
     assert first.index(description) > first.index("=== JOB ===")
     assert first.split("=== JOB ===")[0] == second.split("=== JOB ===")[0]
     assert selection_inputs["analysis"].main_tasks[0] in first
-    assert description not in builder.build_user_prompt(**selection_inputs)
+    assert description not in cv_adaptation.build_user_prompt(**selection_inputs)
 
 
-@pytest.mark.parametrize("builder", [cv_adaptation, application_draft])
-def test_drafting_prompts_share_canonical_selection_policy(builder, selection_inputs):
+def test_cv_prompt_uses_canonical_selection_policy(selection_inputs):
     rules = load_prompt("cv_adaptation/project_selection_rules.j2")
-    assert rules in builder.build_system_prompt()
-    assert "project_selection_reasons" in builder.build_user_prompt(**selection_inputs)
+    assert rules in cv_adaptation.build_system_prompt()
+    assert "project_selection_reasons" in cv_adaptation.build_user_prompt(**selection_inputs)
 
 
 @pytest.mark.parametrize("count", range(5))
@@ -151,7 +142,6 @@ def test_selection_audit_stays_out_of_letter_and_independent_review_sources(sele
         {**adapted.model_dump(exclude={"professional_summary"}), "selected_certificate_ids": []}
     )
     prompts = [
-        motivation_letter.build_user_prompt(**shared),
         application_texts.build_user_prompt(**{**shared, "adapted_cv": assembled}),
     ]
     for allow_corrections in (True, False):

@@ -18,7 +18,10 @@ from smartapply.offers import build_analyzer_input
 from smartapply.pipeline.rescore import execute_rescore_plan, prepare_rescore_plan
 from smartapply.profile import get_profile
 from tests.fit_fixtures import evaluation_from_user
+from tests.test_evidence_fit import explicit_fit_routes as _explicit_fit_routes
 from tests.test_evidence_fit import fixture, seeded_analysis, snapshot
+
+explicit_fit_routes = _explicit_fit_routes
 
 
 def offer_block(user):
@@ -55,11 +58,11 @@ def test_next_plan_reuses_reextracted_facts_with_their_own_provenance(
         calls.append(kwargs)
         return (
             new_facts
-            if kwargs["purpose"] == "job_offer_analysis"
+            if kwargs["purpose"] == "job_offer_extraction"
             else evaluation_from_user(kwargs["user"])
         )
 
-    provider = SimpleNamespace(complete_json=complete)
+    provider = SimpleNamespace(name="openai", complete_json=complete)
     assert execute_rescore_plan(initial_plan, provider, approved=True)[0]["status"] == "rescored"
     after_extraction = snapshot(job_id)
     diagnostics = after_extraction["analysis"]["fit_diagnostics"]
@@ -78,7 +81,7 @@ def test_next_plan_reuses_reextracted_facts_with_their_own_provenance(
     assert entry["extraction_provenance"] == diagnostics["extraction_provenance"]
     assert execute_rescore_plan(next_plan, provider, approved=True)[0]["status"] == "rescored"
     assert [call["purpose"] for call in calls] == [
-        "job_offer_analysis",
+        "job_offer_extraction",
         "job_fit_assessment",
         "job_fit_assessment",
     ]
@@ -125,6 +128,8 @@ def test_invalid_recent_snapshot_never_authenticates_different_historical_facts(
                     id="historical-extraction",
                     state="completed",
                     model="mock",
+                    provider="openai",
+                    max_completion_tokens=6000,
                     profile_data=get_profile().model_dump(mode="json"),
                 )
             )

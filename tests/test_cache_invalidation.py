@@ -28,12 +28,9 @@ def editable_prompts(tmp_path, monkeypatch):
         ("job_analysis", "system_long.j2"),
         ("job_fit", "system.j2"),
         ("cv_adaptation", "system.j2"),
-        ("application_draft", "system.j2"),
-        ("motivation_letter", "system.j2"),
         ("application_texts", "system.j2"),
         ("document_review", "system.j2"),
         ("motivation_letter_repair", "system.j2"),
-        ("form_questions", "system.j2"),
     ],
 )
 def test_system_instructions_reload_without_reimport(editable_prompts, name, filename):
@@ -80,46 +77,25 @@ def test_next_pipeline_loads_edited_profile_without_restart(tmp_path, monkeypatc
         after = Pipeline()
         assert "New declared skill" not in before.profile.skills.allowed_skills
         assert "New declared skill" in after.profile.skills.allowed_skills
-        assert after.scorer.profile is after.profile
         assert after.adapter.profile is after.profile
         assert get_profile() is after.profile
     finally:
         get_settings.cache_clear()
 
 
-def test_embeddings_recompute_only_changed_text_or_model(isolated_db, monkeypatch):
-    from smartapply.ranking.embeddings import OpenAIEmbeddingsProvider
-
-    calls = []
-
-    def fake_create(self, client, batch):
-        calls.append((self.model_name, list(batch)))
-        return SimpleNamespace(
-            data=[
-                SimpleNamespace(index=i, embedding=[len(text), 1.0]) for i, text in enumerate(batch)
-            ],
-            usage=SimpleNamespace(prompt_tokens=1),
-        )
-
-    monkeypatch.setattr(OpenAIEmbeddingsProvider, "_create_embeddings", fake_create)
-    first = OpenAIEmbeddingsProvider(model="model-a")
-    first._client = object()
-    first.embed(["profile old", "project unchanged"])
-    first.embed(["profile new", "project unchanged"])
-    first.embed(["profile new", "project unchanged"])
-    other = OpenAIEmbeddingsProvider(model="model-b")
-    other._client = object()
-    other.embed(["profile new", "project unchanged"])
-    assert calls == [
-        ("model-a", ["profile old", "project unchanged"]),
-        ("model-a", ["profile new"]),
-        ("model-b", ["profile new", "project unchanged"]),
-    ]
 
 
-def test_edited_prompt_bypasses_old_llm_response(editable_prompts, isolated_db, monkeypatch):
+def test_edited_prompt_bypasses_old_llm_response(
+    editable_prompts, isolated_db, monkeypatch, tmp_path
+):
     from smartapply.llm.openai_provider import OpenAIProvider
     from smartapply.llm.prompts import application_texts
+    from tests.llm_config_helpers import configure_calls
+
+    configure_calls(monkeypatch, tmp_path, application_texts={
+        "provider": "openai", "model": "gpt-5.4", "reasoning": "none",
+        "max_output_tokens": 6000,
+    })
 
     class Answer(BaseModel):
         value: str
@@ -137,7 +113,7 @@ def test_edited_prompt_bypasses_old_llm_response(editable_prompts, isolated_db, 
             usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
         )
 
-    provider = OpenAIProvider()
+    provider = OpenAIProvider(model="gpt-5.4")
     monkeypatch.setattr(provider, "_call_openai", fake_call)
 
     def request():
@@ -145,6 +121,7 @@ def test_edited_prompt_bypasses_old_llm_response(editable_prompts, isolated_db, 
             system=application_texts.build_system_prompt(),
             user="Same profile and offer",
             schema=Answer,
+            purpose="application_texts",
         ).value
 
     assert request() == "response-1"

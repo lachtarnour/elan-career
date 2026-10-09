@@ -1,4 +1,4 @@
-"""Structural observations for V2; no source grammar or numeric authority."""
+"""Read-only observations of fit annotations; no scoring authority."""
 
 from smartapply.llm.fit_context import DECISION_LEVELS, offer_references, resolve
 from smartapply.llm.fit_validation import AXES, POSITIVE, PREFERENCE_FIELDS
@@ -121,10 +121,11 @@ def inspect_decisions(evaluation, context, offer) -> list[str]:
         state = getattr(evaluation.decision, axis)
         if DECISION_LEVELS[state] >= 3 and not positives:
             observations.append(f"{axis}: high decision without a sourced positive finding")
-        if (DECISION_LEVELS[state] <= 2 or state == "credible_material_question") and not any(
-            issue.axis == axis for issue in evaluation.issues
-        ):
-            observations.append(f"{axis}: material decision needs an explanatory reservation")
+        explained = any(finding.text.strip() for finding in findings) or any(
+            issue.axis == axis and issue.text.strip() for issue in evaluation.issues
+        )
+        if DECISION_LEVELS[state] <= 2 and not explained:
+            observations.append(f"{axis}: limited decision without an explanatory annotation")
 
     issue_coverage = set()
     task_coverage = set()
@@ -140,30 +141,60 @@ def inspect_decisions(evaluation, context, offer) -> list[str]:
             for ref in issue.candidate_refs
         ):
             observations.append("Preference reservation needs a declared preference")
-    if evaluation.decision.preference_conflict == "confirmed" and not any(
-        issue.axis == "context"
-        and issue.origin == "preference_alignment"
-        and binding_preferences(issue.candidate_refs)
-        and any(
-            ref in offers and offers[ref]["source_type"] in {"constraints", "source"}
-            for ref in issue.offer_refs
-        )
-        for issue in evaluation.issues
-    ):
-        observations.append(
-            "Confirmed preference conflict needs binding preference and offer condition"
-        )
+    admissibility_coverage = set()
+    if evaluation.admissibility is not None:
+        for name in ("mandatory_conditions", "candidate_preferences"):
+            dimension = getattr(evaluation.admissibility, name)
+            finding_statuses = {finding.status for finding in dimension.findings}
+            if dimension.status == "incompatible" and "incompatible" not in finding_statuses:
+                observations.append(f"{name}: incompatible status without an explanatory finding")
+            if dimension.status == "compatible" and finding_statuses & {"unknown", "incompatible"}:
+                observations.append(
+                    f"{name}: compatible status has unresolved or incompatible findings"
+                )
+            if dimension.status == "unknown" and "incompatible" in finding_statuses:
+                observations.append(f"{name}: unknown status has an incompatible finding")
+            for finding in dimension.findings:
+                refs(finding.offer_refs, finding.candidate_refs, name)
+                admissibility_coverage.update(finding.offer_refs)
+                if not finding.text.strip():
+                    observations.append(f"{name}: finding explanation is empty")
+                if finding.status in {"compatible", "incompatible"}:
+                    if not any(ref in candidate for ref in finding.candidate_refs):
+                        observations.append(
+                            f"{name}: established comparison lacks candidate references"
+                        )
+                    if name == "candidate_preferences" and not binding_preferences(
+                        finding.candidate_refs
+                    ):
+                        observations.append(
+                            f"{name}: established comparison lacks explicit binding preferences"
+                        )
+
+    if evaluation.reliability is not None:
+        for name in ("offer_information", "candidate_information", "traceability"):
+            if not getattr(evaluation.reliability, name).strip():
+                observations.append(f"reliability.{name}: description is empty")
+        if any(
+            not uncertainty.strip() for uncertainty in evaluation.reliability.business_uncertainties
+        ):
+            observations.append("reliability.business_uncertainties: empty description")
+
     for ref, entry in offers.items():
         if ref in whole_neutral or ref in optional:
             continue
         kind = entry["source_type"]
-        if kind == "required_skills" and ref not in covered["essentials"]:
+        if kind == "required_skills" and ref not in (
+            covered["essentials"] | admissibility_coverage
+        ):
             observations.append(f"{ref}: essential expectation not covered")
         if kind == "main_tasks" and ref not in (
             covered["missions"] | covered["responsibilities"] | task_coverage
         ):
             observations.append(f"{ref}: task not covered")
-        if kind == "constraints" and ref not in (set.union(*covered.values()) | issue_coverage):
+        if kind == "constraints" and ref not in (
+            set.union(*covered.values()) | issue_coverage | admissibility_coverage
+        ):
             observations.append(
                 f"{ref}: constraint not covered (partial neutralisation is insufficient)"
             )

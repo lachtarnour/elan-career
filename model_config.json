@@ -1,0 +1,8 @@
+{
+  "job_scope_screening": {"provider": "anthropic", "model": "claude-haiku-5-5", "reasoning": "high", "max_output_tokens": 16000},
+  "job_offer_extraction": {"provider": "openai", "model": "gpt-5.4-mini", "reasoning": "medium", "max_output_tokens": 16000},
+  "job_fit_assessment": {"provider": "openai", "model": "gpt-5.4-mini", "reasoning": "medium", "max_output_tokens": 32000},
+  "cv_adaptation": {"provider": "openai", "model": "gpt-5.4", "reasoning": "medium", "max_output_tokens": 32000},
+  "application_texts": {"provider": "openai", "model": "gpt-5.4", "reasoning": "medium", "max_output_tokens": 32000},
+  "document_review": {"provider": "openai", "model": "gpt-5.4", "reasoning": "high", "max_output_tokens": 32000}
+}

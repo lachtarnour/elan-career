@@ -458,12 +458,19 @@ def test_gpt56_pricing_accounts_for_cache_write_surcharge() -> None:
 def test_openai_usage_is_recorded_without_exact_cache_and_uses_cached_rate(
     isolated_db,
     monkeypatch,
+    tmp_path,
 ) -> None:
     from sqlalchemy import select
 
     from smartapply.database import session_scope
     from smartapply.database.models import LLMUsage
     from smartapply.llm.openai_provider import OpenAIProvider
+    from tests.llm_config_helpers import configure_calls
+
+    configure_calls(monkeypatch, tmp_path, application_texts={
+        "provider": "openai", "model": "gpt-5.4", "reasoning": "none",
+        "max_output_tokens": 6000,
+    })
 
     captured: dict = {}
     response = SimpleNamespace(
@@ -474,7 +481,7 @@ def test_openai_usage_is_recorded_without_exact_cache_and_uses_cached_rate(
             prompt_tokens_details=SimpleNamespace(cached_tokens=400),
         ),
     )
-    provider = OpenAIProvider()
+    provider = OpenAIProvider(model="gpt-5.4")
 
     def fake_call(**kwargs):
         captured.update(kwargs)
@@ -487,12 +494,12 @@ def test_openai_usage_is_recorded_without_exact_cache_and_uses_cached_rate(
         user="job-specific input",
         schema=_TinyAnswer,
         model="gpt-5.4",
-        purpose="cost_test",
+        purpose="application_texts",
         use_cache=False,
     )
 
     assert result.value == "ok"
-    assert captured["prompt_cache_key"] == "elan:cost_test:_TinyAnswer"
+    assert captured["prompt_cache_key"] == "elan:application_texts:_TinyAnswer"
     assert captured["max_completion_tokens"] == 6000
     with session_scope() as session:
         usage = session.scalar(select(LLMUsage))
@@ -505,10 +512,17 @@ def test_openai_usage_is_recorded_without_exact_cache_and_uses_cached_rate(
 def test_invalid_exact_cache_is_replaced_once_instead_of_repeatedly_paid(
     isolated_db,
     monkeypatch,
+    tmp_path,
 ) -> None:
     from smartapply.database import session_scope
     from smartapply.database.repository import cache_set
     from smartapply.llm.openai_provider import OpenAIProvider
+    from tests.llm_config_helpers import configure_calls
+
+    configure_calls(monkeypatch, tmp_path, application_texts={
+        "provider": "openai", "model": "gpt-5.4", "reasoning": "none",
+        "max_output_tokens": 6000,
+    })
 
     cache_key = make_cache_key(
         model="gpt-5.4",
@@ -518,6 +532,7 @@ def test_invalid_exact_cache_is_replaced_once_instead_of_repeatedly_paid(
         extra={
             "temperature": 0.2,
             "schema": _TinyAnswer.model_json_schema(),
+            "effort": "none",
         },
     )
     with session_scope() as session:
@@ -528,7 +543,7 @@ def test_invalid_exact_cache_is_replaced_once_instead_of_repeatedly_paid(
             response="{}",
             prompt_tokens=10,
             completion_tokens=2,
-            purpose="repair_test",
+            purpose="application_texts",
         )
 
     calls = 0
@@ -540,7 +555,7 @@ def test_invalid_exact_cache_is_replaced_once_instead_of_repeatedly_paid(
             prompt_tokens_details=SimpleNamespace(cached_tokens=0),
         ),
     )
-    provider = OpenAIProvider()
+    provider = OpenAIProvider(model="gpt-5.4")
 
     def fake_call(**kwargs):  # noqa: ARG001
         nonlocal calls
@@ -554,14 +569,14 @@ def test_invalid_exact_cache_is_replaced_once_instead_of_repeatedly_paid(
         user="dynamic",
         schema=_TinyAnswer,
         model="gpt-5.4",
-        purpose="repair_test",
+        purpose="application_texts",
     )
     second = provider.complete_json(
         system="stable",
         user="dynamic",
         schema=_TinyAnswer,
         model="gpt-5.4",
-        purpose="repair_test",
+        purpose="application_texts",
     )
 
     assert first.value == second.value == "fresh"
@@ -571,10 +586,17 @@ def test_invalid_exact_cache_is_replaced_once_instead_of_repeatedly_paid(
 def test_refresh_cache_bypasses_old_response_and_replaces_it(
     isolated_db,
     monkeypatch,
+    tmp_path,
 ) -> None:
     from smartapply.database import session_scope
     from smartapply.database.repository import cache_set
     from smartapply.llm.openai_provider import OpenAIProvider
+    from tests.llm_config_helpers import configure_calls
+
+    configure_calls(monkeypatch, tmp_path, application_texts={
+        "provider": "openai", "model": "gpt-5.4", "reasoning": "none",
+        "max_output_tokens": 6000,
+    })
 
     cache_key = make_cache_key(
         model="gpt-5.4",
@@ -584,6 +606,7 @@ def test_refresh_cache_bypasses_old_response_and_replaces_it(
         extra={
             "temperature": 0.2,
             "schema": _TinyAnswer.model_json_schema(),
+            "effort": "none",
         },
     )
     with session_scope() as session:
@@ -594,7 +617,7 @@ def test_refresh_cache_bypasses_old_response_and_replaces_it(
             response='{"value":"old"}',
             prompt_tokens=10,
             completion_tokens=2,
-            purpose="refresh_test",
+            purpose="application_texts",
         )
 
     calls = 0
@@ -606,7 +629,7 @@ def test_refresh_cache_bypasses_old_response_and_replaces_it(
             prompt_tokens_details=SimpleNamespace(cached_tokens=0),
         ),
     )
-    provider = OpenAIProvider()
+    provider = OpenAIProvider(model="gpt-5.4")
 
     def fake_call(**kwargs):  # noqa: ARG001
         nonlocal calls
@@ -620,7 +643,7 @@ def test_refresh_cache_bypasses_old_response_and_replaces_it(
         user="dynamic",
         schema=_TinyAnswer,
         model="gpt-5.4",
-        purpose="refresh_test",
+        purpose="application_texts",
         refresh_cache=True,
     )
     reused = provider.complete_json(
@@ -628,7 +651,7 @@ def test_refresh_cache_bypasses_old_response_and_replaces_it(
         user="dynamic",
         schema=_TinyAnswer,
         model="gpt-5.4",
-        purpose="refresh_test",
+        purpose="application_texts",
     )
 
     assert refreshed.value == reused.value == "fresh"
@@ -675,10 +698,17 @@ def test_purge_expired_cache_deletes_only_entries_older_than_15_days(
 def test_cache_hit_telemetry_failure_never_triggers_a_paid_call(
     isolated_db,
     monkeypatch,
+    tmp_path,
 ) -> None:
     from smartapply.database import session_scope
     from smartapply.database.repository import cache_set
     from smartapply.llm.openai_provider import OpenAIProvider
+    from tests.llm_config_helpers import configure_calls
+
+    configure_calls(monkeypatch, tmp_path, application_texts={
+        "provider": "openai", "model": "gpt-5.4", "reasoning": "none",
+        "max_output_tokens": 6000,
+    })
 
     cache_key = make_cache_key(
         model="gpt-5.4",
@@ -688,6 +718,7 @@ def test_cache_hit_telemetry_failure_never_triggers_a_paid_call(
         extra={
             "temperature": 0.2,
             "schema": _TinyAnswer.model_json_schema(),
+            "effort": "none",
         },
     )
     with session_scope() as session:
@@ -698,10 +729,10 @@ def test_cache_hit_telemetry_failure_never_triggers_a_paid_call(
             response='{"value":"cached"}',
             prompt_tokens=10,
             completion_tokens=2,
-            purpose="telemetry_test",
+            purpose="application_texts",
         )
 
-    provider = OpenAIProvider()
+    provider = OpenAIProvider(model="gpt-5.4")
 
     def fail_usage(*args, **kwargs):  # noqa: ARG001
         raise RuntimeError("telemetry unavailable")
@@ -717,7 +748,7 @@ def test_cache_hit_telemetry_failure_never_triggers_a_paid_call(
         user="dynamic",
         schema=_TinyAnswer,
         model="gpt-5.4",
-        purpose="telemetry_test",
+        purpose="application_texts",
     )
 
     assert result.value == "cached"
@@ -729,7 +760,9 @@ def test_cache_hit_telemetry_failure_never_triggers_a_paid_call(
 # ---------------- Factory ----------------
 
 
-def test_factory_returns_mock_by_default() -> None:
+def test_factory_uses_mock_routes_by_default() -> None:
     p = get_llm_provider()
-    assert isinstance(p, MockLLMProvider)
+    from smartapply.llm.routes import provider_for
+
+    assert isinstance(provider_for(p, "job_offer_extraction"), MockLLMProvider)
     assert p.smart_model.startswith("mock") and p.cheap_model.startswith("mock")

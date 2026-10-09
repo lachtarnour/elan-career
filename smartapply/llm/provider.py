@@ -10,7 +10,7 @@ from pydantic import BaseModel
 T = TypeVar("T", bound=BaseModel)
 
 if TYPE_CHECKING:
-    from smartapply.llm.fit_response import FitEvaluationResponse
+    from smartapply.llm.fit_response import FitDecisionResponse
 
 
 class LLMProvider(ABC):
@@ -18,8 +18,7 @@ class LLMProvider(ABC):
 
     Implementations validate the returned data before returning it. Fit evaluation
     is special: its generation schema guides the model, while the response reader
-    requires only the versioned scoring inputs (four decisions in V2, three
-    levels in V1) and preserves imperfect annotations.
+    requires only the four fit decisions and preserves imperfect annotations.
     """
 
     name: str = ""
@@ -38,7 +37,8 @@ class LLMProvider(ABC):
         use_cache: bool = True,
         refresh_cache: bool = False,
         max_completion_tokens: int | None = None,
-    ) -> T | FitEvaluationResponse: ...
+        effort: str | None = "auto",
+    ) -> T | FitDecisionResponse: ...
 
     @property
     @abstractmethod

@@ -1,4 +1,4 @@
-"""Immutable factual inputs and versioned policy for evidence-based fit."""
+"""Immutable factual inputs and fingerprinted policy for evidence-based fit."""
 
 from __future__ import annotations
 
@@ -8,56 +8,31 @@ import json
 from datetime import date, datetime
 from typing import Any
 
-from smartapply.config import get_settings
+from smartapply.config import Settings, get_llm_settings, get_settings
 from smartapply.llm.prompts.loader import load_prompt
-from smartapply.llm.schemas import JobFitDecisionEvaluation, JobFitEvaluation, OfferAnalysis
+from smartapply.llm.schemas import JobFitDecisionEvaluation, OfferAnalysis
+from smartapply.llm_policy import resolve_route
 from smartapply.profile import Bullet, Profile
 
-LEGACY_POLICY = {
-    "version": "evidence_fit_v5",
-    "calculation_version": "evidence_fit_calculation_v2",
-    "weights": [50, 30, 20],
-    "caps": {
-        "confirmed_constraint_conflict": "0.19",
-        "distant_core_work": "0.39",
-        "substantial_core_gap": "0.59",
-        "unclear_core_work": "0.59",
-        "material_core_question": "0.79",
-    },
-    "guards": {"missions_le_1": "0.39", "any_dimension_le_2": "0.59"},
-    "rounding": "ROUND_HALF_UP:0.01",
-    "diagnostic_checks": "advisory",
-}
-POLICY_VERSION = "evidence_fit_v6"
-CALCULATION_VERSION = "evidence_fit_calculation_v3"
 DECISION_LEVELS = {
     "very_low_support": 0,
     "weak_support": 1,
     "partial_core_fit": 2,
-    "credible_material_question": 3,
-    "credible_limited_adaptation": 3,
+    "credible_fit": 3,
     "strong_fit": 4,
 }
 POLICY = {
-    "version": POLICY_VERSION,
-    "calculation_version": CALCULATION_VERSION,
+    "name": "evidence_fit",
     "weights": [50, 30, 20],
     "decision_levels": DECISION_LEVELS,
-    "caps": {"material_core_question": "0.79", "confirmed_preference_conflict": "0.19"},
-    "guards": {"missions_le_1": "0.39", "any_dimension_le_2": "0.59"},
     "rounding": "ROUND_HALF_UP:0.01",
     "diagnostic_checks": "advisory",
 }
 
 
 def fit_schema(context: dict):
-    """Select the actual generation contract, including frozen legacy requests."""
-    version = context.get("schema_version")
-    if version == "job_fit_evaluation_v1":
-        return JobFitEvaluation
-    if version == "job_fit_evaluation_v2":
-        return JobFitDecisionEvaluation
-    raise ValueError(f"Unknown fit schema version: {version}")
+    """Accept only the current fit generation contract."""
+    return JobFitDecisionEvaluation
 
 
 def fit_source(provenance: dict | None) -> dict:
@@ -220,33 +195,53 @@ def offer_references(offer: OfferAnalysis) -> dict:
 
 
 def build_fit_context(
-    profile: Profile, model: str, *, max_completion_tokens=None, version=POLICY_VERSION
+    profile: Profile,
+    model: str,
+    *,
+    provider: str | None = None,
+    max_completion_tokens=None,
+    settings: Settings | None = None,
+    effort: str | None = "auto",
 ) -> dict:
-    from smartapply.llm.openai_provider import _to_strict_schema
+    from smartapply.llm.request_options import stage_effort
+    from smartapply.llm.structured import to_strict_schema
 
-    settings = get_settings()
+    runtime_settings = get_settings()
+    transport_settings = settings or get_llm_settings()
+    if provider is None:
+        from smartapply.llm_policy import CallConfigurationError
+
+        route = resolve_route(transport_settings, "job_fit_assessment")
+        if model != route.model:
+            raise CallConfigurationError(
+                "job_fit_assessment", "model", "le modèle demandé diffère du réglage de cet appel"
+            )
+        provider = route.provider
     facts = copy.deepcopy(candidate_facts(profile))
-    if version not in {POLICY_VERSION, LEGACY_POLICY["version"]}:
-        raise ValueError(f"Unknown fit policy: {version}")
-    legacy = version == LEGACY_POLICY["version"]
-    template = "job_fit_v5" if legacy else "job_fit"
     result = {
-        "policy": copy.deepcopy(LEGACY_POLICY if legacy else POLICY),
+        "policy": copy.deepcopy(POLICY),
         "candidate_facts": facts,
         "candidate_refs": candidate_references(facts),
-        "declared_experience": settings.declared_experience,
+        "declared_experience": runtime_settings.declared_experience,
         "declared_experience_source": "settings.declared_experience",
-        "system_prompt": load_prompt(f"{template}/system.j2"),
-        "user_template": load_prompt(f"{template}/user.j2"),
-        "prompt_version": version,
-        "schema_version": "job_fit_evaluation_v1" if legacy else "job_fit_evaluation_v2",
-        "response_reader_version": "fit_levels_reader_v1" if legacy else "fit_decisions_reader_v2",
-        "schema": _to_strict_schema(JobFitEvaluation if legacy else JobFitDecisionEvaluation),
+        "system_prompt": load_prompt("job_fit/system.j2"),
+        "user_template": load_prompt("job_fit/user.j2"),
+        "schema": to_strict_schema(JobFitDecisionEvaluation),
         "model": model,
         "temperature": 0.2,
-        "configured_context_window": settings.openai_context_window_tokens,
-        "max_completion_tokens": max_completion_tokens or settings.fit_max_completion_tokens,
+        "configured_context_window": transport_settings.llm_context_window(provider),
+        "max_completion_tokens": max_completion_tokens
+        or resolve_route(transport_settings, "job_fit_assessment").max_output_tokens,
     }
+    frozen_effort = (
+        stage_effort(provider, model, "job_fit_assessment", settings=transport_settings)
+        if effort == "auto"
+        else effort
+    )
+    result["configured_reasoning"] = frozen_effort if frozen_effort is not None else "auto"
+    if frozen_effort is not None:
+        result["effort"] = frozen_effort
+    result["provider"] = provider
     result["candidate_fingerprint"] = fingerprint(facts)
     result["declared_experience_fingerprint"] = fingerprint(
         {
@@ -267,10 +262,32 @@ def build_fit_context(
 
 
 def context_is_current(context: dict, profile: Profile) -> bool:
+    if context.get("policy") != POLICY:
+        return False
     unsigned = {key: value for key, value in context.items() if key != "context_fingerprint"}
     if fingerprint(unsigned) != context.get("context_fingerprint"):
         return False
-    current = build_fit_context(profile, context["model"], version=context["policy"]["version"])
+    current = build_fit_context(
+        profile,
+        context["model"],
+        provider=context.get("provider", "openai"),
+        max_completion_tokens=context["max_completion_tokens"],
+        effort=context.get("effort"),
+    )
+    # Transport settings may change while a Batch is running. The signed run
+    # keeps its original model, parameters and provider; only facts, prompts,
+    # schemas and policy must still match the current application contract.
+    for key in ("temperature", "configured_context_window"):
+        current[key] = copy.deepcopy(context[key])
+    if "provider" not in context:
+        # Historical OpenAI contexts were signed before the provider field was
+        # persisted. Keep their original signed shape during read/import.
+        current.pop("provider", None)
+    if "configured_reasoning" not in context:
+        current.pop("configured_reasoning", None)
+    current["context_fingerprint"] = fingerprint(
+        {key: value for key, value in current.items() if key != "context_fingerprint"}
+    )
     return current["context_fingerprint"] == context["context_fingerprint"]
 
 
@@ -282,7 +299,7 @@ def build_fit_user(context: dict, offer: OfferAnalysis, *, extraction_provenance
         _environment()
         .from_string(context["user_template"])
         .render(
-            scoring_policy_version=context["policy"]["version"],
+            scoring_policy_json=json.dumps(context["policy"], ensure_ascii=False),
             candidate_json=json.dumps(context["candidate_facts"], ensure_ascii=False),
             declared_experience=context["declared_experience"],
             declared_experience_source=context["declared_experience_source"],

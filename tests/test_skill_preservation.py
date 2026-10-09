@@ -15,7 +15,6 @@ from smartapply.cv.skill_display import compact_sparse_secondary_categories
 from smartapply.cv.skill_selection import normalize_skill_selection, restore_skill_selection_order
 from smartapply.llm import AdaptedCV, CVSelection, JobAnalysis, SkillSelectionBlock
 from smartapply.profile import get_profile
-from smartapply.ranking import MockEmbeddingsProvider
 
 
 class _NoLLM:
@@ -53,7 +52,7 @@ def test_selected_catalogue_skills_survive_malformed_blocks_and_document_renderi
         match_reasons=[],
         risks=[],
     )
-    adapter = CvAdapter(profile, llm=_NoLLM(), embeddings=MockEmbeddingsProvider())
+    adapter = CvAdapter(profile, llm=_NoLLM())
     selected = adapter._ensure_supported_offer_skills(assemble_cv(raw, profile), analysis)
     selected = adapter._apply_role_family_contract(selected, analysis, role)
     cv = AdaptedCV(**selected.model_dump(), professional_summary="Applied AI experience.")

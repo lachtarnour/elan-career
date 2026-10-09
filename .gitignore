@@ -31,6 +31,7 @@ ENV/
 # ---- Secrets ----
 .env
 .env.*
+.*.llm.lock
 !.env.example
 secrets/
 *.pem

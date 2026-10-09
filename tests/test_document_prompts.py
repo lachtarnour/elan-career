@@ -22,7 +22,6 @@ from smartapply.llm.prompts import (
     application_texts,
     cv_adaptation,
     document_review,
-    motivation_letter,
 )
 from smartapply.llm.prompts.document_context import (
     allowed_source_ids,
@@ -454,7 +453,6 @@ def test_subject_and_body_contract_is_identical_in_generation_review_and_confirm
 
     prompts = (
         application_texts.build_user_prompt(**_assembled_inputs(source_documents)),
-        motivation_letter.build_user_prompt(**source_documents),
         document_review.build_user_prompt(
             **source_documents,
             letter=MotivationLetter(
@@ -558,7 +556,6 @@ def test_motivation_leads_are_explicit_shared_and_do_not_replace_offer(
     assert analysis.model_dump() == before
 
     prompts = [
-        motivation_letter.build_user_prompt(**source_documents),
         application_texts.build_user_prompt(**_assembled_inputs(source_documents)),
         document_review.build_user_prompt(
             **source_documents,
@@ -628,7 +625,6 @@ def test_recruiter_language_rule_is_shared_with_generation_review_and_confirmati
         source_documents["profile"], source_documents["adapted_cv"]
     )
     prompts = [
-        motivation_letter.build_user_prompt(**source_documents),
         application_texts.build_user_prompt(**_assembled_inputs(source_documents)),
         document_review.build_user_prompt(
             **source_documents,
