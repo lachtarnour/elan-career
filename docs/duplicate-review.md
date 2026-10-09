@@ -60,13 +60,11 @@ termine après leur enregistrement, avant l'analyse de pertinence.
 
 ## Présentation des cas encore en attente
 
-Les copies qui restent en attente peuvent être affichées dans une carte
-dépliable. Chaque version reste accessible et chaque décision concerne la paire
-affichée. L'interrupteur « Regrouper les copies » permet de retrouver la
-présentation par rapprochement. Les compteurs distinguent rapprochements et cartes.
+Chaque rapprochement encore en attente possède sa propre carte. Chaque décision
+concerne la paire affichée.
 
 Après une décision enregistrée, le couple suivant s'ouvre automatiquement dans
-la liste filtrée, y compris au sein d'un groupe de copies. Les relations retirées
+la liste filtrée. Les relations retirées
 par la décision sont ignorées. À la fin de la liste, les couples précédents encore
 en attente sont proposés ; quand aucun couple visible ne reste, la comparaison
 se vide. Une erreur conserve le couple affiché. Un changement manuel de sélection,

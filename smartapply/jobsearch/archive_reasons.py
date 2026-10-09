@@ -3,7 +3,24 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from typing import Literal
+
+ArchiveOrigin = Literal["automatic_filter", "mission_screen", "manual"]
+ARCHIVE_ORIGINS = frozenset({"automatic_filter", "mission_screen", "manual"})
+ARCHIVE_ORIGIN_LABELS = {
+    "automatic_filter": "Filtre automatique",
+    "mission_screen": "Missions hors cible",
+    "manual": "Archivage manuel",
+}
+
+_AUTOMATIC_ARCHIVE_STAGES = frozenset({
+    "local_filter",
+    "rules",
+    "experience_validation",
+    "role_validation",
+    "contract_validation",
+})
 
 _NON_DECISIVE_REASON_PREFIXES = {
     "contract_ok",
@@ -66,6 +83,33 @@ def decisive_rejection_reasons(reasons: Iterable[object]) -> list[str]:
     return decisive
 
 
+def archive_sub_label(
+    *,
+    archived: bool,
+    confirmed_duplicate: bool,
+    components: Mapping[str, object] | None,
+) -> str:
+    """Name a documented archive origin without guessing from workflow progress."""
+    if not archived:
+        return ""
+    if confirmed_duplicate:
+        return "Doublon confirmé"
+    details = components if isinstance(components, Mapping) else {}
+    origin = details.get("archive_origin")
+    if isinstance(origin, str) and origin in ARCHIVE_ORIGIN_LABELS:
+        return ARCHIVE_ORIGIN_LABELS[origin]
+    stage = details.get("rejection_stage")
+    reasons = details.get("rejection_reasons")
+    reason_codes = reasons if isinstance(reasons, (list, tuple)) else ()
+    if stage == "manual" or "manual_archive" in reason_codes:
+        return "Archivage manuel"
+    if stage == "extraction_screening" or "mission_clearly_outside" in reason_codes:
+        return "Missions hors cible"
+    if isinstance(stage, str) and stage in _AUTOMATIC_ARCHIVE_STAGES:
+        return "Filtre automatique"
+    return ""
+
+
 def archive_reason_labels(
     reasons: Iterable[object],
     *,
@@ -89,7 +133,11 @@ def archive_reason_labels(
         return ()
     if stage == "manual":
         return ("Archivée manuellement",)
-    return ("Offre écartée par les critères de sélection",)
+    if stage == "extraction_screening":
+        return ("Missions de l’annonce clairement hors du périmètre Data/IA",)
+    if isinstance(stage, str) and stage in _AUTOMATIC_ARCHIVE_STAGES:
+        return ("Offre écartée par les critères de sélection",)
+    return ()
 
 
 def _archive_reason_label(reason: str) -> str:
@@ -98,6 +146,8 @@ def _archive_reason_label(reason: str) -> str:
 
     if code == "manual_archive":
         return "Archivée manuellement"
+    if code == "mission_clearly_outside":
+        return "Missions de l’annonce clairement hors du périmètre Data/IA"
     if code == "duplicate_reference":
         return f"Doublon de l’offre « {raw_detail.strip()} »"
     if code == "duplicate_of":

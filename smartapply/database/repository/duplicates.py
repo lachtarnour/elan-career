@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import case, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
-from smartapply.database.models import Application, Job, JobDuplicateStatus, JobStatus
+from smartapply.database.models import Application, Job, JobDuplicateStatus, JobScore, JobStatus
 
 
 def canonical_job(session: Session, job_id: int) -> Job | None:
@@ -99,7 +99,7 @@ def _application_priority():
         case(
             (
                 Application.status.in_(
-                    [JobStatus.SENT, JobStatus.INTERVIEW, JobStatus.REJECTED]
+                    [JobStatus.SENT, JobStatus.INTERVIEW]
                 ),
                 0,
             ),
@@ -182,6 +182,29 @@ def pending_duplicate_for_group(session: Session, job_id: int) -> Job | None:
         if reference_root is not None and int(reference_root.id) == int(root.id):
             return job
     return None
+
+
+def _clear_restored_review_route(session: Session, resolved_job_id: int) -> None:
+    """Remove the resolved review pointer while preserving the restoration audit."""
+    for score in session.scalars(select(JobScore).where(
+        func.json_extract(
+            JobScore.components, "$.manual_rescue.duplicate_review_job_id"
+        ) == int(resolved_job_id)
+    )):
+        components = score.components
+        rescue = components.get("manual_rescue") if isinstance(components, dict) else None
+        if (
+            not isinstance(rescue, dict)
+            or type(rescue.get("duplicate_review_job_id")) is not int
+            or rescue["duplicate_review_job_id"] != int(resolved_job_id)
+        ):
+            continue
+        score.components = {
+            **components,
+            "manual_rescue": {
+                key: value for key, value in rescue.items() if key != "duplicate_review_job_id"
+            },
+        }
 
 
 def confirm_duplicate(session: Session, job_id: int) -> Job | None:
@@ -268,6 +291,7 @@ def confirm_duplicate(session: Session, job_id: int) -> Job | None:
             winner.duplicate_review_status = JobDuplicateStatus.PENDING
             winner.duplicate_match_type = match_type
             winner.duplicate_confidence = confidence
+    _clear_restored_review_route(session, int(job.id))
     return job
 
 
@@ -283,6 +307,7 @@ def reject_duplicate(session: Session, job_id: int) -> Job | None:
         # A rejected match must not resurrect an offer that was already
         # archived before it entered the duplicate-review queue.
         job.status = JobStatus.ARCHIVED
+        _clear_restored_review_route(session, int(job.id))
         return job
     job.archived_at = None
     job.shortlisted_at = None
@@ -294,4 +319,5 @@ def reject_duplicate(session: Session, job_id: int) -> Job | None:
         if job.filtered_at is not None
         else JobStatus.SCRAPED
     )
+    _clear_restored_review_route(session, int(job.id))
     return job

@@ -68,9 +68,6 @@ def _rejected_job(
         set_score(
             session,
             job.id,
-            rule_based_score=0.0,
-            semantic_score=0.2,
-            final_score=0.1,
             components={
                 "filter_disposition": "rejected",
                 "rejection_stage": stage,
@@ -160,9 +157,6 @@ def test_backfill_updates_only_plain_local_filter_rejects(isolated_db) -> None:
         assert safe.archived_at is None
         assert safe.filtered_at is not None
         score = session.query(JobScore).filter_by(job_id=safe_id).one()
-        assert score.final_score is None
-        assert score.semantic_score is None
-        assert score.rule_based_score is None
         assert score.components["filter_disposition"] == "pending_relevance"
         assert score.components["hard_reject"]["rejected"] is False
         assert "semantic" not in score.components
@@ -276,5 +270,4 @@ def test_backfill_rolls_back_every_row_if_an_update_fails(
             score = session.query(JobScore).filter_by(job_id=job_id).one()
             assert job.status == JobStatus.ARCHIVED
             assert job.archived_at is not None
-            assert score.final_score == 0.1
             assert score.components["filter_disposition"] == "rejected"

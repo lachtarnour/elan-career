@@ -43,16 +43,6 @@ from smartapply.pipeline.process.score_components import replace_filter_componen
 from smartapply.profile import Profile, get_profile
 
 _EXPECTED_RULESET_VERSION = "hard-reject-v2"
-_SCORE_COLUMNS = (
-    "rule_based_score",
-    "semantic_score",
-    "skill_score",
-    "title_score",
-    "seniority_score",
-    "location_score",
-    "domain_score",
-    "final_score",
-)
 _MUTABLE_JOB_COLUMNS = {
     "filtered_at",
     "ranked_at",
@@ -62,7 +52,7 @@ _MUTABLE_JOB_COLUMNS = {
     "shortlisted_at",
     "shortlist_origin",
 }
-_MUTABLE_SCORE_COLUMNS = {*_SCORE_COLUMNS, "components", "computed_at"}
+_MUTABLE_SCORE_COLUMNS = {"components", "computed_at"}
 
 
 class Rejector(Protocol):
@@ -547,11 +537,10 @@ def _update_row(
     )
     if job_update.rowcount != 1:
         raise BackfillError(f"Expected to update one jobs row for {job_id}")
-    assignments = ", ".join(f"{column} = NULL" for column in _SCORE_COLUMNS)
     score_update = connection.execute(
-        f"""
+        """
         UPDATE job_scores
-        SET {assignments}, components = ?, computed_at = ?
+        SET components = ?, computed_at = ?
         WHERE job_id = ?
         """,
         (_canonical_json(components), migrated_at, job_id),
@@ -576,7 +565,6 @@ def _verify_updated_rows(plan: BackfillPlan, records: dict[int, dict[str, Any]])
             or components.get("hard_reject", {}).get("ruleset_version")
             != plan.ruleset_version
             or components.get("hard_reject", {}).get("rejected") is not False
-            or any(record.get(f"score__{column}") is not None for column in _SCORE_COLUMNS)
         ):
             raise BackfillError(f"Post-update state is invalid for job {job_id}")
 

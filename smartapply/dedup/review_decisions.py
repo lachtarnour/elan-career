@@ -29,6 +29,7 @@ from smartapply.dedup.deduplicator import (
     offers_within_duplicate_time_window,
 )
 from smartapply.dedup.review_policy import strong_identity_keys
+from smartapply.jobsearch.offer_state import has_manual_rescue
 
 REVIEW_POLICY_VERSION = "duplicate-review-v2"
 RELATION_FIELDS = (
@@ -139,10 +140,6 @@ def _has_only_filter_metadata(score: Any | None) -> bool:
         isinstance(components, Mapping)
         and set(components) <= allowed_keys
         and current_hard_reject_disposition(components) is not None
-        and all(getattr(score, field, None) is None for field in (
-            "rule_based_score", "semantic_score", "skill_score", "title_score",
-            "seniority_score", "location_score", "domain_score", "final_score",
-        ))
     )
 
 
@@ -161,6 +158,15 @@ def _unused_alias(job: Any) -> bool:
     )
 
 
+def _manual_review_required(job: Any) -> bool:
+    """An explicitly restored duplicate awaits the user's identity decision."""
+    score = getattr(job, "score", None)
+    return bool(
+        getattr(job, "duplicate_review_status", None) == "pending"
+        and has_manual_rescue(getattr(score, "components", None))
+    )
+
+
 def plan_pending_review_decisions(jobs: Sequence[Any]) -> tuple[ReviewDecision, ...]:
     """Remove unsupported edges before checking complete remaining groups.
 
@@ -176,7 +182,8 @@ def plan_pending_review_decisions(jobs: Sequence[Any]) -> tuple[ReviewDecision, 
     by_id = {int(job.id): job for job in shadow}
     evidence_groups = _confirmed_groups(by_id)
     identities = {job.id: strong_identity_keys(job) for job in shadow}
-    pending = sorted((job for job in shadow if job.duplicate_review_status == "pending"),
+    pending = sorted((job for job in shadow if job.duplicate_review_status == "pending"
+                      and not _manual_review_required(job)),
                      key=lambda item: int(item.id))
     decisions: list[ReviewDecision] = []
 
@@ -265,6 +272,8 @@ def _plan_strict_copy_confirmations(jobs: Sequence[Any], change) -> None:
     by_id = {int(job.id): job for job in jobs}
     for group_ids in group_strict_copies(jobs):
         group = [by_id[job_id] for job_id in group_ids]
+        if any(_manual_review_required(job) for job in group):
+            continue
         pending = [job for job in group if job.duplicate_review_status == "pending"]
         if not pending:
             continue

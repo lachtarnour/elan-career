@@ -104,7 +104,7 @@ def test_ready_filter_and_counter_keep_archives_duplicates_and_tracking_states_s
         pending.possible_duplicate_of_id = ready_id
         pending_id = pending.id
         tracked_ids = {}
-        for status in (JobStatus.SENT, JobStatus.INTERVIEW, JobStatus.REJECTED):
+        for status in (JobStatus.SENT, JobStatus.INTERVIEW):
             job, _ = _dossier(session, status, status)
             tracked_ids[status] = job.id
 

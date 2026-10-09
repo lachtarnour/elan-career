@@ -53,12 +53,6 @@ STATUS_FLOW: tuple[dict[str, Any], ...] = (
         "group": "applications",
     },
     {
-        "status": JobStatus.REJECTED,
-        "label": "Refusée",
-        "description": "Réponse négative enregistrée.",
-        "group": "applications",
-    },
-    {
         "status": JobStatus.ARCHIVED,
         "label": "Archivée",
         "description": "Offre retirée de la liste active.",
@@ -85,10 +79,10 @@ def display_status(status: str) -> str:
     return status
 
 
-# New offers live in Analysis. The Offers filters start with analyzed offers;
-# internal pre-analysis states remain available to the pipeline and its API.
+# New offers live in Analysis and duplicate reviews have their own page. The
+# Offers filters therefore start with analyzed offers; internal pre-analysis
+# and duplicate-review states remain available to the pipeline and its API.
 OFFER_FILTER_STATUSES = (
-    JobStatus.DUPLICATE_REVIEW,
     JobStatus.ANALYZED,
     JobStatus.SHORTLISTED,
     JobStatus.READY_FOR_FORM_SUBMISSION,

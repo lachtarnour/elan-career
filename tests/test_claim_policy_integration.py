@@ -18,7 +18,6 @@ from smartapply.llm import (
     SkillSelectionBlock,
 )
 from smartapply.profile import Profile, load_profile
-from smartapply.ranking import MockEmbeddingsProvider
 
 
 @pytest.fixture
@@ -122,12 +121,11 @@ def _generate(
                 ),
             }
         ),
-        embeddings=MockEmbeddingsProvider(),
-    )
+        )
     if route == "cv":
-        cv, _ = adapter.adapt(analysis, job_title=analysis.role_type, job_company="Example")
+        cv = adapter.adapt(analysis, job_title=analysis.role_type, job_company="Example")
         return cv, None
-    cv, letter, _ = adapter.adapt_application(
+    cv, letter = adapter.adapt_application(
         analysis, job_title=analysis.role_type, job_company="Example", language="en"
     )
     return cv, letter

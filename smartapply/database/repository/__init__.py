@@ -27,7 +27,6 @@ from smartapply.database.repository.jobs import (
     mark_analyzed,
     mark_archived,
     mark_filtered,
-    mark_ranked,
     rescue_archived_job,
     set_shortlisted,
     update_status,
@@ -40,7 +39,7 @@ from smartapply.database.repository.llm_cache import (
     record_usage,
     total_cost,
 )
-from smartapply.database.repository.scores import set_score, top_jobs_by_score
+from smartapply.database.repository.scores import set_score
 
 __all__ = [
     "add_document",
@@ -62,7 +61,6 @@ __all__ = [
     "mark_analyzed",
     "mark_archived",
     "mark_filtered",
-    "mark_ranked",
     "purge_expired_cache",
     "pending_duplicate_job",
     "pending_duplicate_for_group",
@@ -72,7 +70,6 @@ __all__ = [
     "set_shortlisted",
     "set_analysis",
     "set_score",
-    "top_jobs_by_score",
     "total_cost",
     "update_application_tracking",
     "update_status",

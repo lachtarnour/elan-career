@@ -19,7 +19,6 @@ from smartapply.pipeline import Pipeline
 from smartapply.pipeline.ingestor import Ingestor
 from smartapply.pipeline.process.analysis_admission import analysis_queue_job_ids
 from smartapply.pipeline.process.filter_state import is_current_hard_reject_survivor
-from smartapply.ranking import MockEmbeddingsProvider
 from smartapply.scrapers import ManualScraper
 from tests.fit_fixtures import evaluation_from_user
 
@@ -74,7 +73,7 @@ def test_explicit_manual_entry_points_skip_filters(isolated_db, monkeypatch, ent
         assert "filtres automatiques ne sont pas appliqués" in summary and reasons == ()
 
 
-@pytest.mark.parametrize("phase", ["filter", "prepare", "rank", "label_completion"])
+@pytest.mark.parametrize("phase", ["filter", "prepare", "label_completion"])
 def test_later_repairs_preserve_bypass_without_filter_calls(isolated_db, monkeypatch, phase):
     job_id = _add()
     with session_scope() as session:
@@ -83,14 +82,12 @@ def test_later_repairs_preserve_bypass_without_filter_calls(isolated_db, monkeyp
         # Retain the user choice even when legacy metadata needs repairing.
         job.filtered_at = None
         job.score.components = {"manual_filter_bypass": marker}
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    pipeline = Pipeline(llm=MockLLMProvider())
     monkeypatch.setattr(pipeline.filter, "evaluate", _must_not_filter)
     if phase == "filter":
         assert pipeline.filter_pending(job_ids=[job_id]).kept_ids == [job_id]
     elif phase == "prepare":
         assert pipeline.prepare_analysis(job_ids=[job_id]).kept_ids == [job_id]
-    elif phase == "rank":
-        assert pipeline.rank_pending(job_ids=[job_id], persist_shortlist=False).ranked_ids == [job_id]
     else:
         monkeypatch.setattr(filter_labels, "build_rejector", lambda: SimpleNamespace(evaluate=_must_not_filter))
         assert filter_labels.complete_missing_filter_labels() == 1
@@ -107,7 +104,10 @@ def test_manual_bypass_allows_analysis_without_suppressing_fit_risks(isolated_db
 
     def complete(**kwargs):
         calls.append(kwargs["purpose"])
-        if kwargs["purpose"] == "job_offer_analysis":
+        if kwargs["purpose"] == "job_scope_screening":
+            from smartapply.llm.schemas import JobScopeScreening
+            return JobScopeScreening(mission_screen={"mission_relation": "clearly_outside", "mission_evidence": "sufficient"})
+        if kwargs["purpose"] == "job_offer_extraction":
             return OfferExtractionOutput(
                 role_type="Data Scientist", seniority="senior", domain="", offer_language="fr",
                 required_skills=["Python"], main_tasks=["Build machine learning models"],
@@ -118,12 +118,12 @@ def test_manual_bypass_allows_analysis_without_suppressing_fit_risks(isolated_db
             issue.text = "Core responsibilities are not documented"
         return evaluation
 
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=SimpleNamespace(
-        cheap_model="mock", complete_json=complete,
+    pipeline = Pipeline(llm=SimpleNamespace(
+        name="openai", cheap_model="mock", complete_json=complete,
     ))
     report = pipeline.analyze_jobs([job_id])
     assert report.analyzed == 1
-    assert calls == ["job_offer_analysis", "job_fit_assessment"]
+    assert calls == ["job_scope_screening", "job_offer_extraction", "job_fit_assessment"]
     with session_scope() as session:
         job = session.get(Job, job_id)
         assert job.archived_at is None and job.analysis.fit_score == 0.1

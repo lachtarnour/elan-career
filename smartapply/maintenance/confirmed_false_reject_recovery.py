@@ -39,16 +39,6 @@ from smartapply.maintenance._sqlite_safety import (
 RULESET_VERSION = "hard-reject-v2"
 RECOVERY_COMPONENT = "confirmed_false_rejection_recovery"
 
-_SCORE_COLUMNS = (
-    "rule_based_score",
-    "semantic_score",
-    "skill_score",
-    "title_score",
-    "seniority_score",
-    "location_score",
-    "domain_score",
-    "final_score",
-)
 _STALE_REJECTION_KEYS = (
     "rejection_stage",
     "rejection_reasons",
@@ -949,12 +939,8 @@ def _recovered_components(
     components = dict(previous)
     for key in _STALE_REJECTION_KEYS:
         components.pop(key, None)
-    # Deterministic rejection no longer owns a numeric score. Remove the
-    # legacy rule score even when costly ranking/analysis history is retained.
-    components.pop("rule_based", None)
-    if history_state in {"fresh", "filtered"}:
-        for key in _SCORE_COMPONENT_KEYS:
-            components.pop(key, None)
+    for key in _SCORE_COMPONENT_KEYS:
+        components.pop(key, None)
     components["reasons"] = list(result.reasons)
     components["filter_disposition"] = "pending_relevance"
     components["hard_reject"] = result.audit_payload()
@@ -1005,11 +991,10 @@ def _update_recovered_row(
         )
 
     if change.history_state in {"fresh", "filtered"}:
-        assignments = ", ".join(f"{column} = NULL" for column in _SCORE_COLUMNS)
         score_update = connection.execute(
-            f"""
+            """
             UPDATE job_scores
-            SET {assignments}, components = ?, computed_at = ?
+            SET components = ?, computed_at = ?
             WHERE job_id = ?
             """,
             (canonical_json(components), recovered_at, change.job_id),
@@ -1018,7 +1003,7 @@ def _update_recovered_row(
         score_update = connection.execute(
             """
             UPDATE job_scores
-            SET rule_based_score = NULL, components = ?
+            SET components = ?
             WHERE job_id = ?
             """,
             (canonical_json(components), change.job_id),
@@ -1031,9 +1016,8 @@ def _update_recovered_row(
 
 def _immutable_fingerprint(record: dict[str, Any], *, history_state: str) -> str:
     mutable_job = {"archived_at", "status"}
-    mutable_score = {"components", "rule_based_score"}
+    mutable_score = {"components"}
     if history_state in {"fresh", "filtered"}:
-        mutable_score.update(_SCORE_COLUMNS)
         mutable_score.add("computed_at")
     if history_state == "fresh":
         mutable_job.add("filtered_at")
@@ -1074,13 +1058,9 @@ def _verify_updated_rows(
             or recovery.get("manifest_sha256") != plan.manifest_sha256
             or recovery.get("audit_evidence", {}).get("job_id") != job_id
             or any(key in components for key in _STALE_REJECTION_KEYS)
-            or record.get("score__rule_based_score") is not None
             or "rule_based" in components
         )
         if change.history_state in {"fresh", "filtered"}:
-            invalid = invalid or any(
-                record.get(f"score__{column}") is not None for column in _SCORE_COLUMNS
-            )
             invalid = invalid or any(key in components for key in _SCORE_COMPONENT_KEYS)
         if invalid:
             raise ConfirmedFalseRejectRecoveryError(

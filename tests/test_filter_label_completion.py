@@ -42,8 +42,7 @@ def _offer(session, title="ML Engineer", *, components=None, scored=False) -> Jo
     session.add(offer)
     if scored:
         offer.score = JobScore(
-            components=components, final_score=0.75, semantic_score=0.6,
-            computed_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+            components=components, computed_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
         )
     session.flush()
     return offer
@@ -190,7 +189,7 @@ def test_completion_query_finds_malformed_legacy_json(isolated_db, monkeypatch, 
         assert session.get(Job, job_id).score.components["filter_disposition"] == "pending_relevance"
 
 
-@pytest.mark.parametrize("change", ["source", "numeric_score", "new_score", "manual_keep", "delete"])
+@pytest.mark.parametrize("change", ["source", "score_timestamp", "new_score", "manual_keep", "delete"])
 def test_evaluation_change_rolls_back_entire_batch(isolated_db, monkeypatch, change):
     with session_scope() as session:
         first = _offer(session, "First")
@@ -207,8 +206,8 @@ def test_evaluation_change_rolls_back_entire_batch(isolated_db, monkeypatch, cha
                     target = session.get(Job, target_id)
                     if change == "source":
                         target.description = "Changed source"
-                    elif change == "numeric_score":
-                        target.score.final_score = 0.99
+                    elif change == "score_timestamp":
+                        target.score.computed_at = datetime.now(timezone.utc)
                     elif change == "new_score":
                         target.score = JobScore(components={"manual_keep": True})
                     elif change == "manual_keep":

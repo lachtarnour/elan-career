@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from smartapply.config import get_llm_settings
 from smartapply.cv.adapter import CvAdapter
 from smartapply.cv.assembly import assemble_cv
 from smartapply.cv.certificate_selection import certificate_policy_errors
 from smartapply.cv.project_selection import validate_project_selection
 from smartapply.cv.role_contracts import apply_contract
-from smartapply.cv.selector import CvBlockSelector
 from smartapply.cv.validator import CvValidator
 from smartapply.llm import CVPersonalization, CVSelection, JobAnalysis, LLMError, MockLLMProvider
 from smartapply.llm.openai_provider import _to_strict_schema
+from smartapply.model_config import read_model_config
 from smartapply.profile import Project, get_profile
-from smartapply.ranking import MockEmbeddingsProvider
 
 
 @pytest.fixture
@@ -244,7 +246,7 @@ def test_source_line_break_after_apostrophe_does_not_trigger_selection_retry(inp
     response.project_selection_reasons[0].offer_evidence = quote
     before = response.model_dump()
     provider = SequenceProvider([response])
-    cv, _ = CvAdapter(profile, provider, MockEmbeddingsProvider()).adapt(
+    cv = CvAdapter(profile, provider).adapt(
         analysis,
         job_title="AI Engineer",
         job_company="Example",
@@ -266,34 +268,74 @@ def test_invalid_selection_retries_structure_before_summary_and_keeps_final_orde
             draft(["main2", "special1", "main1"]),
         ]
     )
-    adapter = CvAdapter(profile, provider, MockEmbeddingsProvider())
-    cv, selection = adapter.adapt(analysis, job_title="Data Scientist", job_company="Example")
+    adapter = CvAdapter(profile, provider)
+    cv = adapter.adapt(analysis, job_title="Data Scientist", job_company="Example")
     assert len(provider.calls) == 2
     assert "disabled_project_id:off" in provider.calls[1]["user"]
     assert provider.calls[1]["refresh_cache"] is True
     assert all(call["schema"] is CVSelection for call in provider.calls)
     assert "professional_summary" not in cv.model_dump()
-    assert (
-        cv.selected_project_ids
-        == [p.id for p in selection.projects]
-        == ["main2", "special1", "main1"]
-    )
+    assert cv.selected_project_ids == ["main2", "special1", "main1"]
     assert [r.project_id for r in cv.project_selection_reasons] == cv.selected_project_ids
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "model"),
+    [("openai", "gpt-5.4"), ("anthropic", "claude-sonnet-5-5")],
+)
+def test_cv_initial_and_correction_efforts_use_the_same_configuration_snapshot(
+    inputs, monkeypatch, tmp_path, provider_name, model
+):
+    profile, analysis = inputs
+    calls = read_model_config()
+    calls["cv_adaptation"].update(
+        provider=provider_name, model=model, reasoning="low", max_output_tokens=12345
+    )
+    path = tmp_path / "model_config.json"
+    path.write_text(json.dumps(calls), encoding="utf-8")
+    monkeypatch.setattr("smartapply.model_config.model_config_file", lambda: path)
+
+    class ConfiguredSequenceProvider(SequenceProvider):
+        @property
+        def smart_model(self):
+            return model
+
+    provider = ConfiguredSequenceProvider([draft(["off"]), draft(["main2", "special1", "main1"])])
+    provider.name = provider_name
+    provider._settings = get_llm_settings()
+    original_complete = provider.complete_json
+
+    def complete(**kwargs):
+        if not provider.calls:
+            changed = json.loads(path.read_text(encoding="utf-8"))
+            changed["cv_adaptation"].update(reasoning="high", max_output_tokens=4096)
+            path.write_text(json.dumps(changed), encoding="utf-8")
+        return original_complete(**kwargs)
+
+    monkeypatch.setattr(provider, "complete_json", complete)
+    cv = CvAdapter(profile, provider).adapt(
+        analysis, job_title="Data Scientist", job_company="Example"
+    )
+    assert cv.selected_project_ids == ["main2", "special1", "main1"]
+    assert [call["effort"] for call in provider.calls] == ["low", "low"]
+    assert [call["model"] for call in provider.calls] == [model, model]
+    assert [call["max_completion_tokens"] for call in provider.calls] == [12345, 12345]
+    assert [call["purpose"] for call in provider.calls] == ["cv_adaptation", "cv_selection_correction"]
 
 
 def test_invalid_second_attempt_stops_before_letter(inputs):
     profile, analysis = inputs
     provider = SequenceProvider([draft(["off"]), draft(["off"])])
-    adapter = CvAdapter(profile, provider, MockEmbeddingsProvider())
+    adapter = CvAdapter(profile, provider)
     with pytest.raises(LLMError, match="Project selection could not be finalized"):
         adapter.adapt_application(analysis, job_title="Data Scientist", job_company="Example")
-    assert [c["purpose"] for c in provider.calls] == ["cv_adaptation", "cv_adaptation"]
+    assert [c["purpose"] for c in provider.calls] == ["cv_adaptation", "cv_selection_correction"]
 
 
 def test_normal_generation_uses_one_call_and_preserves_reasons_in_snapshot(inputs):
     profile, analysis = inputs
     provider = SequenceProvider([draft(["main1", "special1", "main2"])])
-    cv, _ = CvAdapter(profile, provider, MockEmbeddingsProvider()).adapt(
+    cv = CvAdapter(profile, provider).adapt(
         analysis, job_title="Data Scientist", job_company="Example"
     )
     assert len(provider.calls) == 1
@@ -309,7 +351,7 @@ def test_valid_certificate_counts_use_the_project_selection_call(inputs, count):
     )
     provider = SequenceProvider([response])
 
-    cv, _ = CvAdapter(profile, provider, MockEmbeddingsProvider()).adapt(
+    cv = CvAdapter(profile, provider).adapt(
         analysis, job_title="Data Scientist", job_company="Example"
     )
 
@@ -333,11 +375,11 @@ def test_invalid_certificate_selection_retries_with_same_cv_schema(inputs, ids, 
     final = draft(project_ids).model_copy(update={"selected_certificate_ids": []})
     provider = SequenceProvider([first, final])
 
-    cv, _ = CvAdapter(profile, provider, MockEmbeddingsProvider()).adapt(
+    cv = CvAdapter(profile, provider).adapt(
         analysis, job_title="Data Scientist", job_company="Example"
     )
 
-    assert [call["purpose"] for call in provider.calls] == ["cv_adaptation"] * 2
+    assert [call["purpose"] for call in provider.calls] == ["cv_adaptation", "cv_selection_correction"]
     assert [call["schema"] for call in provider.calls] == [CVSelection] * 2
     assert error in provider.calls[1]["user"]
     assert provider.calls[1]["refresh_cache"] is True
@@ -351,7 +393,7 @@ def test_second_invalid_certificate_selection_stops_generation(inputs):
     )
     provider = SequenceProvider([invalid, invalid])
     with pytest.raises(LLMError, match="unknown_certificate_id:missing"):
-        CvAdapter(profile, provider, MockEmbeddingsProvider()).adapt(
+        CvAdapter(profile, provider).adapt(
             analysis, job_title="Data Scientist", job_company="Example"
         )
     assert len(provider.calls) == 2
@@ -376,23 +418,23 @@ def test_short_selection_retries_complete_personalization(inputs, initial_ids):
     profile, analysis = inputs
     final_ids = ["main3", "main2", "main1"]
     provider = SequenceProvider([draft(initial_ids), draft(final_ids)])
-    cv, selection = CvAdapter(profile, provider, MockEmbeddingsProvider()).adapt(
+    cv = CvAdapter(profile, provider).adapt(
         analysis, job_title="Data Scientist", job_company="Example"
     )
     assert len(provider.calls) == 2
     assert "too_few_projects:min=3" in provider.calls[1]["user"]
     assert "professional_summary" not in cv.model_dump()
-    assert cv.selected_project_ids == [p.id for p in selection.projects] == final_ids
+    assert cv.selected_project_ids == final_ids
 
 
 def test_short_second_selection_stops_before_letter(inputs):
     profile, analysis = inputs
     provider = SequenceProvider([draft(["main1"]), draft(["main1", "main2"])])
     with pytest.raises(LLMError, match="too_few_projects:min=3"):
-        CvAdapter(profile, provider, MockEmbeddingsProvider()).adapt_application(
+        CvAdapter(profile, provider).adapt_application(
             analysis, job_title="Data Scientist", job_company="Example"
         )
-    assert [call["purpose"] for call in provider.calls] == ["cv_adaptation", "cv_adaptation"]
+    assert [call["purpose"] for call in provider.calls] == ["cv_adaptation", "cv_selection_correction"]
 
 
 @pytest.mark.parametrize(
@@ -410,7 +452,7 @@ def test_insufficient_selectable_catalogue_stops_before_llm(inputs, available_id
     profile.projects = [project for project in profile.projects if project.id in available_ids]
     provider = SequenceProvider([])
     with pytest.raises(LLMError):
-        CvAdapter(profile, provider, MockEmbeddingsProvider()).adapt(
+        CvAdapter(profile, provider).adapt(
             analysis, job_title="Data Scientist", job_company="Example"
         )
     assert provider.calls == []
@@ -422,7 +464,7 @@ def test_unconfigured_specialized_project_cannot_complete_catalogue_capacity(inp
     profile.projects[-1].selection_policy.activation_conditions = [" "]
     provider = SequenceProvider([])
     with pytest.raises(LLMError, match="Insufficient eligible projects"):
-        CvAdapter(profile, provider, MockEmbeddingsProvider()).adapt(
+        CvAdapter(profile, provider).adapt(
             analysis, job_title="Data Scientist", job_company="Example"
         )
     assert provider.calls == []
@@ -458,13 +500,6 @@ def test_auto_fix_never_silently_removes_selected_project(inputs):
     assert fixed.selected_project_ids == cv.selected_project_ids
     assert fixed.project_selection_reasons == cv.project_selection_reasons
     assert not validator.validate(fixed).ok
-
-
-def test_embedding_diagnostics_exclude_disabled_projects(inputs):
-    profile, analysis = inputs
-    selection = CvBlockSelector(MockEmbeddingsProvider()).select(profile, analysis)
-    assert "off" not in selection.project_scores
-    assert "off" not in [p.id for p in selection.projects]
 
 
 def test_skill_role_contract_does_not_prune_selected_project(inputs):

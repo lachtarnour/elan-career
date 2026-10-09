@@ -665,6 +665,11 @@ def test_doctorate_alternative_to_engineering_degree_is_not_mandatory() -> None:
         "Education: You hold a master's or PhD degree in immunology.",
         "PhD in machine learning, or an MSc with research experience.",
         (
+            "You have a PhD in Mechanical Engineering, Physics, Cryogenics or a "
+            "closely related field with industry experience or a Masters with at "
+            "least 5 years of experience in industry."
+        ),
+        (
             "One of the following qualifications:\n"
             "MSc in Engineering or Applied Mathematics\n"
             "Engineering degree with a quantitative background\n"
@@ -680,6 +685,44 @@ def test_doctorate_alternative_to_engineering_degree_is_not_mandatory() -> None:
 def test_doctorate_in_degree_alternative_is_not_mandatory(description: str) -> None:
     decision = evaluate_qualification(
         _context("Research Engineer", description, has_doctorate=False)
+    )
+
+    assert decision.status is GateStatus.CLEAR
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        (
+            "Qualifications requises\n"
+            "Doctorat en machine learning, intelligence artificielle ou robotique.\n"
+            "Nous sommes également ouverts aux candidatures exceptionnelles issues "
+            "des meilleurs programmes de Master ou de grandes écoles d'ingénieurs."
+        ),
+        (
+            "Qualifications requises\n"
+            "Doctorat en machine learning, intelligence artificielle ou robotique\n"
+            ", avec de solides connaissances des architectures Transformer.\n"
+            "Nous sommes également ouverts aux candidatures exceptionnelles issues "
+            "des meilleurs programmes de Master ou de grandes écoles d'ingénieurs."
+        ),
+        (
+            "Required Qualifications\n"
+            "PhD in Machine Learning, AI, Computer Vision, NLP, or Robotics.\n"
+            "We are also open to exceptional candidates from top Master's programs "
+            "or leading engineering schools."
+        ),
+        (
+            "Education\nPhD in Food Science, Enzymology, or Biotechnology.\n"
+            "Alternatively MSc + substantial industry experience in enzyme technology."
+        ),
+    ],
+)
+def test_explicit_following_non_doctoral_path_relaxes_doctorate(
+    description: str,
+) -> None:
+    decision = evaluate_qualification(
+        _context("Research Scientist", description, has_doctorate=False)
     )
 
     assert decision.status is GateStatus.CLEAR
@@ -728,6 +771,13 @@ def test_mandatory_doctorate_is_clear_when_candidate_has_one() -> None:
             "Ingénieur d'études en bio-informatique",
             "Niveau master 2 souhaité.\nDes offres d'emplois recommandées pour vous\n"
             "Doctorat en mathématiques et informatique fondamentale (H/F)",
+        ),
+        (
+            "Doctorant en informatique : types ensemblistes",
+            "Profil : master 2 ou équivalent en informatique fondamentale.\n"
+            "Ces offres pourraient aussi vous intéresser\n"
+            "Doctorat en mathématiques et informatique fondamentale (H/F)\n"
+            "Doctorat",
         ),
     ],
 )
@@ -800,6 +850,28 @@ def test_postdoctoral_label_does_not_override_explicit_degree_alternative(
     decision = evaluate_qualification(
         _context("Post-doctorat en recherche", description, has_doctorate=False)
     )
+
+    assert decision.status is GateStatus.CLEAR
+
+
+@pytest.mark.parametrize(
+    ("title", "description"),
+    [
+        (
+            "Ingénieur/e de recherche ou Post-doctorant/e en biologie",
+            "Le poste est ouvert pour un/e Ingénieur/e de recherche ou un/e Post-doctorant/e.",
+        ),
+        (
+            "Stage / Thèse / Post-doctorat — Simulation numérique",
+            "Plusieurs sujets sont proposés, dont un stage de Master.",
+        ),
+    ],
+)
+def test_postdoctoral_title_with_non_doctoral_path_does_not_require_doctorate(
+    title: str,
+    description: str,
+) -> None:
+    decision = evaluate_qualification(_context(title, description, has_doctorate=False))
 
     assert decision.status is GateStatus.CLEAR
 
@@ -1016,6 +1088,11 @@ def test_doctorate_is_one_path_in_bachelor_master_doctorate_requirement_list() -
         "Vous êtes titulaire du DQPRM ou d'un doctorat en physique médicale.",
         "Vous êtes titulaire d'un doctorat en matériaux ou d'une formation scientifique de niveau équivalent.",
         "You must have a professional research qualification or hold a PhD.",
+        (
+            "PhD in quantum computing with a strong publication record, or "
+            "equivalent industry research experience (3+ years post-PhD or "
+            "post-Masters)."
+        ),
     ],
 )
 def test_unassessed_non_doctoral_path_cannot_prove_qualification_exclusion(

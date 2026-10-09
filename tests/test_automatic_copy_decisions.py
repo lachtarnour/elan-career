@@ -50,7 +50,7 @@ def _confirms(decisions):
 
 
 def test_scored_filtered_copy_is_really_confirmed_without_mutating_inputs():
-    score = SimpleNamespace(components={"filter_disposition": "pending_relevance"}, final_score=50)
+    score = SimpleNamespace(components={"filter_disposition": "pending_relevance"})
     reference = _job(1, application=SimpleNamespace(id=17), status="sent")
     alias = _pending(2, 1, score=score, filtered_at=AT, ranked_at=AT, status="filtered")
     before = [vars(job).copy() for job in (reference, alias)]

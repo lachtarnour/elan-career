@@ -11,14 +11,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import JSON, or_
+from sqlalchemy import JSON, func, or_
 
-from smartapply.database.models import Application, Job, JobDuplicateStatus, JobStatus
+from smartapply.database.models import Application, Job, JobDuplicateStatus, JobScore, JobStatus
 from smartapply.jobsearch.status import display_status
 
 COMPLETED_STATUSES = frozenset({
     JobStatus.ANALYZED, JobStatus.SHORTLISTED, JobStatus.READY_FOR_FORM_SUBMISSION,
-    JobStatus.QUALITY_REJECTED, JobStatus.SENT, JobStatus.INTERVIEW, JobStatus.REJECTED,
+    JobStatus.QUALITY_REJECTED, JobStatus.SENT, JobStatus.INTERVIEW,
 })
 APPLICATION_TRACKING_STATUSES = COMPLETED_STATUSES - {JobStatus.ANALYZED, JobStatus.SHORTLISTED}
 FILTER_HISTORY_KEY = "completed_filter_routing"
@@ -58,6 +58,47 @@ def recorded_filter_disposition(components: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def has_manual_rescue(components: object) -> bool:
+    """Recognize an explicit, persisted restoration of an archived offer."""
+    if not isinstance(components, Mapping):
+        return False
+    rescue = components.get("manual_rescue")
+    return bool(
+        isinstance(rescue, Mapping)
+        and rescue.get("schema_version") == 3
+        and isinstance(rescue.get("rescued_at"), str)
+        and rescue["rescued_at"].strip()
+    )
+
+
+def rescued_duplicate_review_expression():
+    """SQL counterpart of restored review; an old dossier remains archived."""
+    return (
+        (
+            (func.coalesce(Job.duplicate_review_status, JobDuplicateStatus.NONE) == JobDuplicateStatus.PENDING)
+            | (
+                (func.coalesce(func.json_type(
+                    JobScore.components, "$.manual_rescue.duplicate_review_job_id"
+                ), "") == "integer")
+                & (func.coalesce(func.json_extract(
+                    JobScore.components, "$.manual_rescue.duplicate_review_job_id"
+                ), 0) > 0)
+            )
+        )
+        & Job.archived_at.is_(None)
+        & (Job.status != JobStatus.ARCHIVED)
+        & (func.coalesce(func.json_extract(
+            JobScore.components, "$.manual_rescue.schema_version"
+        ), 0) == 3)
+        & (func.coalesce(func.json_type(
+            JobScore.components, "$.manual_rescue.rescued_at"
+        ), "") == "text")
+        & (func.length(func.trim(func.coalesce(func.json_extract(
+            JobScore.components, "$.manual_rescue.rescued_at"
+        ), ""))) > 0)
+    )
+
+
 @dataclass(frozen=True)
 class OfferState:
     workflow_status: str
@@ -80,6 +121,16 @@ def offer_state(job: Job, *, components: object = None) -> OfferState:
     An empty generation reservation is not a completed dossier.
     """
     application = job.application
+    if components is None:
+        components = job.score.components if job.score is not None else None
+    rescue = components.get("manual_rescue") if isinstance(components, Mapping) else None
+    review_id = rescue.get("duplicate_review_job_id") if isinstance(rescue, Mapping) else None
+    reviewing_rescue = (
+        (job.duplicate_review_status == JobDuplicateStatus.PENDING
+         or (type(review_id) is int and review_id > 0))
+        and job.archived_at is None and job.status != JobStatus.ARCHIVED
+        and has_manual_rescue(components)
+    )
     generated = application is not None and application_has_documents(application)
     analyzed = job.analyzed_at is not None or job.analysis is not None
     tracked = application is not None and (
@@ -88,10 +139,13 @@ def offer_state(job: Job, *, components: object = None) -> OfferState:
     )
     completed = analyzed or generated or tracked or job.status in COMPLETED_STATUSES
     archived = bool(job.archived_at or job.status == JobStatus.ARCHIVED
-                    or (application and application.status == JobStatus.ARCHIVED))
+                    or (application and application.status == JobStatus.ARCHIVED
+                        and not reviewing_rescue))
     if archived:
         workflow = JobStatus.ARCHIVED
-    elif application and application.status in {JobStatus.INTERVIEW, JobStatus.REJECTED}:
+    elif reviewing_rescue:
+        workflow = JobStatus.DUPLICATE_REVIEW
+    elif application and application.status == JobStatus.INTERVIEW:
         workflow = application.status
     elif application and (application.form_submitted_at is not None
                           or application.status == JobStatus.SENT):
@@ -109,8 +163,6 @@ def offer_state(job: Job, *, components: object = None) -> OfferState:
     status = display_status(workflow)
     if not completed and not archived and job.duplicate_review_status == JobDuplicateStatus.PENDING:
         status = JobStatus.DUPLICATE_REVIEW
-    if components is None:
-        components = job.score.components if job.score is not None else None
     raw = components.get("filter_disposition") if isinstance(components, Mapping) else None
     disposition = ""
     if not completed and (not archived or raw == "rejected"):

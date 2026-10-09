@@ -444,7 +444,10 @@ def _migrated_components(
     *, applied_at: str, review_manifest_sha256: str | None,
 ) -> dict[str, Any]:
     previous = _decode_object(record["score__components"])
-    components = dict(previous)
+    from smartapply.pipeline.process.score_components import LEGACY_MATCH_COMPONENT_KEYS
+
+    components = {key: value for key, value in previous.items()
+                  if key not in LEGACY_MATCH_COMPONENT_KEYS}
     preserve_independent_reason = previous.get("rejection_stage") not in {None, "local_filter"}
     if not preserve_independent_reason:
         for key in _REJECTION_KEYS:

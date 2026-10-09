@@ -13,7 +13,6 @@ from smartapply.filtering.types import FilterDisposition
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 HARD_REJECT_ROOT = PROJECT_ROOT / "smartapply" / "filtering" / "hard_reject"
-RANKING_ROOT = PROJECT_ROOT / "smartapply" / "ranking"
 
 
 def _imports(path: Path) -> set[str]:
@@ -44,7 +43,6 @@ def test_persisted_filter_dispositions_match_deterministic_rejection() -> None:
 def test_hard_reject_does_not_import_relevance_ranking_or_llm() -> None:
     forbidden_prefixes = (
         "smartapply.filtering.relevance",
-        "smartapply.ranking",
         "smartapply.llm",
     )
     violations = {
@@ -54,18 +52,6 @@ def test_hard_reject_does_not_import_relevance_ranking_or_llm() -> None:
             if module.startswith(forbidden_prefixes)
         )
         for path in HARD_REJECT_ROOT.glob("*.py")
-    }
-    assert not {path: modules for path, modules in violations.items() if modules}
-
-
-def test_ranking_does_not_import_hard_reject_internals() -> None:
-    violations = {
-        str(path.relative_to(PROJECT_ROOT)): sorted(
-            module
-            for module in _imports(path)
-            if module.startswith("smartapply.filtering.hard_reject")
-        )
-        for path in RANKING_ROOT.glob("*.py")
     }
     assert not {path: modules for path, modules in violations.items() if modules}
 

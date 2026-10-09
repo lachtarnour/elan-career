@@ -49,7 +49,7 @@ _ALTERNATIVE = re.compile(
 )
 _OTHER_ELIGIBLE_DEGREE = re.compile(
     r"\b(?:bac\s*\+?\s*5|bachelor(?:'s)?(?:\s+degree)?|"
-    r"master(?:'s)?(?:\s+degree|\s*2)?|msc|ms|"
+    r"(?<!post-)(?<!post\s)master(?:'?s)?(?:\s+degree|\s*2)?|msc|ms|"
     r"engineering\s+degree|engineer(?:ing)?\s+degree|engineering\s+school|"
     r"ingenieur(?:e)?\s+grandes?\s+ecoles?|"
     r"ingenieur(?:e)?\s+de\s+recherche|research\s+engineer|"
@@ -79,11 +79,15 @@ _SECTION_RESET_HEADER = re.compile(
 )
 _RECOMMENDED_JOBS_TAIL = re.compile(
     r"\b(?:des\s+)?offres?\s+d['’]emplois?\s+recommand[ée]es?\s+pour\s+vous\b"
-    r"|\brecommended\s+jobs?\s+for\s+you\b",
+    r"|\bces\s+offres?\s+pourraient\s+aussi\s+vous\s+int[ée]resser\b"
+    r"|\brecommended\s+jobs?\s+for\s+you\b"
+    r"|\byou\s+(?:may|might)\s+also\s+be\s+interested\b",
     re.IGNORECASE,
 )
-_NON_DOCTORAL_RESEARCH_TITLE = re.compile(
-    r"\b(?:ingenieur(?:e)?\s+de\s+recherche|research\s+engineer)\b"
+_NON_DOCTORAL_TITLE_PATH = re.compile(
+    r"\b(?:ingenieur(?:/e|e)?\s+de\s+recherche|research\s+engineer|"
+    r"stage|internship|(?<!post-)(?<!post\s)doctorant(?:/e|e)?|"
+    r"doctoral\s+candidate|these)\b"
 )
 _NEGATED_DOCTORATE = re.compile(rf"\b(?:no|aucun)\s+{_DEGREE}\b")
 _CANDIDATE_QUALIFICATION_HEADER = re.compile(
@@ -115,6 +119,11 @@ _OTHER_QUALIFICATION_PATH_AFTER_OR = re.compile(
     r"^\s*(?:(?:have|hold|possess|justifi(?:ez|er)|disposez)\b|"
     r"(?:d[' ]?(?:une?\s+)?|an?\s+)?(?:experience|formation|qualification|equivalent)\b|"
     r"(?:au\s+moins|at\s+least)\b|\d)"
+)
+_EXPLICIT_FOLLOWING_NON_DOCTORAL_PATH = re.compile(
+    rf"\b(?:we\s+are\s+also\s+open\s+to|"
+    rf"nous\s+sommes\s+egalement\s+ouvert(?:e|s|es)?\s+aux?|"
+    rf"alternatively|a\s+defaut)\b.{{0,240}}{_OTHER_ELIGIBLE_DEGREE.pattern}"
 )
 
 
@@ -226,6 +235,8 @@ def _mandatory_doctorate_requirement(description: str) -> _DoctorateRequirement 
         ):
             continue
         if any(pattern.search(sentence) for pattern in _MANDATORY_DOCTORATE_PATTERNS):
+            if _has_following_non_doctoral_path(sentences, index):
+                continue
             if _ALTERNATIVE.search(sentence) or _doctorate_has_unassessed_path(sentence):
                 unresolved = unresolved or _DoctorateRequirement(
                     raw_sentence, True, "qualification_alternatives_unresolved"
@@ -300,6 +311,19 @@ def _doctorate_has_unassessed_path(sentence: str) -> bool:
     return False
 
 
+def _has_following_non_doctoral_path(
+    sentences: tuple[str, ...],
+    index: int,
+) -> bool:
+    """Recognize an explicit alternative stated just after a doctorate line."""
+
+    following = " ".join(
+        _normalize_degree_punctuation(norm(sentence))
+        for sentence in sentences[index + 1 : index + 3]
+    )
+    return _EXPLICIT_FOLLOWING_NON_DOCTORAL_PATH.search(following) is not None
+
+
 def _surrounding_qualification_context(
     sentences: tuple[str, ...],
     index: int,
@@ -318,11 +342,11 @@ def _offer_body(description: str) -> str:
 
 def _postdoctoral_title_is_alternative(title: str) -> bool:
     postdoctoral = _POSTDOCTORAL_TITLE.search(title)
-    research_engineer = _NON_DOCTORAL_RESEARCH_TITLE.search(title)
-    if not postdoctoral or not research_engineer:
+    non_doctoral = _NON_DOCTORAL_TITLE_PATH.search(title)
+    if not postdoctoral or not non_doctoral:
         return False
-    left = min(postdoctoral.start(), research_engineer.start())
-    right = max(postdoctoral.end(), research_engineer.end())
+    left = min(postdoctoral.start(), non_doctoral.start())
+    right = max(postdoctoral.end(), non_doctoral.end())
     return _ALTERNATIVE_SEPARATOR.search(title[left:right]) is not None
 
 

@@ -11,7 +11,7 @@ en attente restent indépendants et perdent le lien vers l'offre supprimée.
   les documents et la transaction. Un dossier envoyé, archivé ou utilisé par
   un traitement actif bloque l'opération.
 - `database/repository/offer_deletion.py` retire les résultats, scores,
-  candidatures, documents, embeddings, consommations LLM attribuées et
+  candidatures, documents, consommations LLM attribuées et
   éléments des journaux Batch. Un Batch partagé conserve les autres offres.
 - `pipeline/output_deletion.py` vérifie la propriété du répertoire, déplace
   les fichiers avant la transaction et restaure le dossier si elle échoue.

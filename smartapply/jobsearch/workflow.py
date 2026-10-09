@@ -16,7 +16,6 @@ APPLICATION_STATUSES = [
     JobStatus.READY_FOR_FORM_SUBMISSION,
     JobStatus.SENT,
     JobStatus.INTERVIEW,
-    JobStatus.REJECTED,
     JobStatus.ARCHIVED,
 ]
 
@@ -42,8 +41,6 @@ def next_action_for(
         return f"Relancer sans réponse le {_date_label(updated_at, days=7)}"
     if status == JobStatus.INTERVIEW:
         return "Préparer l’entretien"
-    if status == JobStatus.REJECTED:
-        return "Archiver la candidature"
     if status == JobStatus.ARCHIVED:
         return "Aucune action"
     return "Mettre à jour le suivi"

@@ -23,7 +23,6 @@ from smartapply.database.models import (
     GeneratedDocument,
     Job,
     JobAnalysis,
-    JobEmbedding,
     JobScore,
     JobStatus,
     LLMCache,
@@ -99,7 +98,6 @@ def test_delete_offer_documents_results_usage_copies_and_completed_batch(isolate
         copy_id, candidate_id = copy.id, candidate.id
         session.add_all(
             [
-                JobEmbedding(job_id=job_id, model="test", vector=[1]),
                 AnalysisCheckpoint(
                     job_id=job_id, extraction_key="extraction", offer_data={"main_tasks": ["ML"]}
                 ),
@@ -137,7 +135,7 @@ def test_delete_offer_documents_results_usage_copies_and_completed_batch(isolate
                     after_state={},
                     history_snapshot={},
                 ),
-                AnalysisBatchRun(id="run", state="completed", model="test", profile_data={}),
+                AnalysisBatchRun(id="run", state="completed", model="test", provider="openai", max_completion_tokens=6000, profile_data={}),
             ]
         )
         session.flush()
@@ -192,7 +190,7 @@ def test_delete_offer_documents_results_usage_copies_and_completed_batch(isolate
         assert session.get(Application, app_id) is None
         for model in (JobScore, JobAnalysis, Application, GeneratedDocument):
             assert count(session, model) == 1
-        for model in (JobEmbedding, AnalysisCheckpoint, DuplicateReviewEvent):
+        for model in (AnalysisCheckpoint, DuplicateReviewEvent):
             assert count(session, model) == 0
         assert count(session, LLMUsage) == 1
         assert [row.cache_key for row in session.scalars(select(LLMCache))] == ["unrelated"]
@@ -238,7 +236,7 @@ def test_refuse_non_ready_or_already_submitted_dossier(isolated_db, status, subm
 def test_refuse_active_batch_without_touching_files(isolated_db):
     job_id, _, directory = ready_offer()
     with write_session_scope() as session:
-        session.add(AnalysisBatchRun(id="run", state="active", model="test", profile_data={}))
+        session.add(AnalysisBatchRun(id="run", state="active", model="test", provider="openai", max_completion_tokens=6000, profile_data={}))
         session.flush()
         session.add(
             AnalysisBatchItem(
@@ -355,7 +353,7 @@ def test_ui_requires_confirmation_for_specific_offer_before_deleting():
 def test_empty_batch_history_is_removed(isolated_db):
     job_id, _, _ = ready_offer()
     with write_session_scope() as session:
-        session.add(AnalysisBatchRun(id="only", state="completed", model="test", profile_data={}))
+        session.add(AnalysisBatchRun(id="only", state="completed", model="test", provider="openai", max_completion_tokens=6000, profile_data={}))
         session.flush()
         item = AnalysisBatchItem(
             run_id="only",

@@ -7,7 +7,6 @@ The caller owns the transaction and the document publication locks.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from contextlib import suppress
 
@@ -23,12 +22,12 @@ from smartapply.database.analysis_batches import (
 from smartapply.database.analysis_checkpoints import AnalysisCheckpoint
 from smartapply.database.models import (
     DuplicateReviewEvent,
-    EmbeddingCache,
     Job,
     JobDuplicateStatus,
     LLMCache,
     LLMUsage,
 )
+from smartapply.database.scope_checkpoints import ScopeCheckpoint
 
 
 def confirmed_offer_ids(session: Session, job_id: int) -> set[int]:
@@ -92,6 +91,7 @@ def _cache_evidence(session: Session, jobs: list[Job]) -> tuple[set[str], set[st
             )
         )
     )
+    keys.update(session.scalars(select(ScopeCheckpoint.screening_key).where(ScopeCheckpoint.job_id.in_(ids))))
     fragments: set[str] = set()
     for job in jobs:
         if job.analysis:
@@ -172,6 +172,8 @@ def _erase_exact_responses(session: Session, keys: set[str], fragments: set[str]
                     and cached.purpose
                     in {
                         "job_offer_analysis",
+                        "job_offer_extraction",
+                        "job_scope_screening",
                         "job_fit_assessment",
                         "cv_adaptation",
                     }
@@ -199,25 +201,12 @@ def _erase_exact_responses(session: Session, keys: set[str], fragments: set[str]
             session.delete(cached)
 
 
-def _erase_embeddings(session: Session, jobs: list[Job]) -> None:
-    models = set(session.scalars(select(EmbeddingCache.model)))
-    embedding_keys = {
-        hashlib.sha256(f"{model}\0{text}".encode()).hexdigest()
-        for model in models
-        for job in jobs
-        for text in (job.description, job.cleaned_description, f"{job.title}\n{job.description}")
-        if text
-    }
-    session.execute(delete(EmbeddingCache).where(EmbeddingCache.cache_key.in_(embedding_keys)))
-
-
 def erase_offer_rows(session: Session, jobs: list[Job]) -> None:
     ids = {job.id for job in jobs}
     external_ids = {job.external_id for job in jobs}
     keys, fragments = _cache_evidence(session, jobs)
     _erase_batch_journal(session, ids, keys, fragments)
     _erase_exact_responses(session, keys, fragments)
-    _erase_embeddings(session, jobs)
     session.execute(
         delete(LLMUsage).where(
             or_(

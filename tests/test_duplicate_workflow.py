@@ -277,7 +277,7 @@ def test_confirmation_with_two_dossiers_preserves_both_and_stays_pending(isolate
         assert session.get(Job, duplicate_id).duplicate_review_status == JobDuplicateStatus.PENDING
 
 
-@pytest.mark.parametrize("tracking_status", [JobStatus.SENT, JobStatus.INTERVIEW, JobStatus.REJECTED])
+@pytest.mark.parametrize("tracking_status", [JobStatus.SENT, JobStatus.INTERVIEW])
 def test_republication_keeps_sent_dossier_and_archived_history(isolated_db, tracking_status) -> None:
     from smartapply.database.repository import add_document
 
