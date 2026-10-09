@@ -55,7 +55,7 @@ ApplicationWindow {
         {title: "Analyse", icon: Theme.icon("analysis"), route: "analysis"},
         {title: "Offres", icon: Theme.icon("briefcase"), route: "jobs"},
         {title: "Entreprises", icon: Theme.icon("database"), route: "companies"},
-        {title: "Ajouter une offre", icon: Theme.icon("plus"), route: "manual"},
+        {title: "Nouvelle offre", icon: Theme.icon("plus"), route: "manual"},
         {title: "Profil", icon: Theme.icon("user"), route: "profile"},
         {title: "Réglages", icon: Theme.icon("settings"), route: "settings"}
     ]
@@ -110,6 +110,11 @@ ApplicationWindow {
     function navigate(route, selectedId) {
         var page = routePage(route)
         var status = routeStatus(route)
+        if (page === "jobs" && status === "duplicate_review") {
+            route = "duplicates"
+            page = "duplicates"
+            status = ""
+        }
         if (page === "jobs" && status === "scraped") {
             route = "analysis"
             page = "analysis"
@@ -173,13 +178,13 @@ ApplicationWindow {
                 anchors.bottomMargin: 16
                 spacing: 5
 
-                RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Accueil"; compactText: "Accueil"; iconSource: Theme.icon("home"); selected: window.currentRoute === "dashboard"; onClicked: window.navigate("dashboard") }
+                RailItem { Layout.topMargin: 10; Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Accueil"; compactText: "Accueil"; iconSource: Theme.icon("home"); selected: window.currentRoute === "dashboard"; onClicked: window.navigate("dashboard") }
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Recherche"; compactText: "Recherche"; iconSource: Theme.icon("search"); selected: window.currentRoute === "search"; onClicked: window.navigate("search") }
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Doublons"; compactText: "Doublons"; iconSource: Theme.icon("files"); selected: window.currentRoute === "duplicates"; onClicked: window.navigate("duplicates") }
                 RailItem { objectName: "analysisNavigation"; Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Analyse"; compactText: "Analyse"; iconSource: Theme.icon("analysis"); selected: window.currentRoute === "analysis"; onClicked: window.navigate("analysis") }
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Offres"; compactText: "Offres"; iconSource: Theme.icon("briefcase"); selected: window.currentRoute === "jobs"; onClicked: window.navigate("jobs") }
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Entreprises"; compactText: "Sociétés"; iconSource: Theme.icon("database"); selected: window.currentRoute === "companies"; onClicked: window.navigate("companies") }
-                RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Ajouter une offre"; compactText: "Ajouter"; iconSource: Theme.icon("plus"); selected: window.currentRoute === "manual"; onClicked: window.navigate("manual") }
+                RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Nouvelle offre"; compactText: "Nouvelle"; iconSource: Theme.icon("plus"); selected: window.currentRoute === "manual"; onClicked: window.navigate("manual") }
 
                 Item { Layout.fillHeight: true }
 
@@ -266,7 +271,7 @@ ApplicationWindow {
                     Loader {
                         active: window.searchLoaded
                         asynchronous: true
-                        sourceComponent: Component { SearchPage { onNavigateRequested: function(route) { window.navigate(route) } } }
+                        sourceComponent: Component { SearchPage { } }
                     }
                     Loader {
                         active: window.duplicatesLoaded

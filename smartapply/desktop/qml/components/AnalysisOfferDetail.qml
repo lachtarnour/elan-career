@@ -43,8 +43,6 @@ Item {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.leftMargin: 4
-        anchors.rightMargin: 6
         visible: Boolean(root.offerId)
         spacing: 12
 
@@ -61,8 +59,8 @@ Item {
 
             ColumnLayout {
                 id: detailContent
-                width: detailViewport.width - Theme.scrollGutter - 8
-                spacing: 12
+                width: detailViewport.width - Theme.scrollGutter
+                spacing: 10
 
                 RowLayout {
                     Layout.fillWidth: true
@@ -88,8 +86,10 @@ Item {
                         text: "Aa"
                         fontPixelSize: 10
                         quiet: true
+                        opacity: hovered || visualFocus || zoomPopup.opened ? 1 : 0.45
                         Accessible.name: "Ajuster la taille du texte de l’offre"
                         onClicked: zoomPopup.opened ? zoomPopup.close() : zoomPopup.open()
+                        Behavior on opacity { NumberAnimation { duration: 130 } }
                         Popup {
                             id: zoomPopup
                             x: zoomButton.width - width
@@ -110,6 +110,7 @@ Item {
                                     text: "A−"
                                     Layout.fillWidth: true
                                     implicitWidth: 32; implicitHeight: 30
+                                    fontPixelSize: 11
                                     quiet: true
                                     enabled: root.textZoom > 0.85
                                     onClicked: root.textZoom = Math.max(0.85, root.textZoom - 0.1)
@@ -118,6 +119,7 @@ Item {
                                     text: "Aa"
                                     Layout.fillWidth: true
                                     implicitWidth: 32; implicitHeight: 30
+                                    fontPixelSize: 11
                                     quiet: true
                                     onClicked: root.textZoom = 1.15
                                 }
@@ -125,6 +127,7 @@ Item {
                                     text: "A+"
                                     Layout.fillWidth: true
                                     implicitWidth: 32; implicitHeight: 30
+                                    fontPixelSize: 11
                                     quiet: true
                                     enabled: root.textZoom < 1.55
                                     onClicked: root.textZoom = Math.min(1.55, root.textZoom + 0.1)
@@ -133,45 +136,40 @@ Item {
                         }
                     }
                 }
-                Text {
+                RowLayout {
                     Layout.fillWidth: true
-                    text: [root.offer.company, root.offer.location].filter(Boolean).join(" · ")
-                    textFormat: Text.PlainText
-                    color: Theme.inkMuted
-                    font.pixelSize: Math.round(11 * root.fontScale)
-                    wrapMode: Text.WordWrap
+                    spacing: 6
+                    Text {
+                        Layout.maximumWidth: Math.max(150, detailContent.width * 0.42)
+                        text: root.offer.company || "Entreprise non indiquée"
+                        textFormat: Text.PlainText
+                        color: Theme.ink
+                        font.pixelSize: Math.round(11 * root.fontScale)
+                        font.weight: Font.DemiBold
+                        elide: Text.ElideRight
+                    }
+                    Text { text: "·"; color: Theme.inkFaint; font.pixelSize: Math.round(11 * root.fontScale) }
+                    Text {
+                        Layout.fillWidth: true
+                        text: root.offer.location || "Lieu non indiqué"
+                        textFormat: Text.PlainText
+                        color: Theme.inkMuted
+                        font.pixelSize: Math.round(11 * root.fontScale)
+                        elide: Text.ElideRight
+                    }
                 }
                 Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.line }
-                Rectangle {
-                    visible: Boolean(root.offer.classification_summary)
+                FitEvaluation {
+                    objectName: "analysisOfferFitEvaluation"
+                    visible: root.offer.llm_score !== null && root.offer.llm_score !== undefined
                     Layout.fillWidth: true
-                    implicitHeight: classificationContent.implicitHeight + 24
-                    radius: Theme.radiusMedium
-                    color: Theme.surfaceMuted
-                    border.color: Theme.line
-                    ColumnLayout {
-                        id: classificationContent
-                        anchors.fill: parent
-                        anchors.margins: 12
-                        spacing: 6
-                        Text {
-                            text: "Résultat du filtrage"
-                            color: Theme.ink
-                            font.pixelSize: Math.round(11 * root.fontScale)
-                            font.weight: Font.DemiBold
-                        }
-                        Text {
-                            Layout.fillWidth: true
-                            text: root.offer.classification_summary || ""
-                            textFormat: Text.PlainText
-                            color: Theme.inkMuted
-                            font.pixelSize: Math.round(11 * root.fontScale)
-                            wrapMode: Text.WordWrap
-                        }
-                    }
+                    offer: root.offer
+                    fontPixelSize: Math.round(11 * root.fontScale)
+                    smallFontPixelSize: Math.round(10 * root.fontScale)
                 }
                 RowLayout {
                     Layout.fillWidth: true
+                    Layout.topMargin: 4
                     spacing: 8
                     Rectangle { Layout.preferredWidth: 3; Layout.preferredHeight: 13; radius: 2; color: Theme.accent }
                     FormLabel { text: "DESCRIPTION DU POSTE"; fontPixelSize: Math.round(11 * root.fontScale) }

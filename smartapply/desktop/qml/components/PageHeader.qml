@@ -3,12 +3,19 @@ import QtQuick.Layouts
 
 RowLayout {
     id: root
+    objectName: "pageHeader"
     property string title: ""
     default property alias actions: actionsRow.data
     spacing: 24
+    Layout.minimumHeight: Theme.controlHeight
 
     Text {
+        id: pageTitle
+        objectName: "pageHeaderTitle"
         Layout.fillWidth: true
+        Layout.alignment: Qt.AlignVCenter
+        Layout.preferredHeight: implicitHeight
+        Layout.maximumHeight: implicitHeight
         text: root.title
         color: Theme.ink
         font.family: Theme.fontFamily

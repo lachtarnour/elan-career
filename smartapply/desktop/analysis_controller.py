@@ -186,11 +186,14 @@ class AnalysisController(QObject):
         report = result["report"]
         analyzed = int(report.analyzed)
         failed = len(report.errors)
+        screened_out = int(getattr(report, "screened_out", 0))
         message = (
             f"{analyzed} offre analysée." if analyzed == 1 else f"{analyzed} offres analysées."
         )
         if failed:
             message += f" {failed} en échec."
+        if screened_out:
+            message += f" {screened_out} écartée" + ("." if screened_out == 1 else "s.")
         cancelled = bool(report.cancelled)
         self.bridge.toastRequested.emit(
             "Analyse immédiate arrêtée" if cancelled else "Analyse immédiate terminée",

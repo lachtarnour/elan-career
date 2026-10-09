@@ -16,7 +16,7 @@ Item {
     readonly property color markerColor: issue ? Theme.warning
         : complete ? Theme.success : current ? Theme.accentBright : Theme.lineStrong
 
-    implicitHeight: 108
+    implicitHeight: 82
 
     function statusLabel(value) {
         var labels = {
@@ -47,17 +47,17 @@ Item {
         id: outerGlow
         objectName: "analysisPhaseGlow_" + root.number
         visible: root.current
-        width: 38
-        height: 38
-        radius: 19
+        width: 30
+        height: 30
+        radius: 15
         anchors.centerIn: marker
         color: "#33765FFF"
-        opacity: 0.58
+        opacity: 0.4
         SequentialAnimation on opacity {
             running: root.current && root.visible
             loops: Animation.Infinite
-            NumberAnimation { to: 0.22; duration: 1050; easing.type: Easing.InOutSine }
-            NumberAnimation { to: 0.7; duration: 1050; easing.type: Easing.InOutSine }
+            NumberAnimation { to: 0.18; duration: 1050; easing.type: Easing.InOutSine }
+            NumberAnimation { to: 0.48; duration: 1050; easing.type: Easing.InOutSine }
         }
     }
 
@@ -66,11 +66,11 @@ Item {
         objectName: "analysisPhaseMarker_" + root.number
         property bool active: root.current
         property bool finished: root.complete
-        width: 18
-        height: 18
-        radius: 9
+        width: 14
+        height: 14
+        radius: 7
         anchors.horizontalCenter: parent.horizontalCenter
-        y: 10
+        y: 5
         color: root.complete ? Theme.success : root.current ? Theme.accent : Theme.surfaceRaised
         border.width: root.current ? 2 : 1
         border.color: root.markerColor
@@ -80,7 +80,7 @@ Item {
             visible: root.complete
             text: "✓"
             color: Theme.canvas
-            font.pixelSize: 11
+            font.pixelSize: 9
             font.weight: Font.Bold
         }
         Text {
@@ -88,14 +88,14 @@ Item {
             visible: root.issue && !root.complete && !root.current
             text: "!"
             color: Theme.warning
-            font.pixelSize: 12
+            font.pixelSize: 10
             font.weight: Font.Bold
         }
         Rectangle {
             visible: root.current
-            width: 6
-            height: 6
-            radius: 3
+            width: 4
+            height: 4
+            radius: 2
             anchors.centerIn: parent
             color: Theme.ink
         }
@@ -103,18 +103,18 @@ Item {
 
     ColumnLayout {
         anchors.top: marker.bottom
-        anchors.topMargin: 12
+        anchors.topMargin: 7
         anchors.left: parent.left
         anchors.right: parent.right
-        spacing: 4
+        spacing: 2
         Text {
             Layout.fillWidth: true
             horizontalAlignment: Text.AlignHCenter
-            text: root.number === 3 ? "Bilan"
-                : (root.number === 1 ? "Extraction" : "Évaluation") + " · "
+            text: !root.phase.phase ? "Bilan"
+                : (root.phase.phase === "screening" ? "Préfiltre" : root.phase.phase === "extraction" ? "Extraction" : "Évaluation") + " · "
                     + Number(root.phase.batch_count || 0) + " Batch"
             color: root.started ? Theme.ink : Theme.inkFaint
-            font.pixelSize: 12
+            font.pixelSize: 11
             font.weight: Font.DemiBold
             elide: Text.ElideRight
         }
@@ -125,12 +125,12 @@ Item {
             text: root.statusLabel(root.state)
             textFormat: Text.PlainText
             color: root.issue ? Theme.warning : root.current ? Theme.accentBright : Theme.inkMuted
-            font.pixelSize: 11
+            font.pixelSize: 10
             elide: Text.ElideRight
         }
         Text {
             objectName: "analysisPhaseCounts_" + root.number
-            visible: root.number < 3 && root.total > 0
+            visible: Boolean(root.phase.phase) && root.total > 0
             Layout.fillWidth: true
             horizontalAlignment: Text.AlignHCenter
             text: root.countLabel()

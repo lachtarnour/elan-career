@@ -115,8 +115,6 @@ def _tone(status: str) -> str:
     status = display_status(status)
     if status in {JobStatus.SENT, JobStatus.INTERVIEW}:
         return "success"
-    if status == JobStatus.REJECTED:
-        return "danger"
     if status == JobStatus.ARCHIVED:
         return "warning"
     if status == JobStatus.DUPLICATE_REVIEW:
@@ -142,8 +140,6 @@ def _enrich_rows(rows: list[Any]) -> list[dict[str, Any]]:
         item["tone"] = _tone(str(item.get("status", "")))
         if item.get("shortlisted"):
             item["tone"] = "accent"
-        score = item.get("score")
-        item["score_text"] = "—" if score is None else f"{float(score):.0%}"
         llm_score = item.get("llm_score")
         item["llm_score_text"] = "—" if llm_score is None else f"{float(llm_score):.0%}"
         item["filter_disposition_label"] = _filter_disposition_label(
@@ -182,6 +178,9 @@ class DesktopBridge(QObject):
     currentJobChanged = Signal()
     profileChanged = Signal()
     diagnosticsChanged = Signal()
+    llmConfigurationChanged = Signal()
+    llmConfigurationSaved = Signal()
+    llmConfigurationSaveFailed = Signal(str)
     busyChanged = Signal()
     jobsLoadingChanged = Signal()
     jobsPageChanged = Signal()
@@ -260,6 +259,8 @@ class DesktopBridge(QObject):
         self._job_selection_cleared = False
         self._profile: dict[str, Any] = {}
         self._diagnostics: dict[str, Any] = {}
+        self._llm_configuration: dict[str, Any] = {}
+        self._llm_configuration_saving = False
         self._busy = False
         self._busy_label = ""
         self._workflow_refresh_timer = QTimer(self)
@@ -274,6 +275,8 @@ class DesktopBridge(QObject):
         self._job_sort_key = "default"
         self._job_sort_ascending = False
         self._job_filter_disposition = ""
+        self._job_archive_origin = ""
+        self._job_mission_relation = ""
         self._minimum_llm_score_percent = (
             self.service.minimum_llm_score_percent()
             if hasattr(self.service, "minimum_llm_score_percent") else -1
@@ -509,6 +512,8 @@ class DesktopBridge(QObject):
             self._analysis_controller.refresh(sync=False)
         if self._active_route in {"search", "settings"}:
             self.refreshDiagnosticsIfStale()
+        if self._active_route == "settings":
+            self.refreshLlmConfiguration()
         if getattr(self, "_dirty_views", None):
             self._workflow_refresh_timer.start()
 
@@ -628,6 +633,14 @@ class DesktopBridge(QObject):
     def diagnosticsChecking(self) -> bool:  # noqa: N802
         return getattr(self, "_diagnostics_worker", None) is not None
 
+    @Property("QVariantMap", notify=llmConfigurationChanged)
+    def llmConfiguration(self) -> dict[str, Any]:  # noqa: N802
+        return getattr(self, "_llm_configuration", {})
+
+    @Property(bool, notify=llmConfigurationChanged)
+    def llmConfigurationSaving(self) -> bool:  # noqa: N802
+        return getattr(self, "_llm_configuration_saving", False)
+
     @Property(bool, notify=busyChanged)
     def busy(self) -> bool:
         return self._busy
@@ -718,6 +731,8 @@ class DesktopBridge(QObject):
     @Slot(str, str, str, bool)
     @Slot(str, str, str, bool, str)
     @Slot(str, str, str, bool, str, int)
+    @Slot(str, str, str, bool, str, int, str)
+    @Slot(str, str, str, bool, str, int, str, str)
     def loadJobs(
         self,
         search: str = "",
@@ -726,6 +741,8 @@ class DesktopBridge(QObject):
         sort_ascending: bool = False,
         filter_disposition: str = "",
         page: int = 0,
+        archive_origin: str = "",
+        mission_relation: str = "",
     ) -> None:  # noqa: N802
         page = max(0, int(page)) if status != JobStatus.DUPLICATE_REVIEW else 0
         self._job_search = search
@@ -733,6 +750,8 @@ class DesktopBridge(QObject):
         self._job_sort_key = sort_key
         self._job_sort_ascending = sort_ascending
         self._job_filter_disposition = filter_disposition if status == JobStatus.SCRAPED else ""
+        self._job_archive_origin = archive_origin if status == JobStatus.ARCHIVED else ""
+        self._job_mission_relation = mission_relation if status == JobStatus.ANALYZED else ""
         min_score_percent = (
             self._minimum_llm_score_percent if status == JobStatus.ANALYZED else -1
         )
@@ -748,6 +767,8 @@ class DesktopBridge(QObject):
             self._job_filter_disposition,
             min_score_percent,
             page,
+            self._job_archive_origin,
+            self._job_mission_relation,
         )
         if query != getattr(self, "_displayed_jobs_query", None):
             self._job_selection_cleared = False
@@ -762,6 +783,8 @@ class DesktopBridge(QObject):
             sort_ascending=sort_ascending,
             only_pending_duplicates=duplicates_only,
             filter_disposition=self._job_filter_disposition,
+            archive_origin=self._job_archive_origin,
+            mission_relation=self._job_mission_relation,
             min_llm_score=None if min_score_percent < 0 else min_score_percent / 100,
         )
         paged = status != JobStatus.DUPLICATE_REVIEW and hasattr(self.service, "list_jobs_page")
@@ -777,14 +800,20 @@ class DesktopBridge(QObject):
     @Slot()
     def refreshJobs(self) -> None:  # noqa: N802
         """Refresh offers without resetting the current page state."""
-        self.loadJobs(
+        args = (
             self._job_search,
             self._job_status,
             self._job_sort_key,
             self._job_sort_ascending,
             self._job_filter_disposition,
             self._jobs_page,
+            self._job_archive_origin,
         )
+        relation = getattr(self, "_job_mission_relation", "")
+        if relation:
+            self.loadJobs(*args, relation)
+        else:
+            self.loadJobs(*args)
 
     def _jobs_loaded(self, result: list[Any] | dict, query: tuple | None = None) -> None:
         if isinstance(result, dict):
@@ -795,6 +824,8 @@ class DesktopBridge(QObject):
                 self.loadJobs(
                     query[0], query[1], query[2], query[3], query[5],
                     min(page, (total - 1) // self._jobs_page_size),
+                    query[8],
+                    query[9],
                 )
                 return
         else:
@@ -833,6 +864,8 @@ class DesktopBridge(QObject):
             self._job_search, self._job_status, self._job_sort_key,
             self._job_sort_ascending, self._job_filter_disposition,
             self._minimum_llm_score_percent if self._job_status == JobStatus.ANALYZED else -1,
+            self._job_archive_origin,
+            getattr(self, "_job_mission_relation", ""),
         )
         self._selection_loading = True
         self.selectionLoadingChanged.emit()
@@ -842,6 +875,8 @@ class DesktopBridge(QObject):
                 self._job_search, self._job_status, self._job_sort_key,
                 self._job_sort_ascending, self._job_filter_disposition,
                 self._minimum_llm_score_percent if self._job_status == JobStatus.ANALYZED else -1,
+                self._job_archive_origin,
+                getattr(self, "_job_mission_relation", ""),
             )
             if query == current:
                 self.allMatchingJobsReady.emit([
@@ -863,6 +898,8 @@ class DesktopBridge(QObject):
             "all_matching_jobs", self.service.list_jobs,
             search=query[0], status=query[1] or None, sort_key=query[2],
             sort_ascending=query[3], filter_disposition=query[4],
+            archive_origin=query[6],
+            mission_relation=query[7],
             min_llm_score=None if query[5] < 0 else query[5] / 100,
             on_success=loaded, on_finished=finished,
         )
@@ -896,8 +933,10 @@ class DesktopBridge(QObject):
                 self._job_search, self._job_status, self._job_sort_key,
                 self._job_sort_ascending, False, self._job_filter_disposition,
                 self._minimum_llm_score_percent if self._job_status == JobStatus.ANALYZED else -1,
+                0, self._job_archive_origin,
+                getattr(self, "_job_mission_relation", ""),
             )
-            if displayed is None or displayed[:7] != current or not any(
+            if displayed is None or displayed[:7] != current[:7] or displayed[8:] != current[8:] or not any(
                 int(row["id"]) == job_id for row in self._jobs
             ):
                 self._start_read(
@@ -906,6 +945,8 @@ class DesktopBridge(QObject):
                     sort_key=self._job_sort_key,
                     sort_ascending=self._job_sort_ascending,
                     filter_disposition=self._job_filter_disposition,
+                    archive_origin=self._job_archive_origin,
+                    mission_relation=getattr(self, "_job_mission_relation", ""),
                     min_llm_score=(
                         self._minimum_llm_score_percent / 100
                         if self._job_status == JobStatus.ANALYZED
@@ -923,6 +964,8 @@ class DesktopBridge(QObject):
             self.loadJobs(
                 self._job_search, self._job_status, self._job_sort_key,
                 self._job_sort_ascending, self._job_filter_disposition, page,
+                self._job_archive_origin,
+                getattr(self, "_job_mission_relation", ""),
             )
 
     @Slot()
@@ -947,8 +990,6 @@ class DesktopBridge(QObject):
         self._current_job = _plain(detail) if detail else {}
         if self._current_job:
             self._current_job["tone"] = _tone(str(self._current_job.get("status", "")))
-            score = self._current_job.get("score")
-            self._current_job["score_text"] = "—" if score is None else f"{float(score):.0%}"
             llm_score = self._current_job.get("llm_score")
             self._current_job["llm_score_text"] = (
                 "—" if llm_score is None else f"{float(llm_score):.0%}"
@@ -995,6 +1036,7 @@ class DesktopBridge(QObject):
 
     @Slot()
     def refreshDiagnostics(self) -> None:  # noqa: N802
+        self.refreshLlmConfiguration()
         if self.shutdownRequested or self._diagnostics_worker is not None:
             return
         self.service.invalidate_diagnostics_cache()
@@ -1006,6 +1048,76 @@ class DesktopBridge(QObject):
         worker.signals.error.connect(self._diagnostics_error)
         worker.signals.finished.connect(lambda: self._diagnostics_finished(worker))
         self._read_pool.start(worker)
+
+    @Slot()
+    def refreshLlmConfiguration(self) -> None:  # noqa: N802
+        if self.shutdownRequested or self.llmConfigurationSaving:
+            return
+        if hasattr(self.service, "llm_configuration"):
+            self._start_read(
+                "llm_configuration", self.service.llm_configuration,
+                on_success=self._apply_llm_configuration,
+            )
+
+    def _apply_llm_configuration(self, configuration: Any) -> None:
+        self._llm_configuration = _plain(configuration)
+        self.llmConfigurationChanged.emit()
+        diagnostics = dict(getattr(self, "_diagnostics", {}))
+        writing = next((
+            call for call in self._llm_configuration.get("calls", [])
+            if call.get("purpose") == "application_texts"
+        ), {})
+        diagnostics["llm_provider"] = writing.get("provider", "")
+        diagnostics["llm_model"] = writing.get("model", "")
+        self._diagnostics = diagnostics
+        self.diagnosticsChanged.emit()
+
+    @Slot(str, str)
+    def saveLlmApiKey(self, provider: str, api_key: str) -> None:  # noqa: N802
+        self._save_llm_settings(self.service.save_llm_api_key, provider, api_key)
+
+    @Slot(str, str, result="QVariantList")
+    def llmReasoningOptions(self, provider: str, model: str):  # noqa: N802
+        return self.service.llm_reasoning_options(provider, model)
+
+    @Slot("QVariantList")
+    def saveLlmCalls(self, calls):  # noqa: N802
+        self._save_llm_settings(self.service.save_llm_calls, _plain(calls))
+
+    @Slot("QVariantMap")
+    def saveApplicationSettings(self, updates):  # noqa: N802
+        self._save_llm_settings(self.service.save_application_settings, _plain(updates))
+
+    def _save_llm_settings(self, function, *arguments):
+        if self.shutdownRequested or self.llmConfigurationSaving:
+            return
+        self._llm_configuration_saving = True
+        self.llmConfigurationChanged.emit()
+        # Any previous read must not overwrite the newly saved selection.
+        self._read_tokens["llm_configuration"] = (
+            self._read_tokens.get("llm_configuration", 0) + 1
+        )
+        self._reads_pending.pop("llm_configuration", None)
+
+        def saved(configuration):
+            self._llm_configuration_saving = False
+            self._apply_llm_configuration(configuration)
+            self.llmConfigurationSaved.emit()
+            self.toastRequested.emit(
+                "Réglages IA enregistrés", "Le choix s’applique aux prochaines opérations.",
+                "success",
+            )
+
+        def failed(message, trace):
+            self._llm_configuration_saving = False
+            self.llmConfigurationChanged.emit()
+            self.llmConfigurationSaveFailed.emit(message)
+            self._task_error(message, trace)
+
+        self._mutate(
+            function, *arguments,
+            on_success=saved, on_error=failed,
+        )
 
     def _apply_diagnostics(self, snapshot: Any) -> None:
         self._diagnostics_checked_at = time.monotonic()
@@ -1024,6 +1136,13 @@ class DesktopBridge(QObject):
         diagnostics["source_ready"] = {
             key: bool(health.get("ready")) for key, health in health_by_source.items()
         }
+        if getattr(self, "_llm_configuration", None):
+            writing = next((
+                call for call in self._llm_configuration.get("calls", [])
+                if call.get("purpose") == "application_texts"
+            ), {})
+            diagnostics["llm_provider"] = writing.get("provider", "")
+            diagnostics["llm_model"] = writing.get("model", "")
         self._diagnostics = diagnostics
         self.diagnosticsChanged.emit()
 
@@ -1643,6 +1762,7 @@ class DesktopBridge(QObject):
             message += ", " + _count_text(
                 len(duplicate_review_ids), "doublon à vérifier", "doublons à vérifier"
             )
+            message += " dans la page Doublons"
         warnings = [
             warning
             for warning in (report.get("warnings") or [])

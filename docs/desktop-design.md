@@ -14,14 +14,18 @@ vert pour l’envoi, ambre pour l’archivage et les avertissements.
 - Un seul titre principal par page, sans sous-titre explicatif. Les titres de section servent uniquement à distinguer les groupes de données.
 - Pas de consignes permanentes, de confirmation anticipée ni de raccourcis redondants avec la navigation. Les erreurs de saisie sont contextuelles.
 - Contrôles standard : 40 px ; contrôles compacts conservés dans la page Offres.
-- Offres : partage 50/50, marge réservée au défilement, recherche extensible limitée à son panneau.
+- Offres : partage 50/50 dans une seule surface, avec un séparateur vertical discret entre tableau et détail. La liste n'a pas de cadre propre ; les contrôles gardent leurs dimensions compactes, leur marge de défilement et leur recherche extensible locale.
 - Tableau Offres : grille commune aux en-têtes et aux cellules, proportions calculées sur la largeur du panneau, postes et lieux sur deux lignes au maximum. Scores IA/Match neutres sans contour, sélection légère et lignes sans séparateurs décoratifs.
 - Dans la vue Nouvelle, la colonne `Décision` remplace IA/Match. Le rejet déterministe produit seulement `Rejeté` ou `À classer`; la future classification de pertinence reste une étape séparée. L'action `Analyser (N)` ne traite que la sélection sans créer de shortlist persistante.
 - Le filtre de classe de Nouvelle propose `Toutes les classes`, `Rejeté` et `À classer`. Il s'applique à la liste complète du statut choisi, avant le tri. Le détail explique la décision enregistrée, sans recalculer la classification. Les anciennes décisions `Pertinent` et `Incertain` sont migrées vers ces deux états ; elles restent seulement dans l'historique d'audit.
 - Doublons : le filtre `Au moins une offre active` conserve les paires dont au moins une offre n'est ni rejetée ni archivée, même si elle est déjà analysée ou possède un dossier. Le rejet déterministe est lu dans la décision enregistrée, y compris son historique ; le statut d'archive ou de refus tient aussi compte du dossier. Les couples dont les deux offres sont rejetées ou archivées sont masqués par ce filtre. Les doublons restent à décider avant l'analyse ; afficher une paire ne confirme pas son identité. Une republication confirmée devient principale, tandis que le dossier envoyé, les documents et l'historique des anciennes sources restent liés au groupe.
-- Les copies de contenu peuvent être regroupées dans une carte dépliable, sans confirmation ni modification des offres. L'interrupteur `Regrouper les copies` restaure immédiatement la liste par rapprochement. Chaque décision indique les deux offres concernées ; les compteurs distinguent rapprochements et cartes. Voir [les règles de dédoublonnage](duplicate-review.md).
-- Analyse : tableau à gauche, offre à droite, suivi transparent en bas avec un simple séparateur. Les détails des Batch restent sans carte ni bordure. Les libellés utilisent « analyse en cours », « Analyse n° » et « Offres de l’analyse ».
+- Dans Doublons, la liste est sans cadre extérieur ni titre redondant ; chaque rapprochement en attente possède sa propre carte. Dans la comparaison, les deux offres restent côte à côte dans leurs cartes, en haut de la zone, sans cadre supplémentaire autour de la paire. Les descriptions montrent jusqu'à 1 200 caractères par offre ; la comparaison défile si nécessaire. Chaque décision indique les deux offres concernées. Voir [les règles de dédoublonnage](duplicate-review.md).
+- Dans Recherche, le titre et une surface unique pour les critères et les sources forment un groupe centré. Les contrôles gardent leurs espacements naturels, avec un séparateur entre les deux sections ; sur une petite fenêtre, la page défile pour garder tous les contrôles accessibles.
+- Analyse : le tableau et le détail partagent la largeur à parts égales, avec des marges, lignes et tailles de texte proches d’Offres. Le tableau garde sa propre carte, tandis que les deux panneaux qui l’entouraient sont sans cadre. La colonne « État » redondante est retirée au profit de la largeur du poste. Les commandes au-dessus du tableau suivent cet ordre : Analyse immédiate, Analyse par Batch, Archiver, Actualiser, Recherche. Elles passent à la ligne si nécessaire. Le suivi des Batch conserve son espace en bas, sans cadre extérieur ni carte intérieure pour ses détails. Les libellés utilisent « analyse en cours » et « Analyse n° ».
 - Dans Analyse, « Archiver (N) » archive uniquement les offres sélectionnées après confirmation. « Archiver », à côté d’« Offre d’origine », agit uniquement sur l’offre ouverte. Les analyses et journaux existants sont conservés ; une offre réservée par une analyse immédiate ou un Batch ne peut pas être archivée par ces actions. L’archivage groupé est atomique, sans suppression ni archivage automatique des copies. La sélection restante, la recherche et le contexte de la page Offres sont conservés.
+- Dans Offres > Archivée, un sous-libellé indique la provenance vérifiable : « Filtre automatique », « Missions hors cible » (après extraction, avant évaluation), « Archivage manuel » ou « Doublon confirmé ». Les nouveaux archivages par filtre, préfiltre ou action manuelle enregistrent `archive_origin` dans les composants d’audit du score ; un doublon confirmé est identifié par son lien vers l’offre principale. Une ancienne archive sans provenance exploitable conserve simplement le statut « Archivée ». Le sous-libellé est calculé à la lecture sans réécrire les archives historiques ni modifier les valeurs des scores.
+- Le sélecteur « Origine de l’archivage », à côté du statut et visible uniquement pour « Archivée », filtre ces quatre provenances avant le comptage, la pagination et la sélection globale. « Tous les archivages » inclut aussi les archives historiques sans provenance. Le choix reste actif pendant la recherche, le tri et la pagination.
+- « Désarchiver et créer » conserve un override `manual_rescue` qui protège durablement l’offre du filtre automatique et du préfiltre des missions. Un doublon en attente arrête toute analyse et génération ; un lien confirmé est rouvert pour vérification. Les offres associées apparaissent dans Doublons, avec l’ancien dossier conservé jusqu’à une décision puis une préparation explicites.
 - Zoom de l’offre : sans déplacement du titre, effet immédiat et valeur initiale de 1,15 à chaque lancement.
 - Notifications : toasts superposés en haut et tâche active en bas à droite, sans modifier la géométrie du contenu.
 - Profil, descriptions, diagnostics : retour à la ligne et hauteur adaptée au contenu.
@@ -92,6 +96,35 @@ sauvegarde, sans suppression et sans modifier les fiches checked.
 Le tri de l’application utilise la priorité puis l’ordre ; après ajout manuel,
 la vue se positionne sur la nouvelle fiche à son rang. Voir le
 [référentiel et les règles de synchronisation](company-targeting.md).
+
+## Choix du fournisseur IA
+
+Réglages propose quatre rubriques : Modèles IA, Connexions, Application et Données
+locales. Les appels IA sont séparés en deux vues, Analyse des offres et CV et
+lettres. Chaque appel affiche d'abord son modèle, son niveau de raisonnement et
+sa limite de sortie ; une seule ligne se déplie à la fois pour la modification.
+CV et lettres expose trois appels : sélection, rédaction, relecture. Les reprises
+de correction héritent des mêmes paramètres et n'ont pas de carte indépendante.
+Le modèle possède un seul contrôle : une liste, ou un champ d'identifiant lorsque
+« Autre modèle » est choisi. Les détails du dernier appel API se déplient à part.
+
+Connexions rassemble les clés OpenAI/Claude et les paramètres des sources, repliés
+par source avec leur état. Application regroupe les traitements et la présentation
+des CV ; les fenêtres de contexte et la journalisation sont dans Paramètres
+avancés. Données locales donne accès aux fichiers actifs et aux chemins configurés.
+Les paramètres ont des libellés français et les booléens utilisent des interrupteurs.
+
+La barre d'enregistrement reste accessible pendant le défilement. Les brouillons
+sont conservés entre rubriques et entre les deux vues de modèles, y compris pendant
+une actualisation. Les clés existantes restent masquées ; un champ vide conserve
+la clé. La sauvegarde est asynchrone et préserve la sélection, les notes, les filtres
+et les tâches en cours. Une erreur laisse les champs modifiés disponibles.
+
+Une opération garde son fournisseur et ses modèles. Les cartes de suivi Batch
+affichent le fournisseur et le modèle enregistrés dans leur journal, indépendamment
+des réglages actuels. Les anciens journaux désignent OpenAI.
+Les tests QML utilisent un runtime fictif isolé pour vérifier le panneau aux
+quatre tailles de fenêtre indiquées ci-dessus.
 
 ## Avant distribution
 

@@ -225,7 +225,8 @@ published_date_header = page.findChild(QObject, "offerPublishedDateHeader")
 assert published_date_header is not None
 assert published_date_header.property("visible") is False
 assert page.findChild(QObject, "offerFilterHeader").property("visible") is False
-assert page.findChild(QObject, "offerMatchHeader").property("visible") is True
+assert page.findChild(QObject, "offerIaHeader").property("visible") is True
+assert page.findChild(QObject, "offerMatchHeader") is None
 regenerate = page.findChild(QObject, "offerRegenerateAction")
 assert regenerate is not None
 wait_until(lambda: regenerate.property("visible") is True)

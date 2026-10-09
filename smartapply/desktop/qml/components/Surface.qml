@@ -5,6 +5,7 @@ Item {
     id: root
     property alias content: body.data
     property int padding: Theme.cardPadding
+    property int verticalPadding: padding
     property color surfaceColor: Theme.surface
     property color surfaceEndColor: surfaceColor
     property color strokeColor: Theme.line
@@ -13,7 +14,7 @@ Item {
     property bool luminous: false
     default property alias contentData: body.data
 
-    implicitHeight: body.implicitHeight + padding * 2
+    implicitHeight: body.implicitHeight + verticalPadding * 2
 
     Rectangle {
         visible: root.elevated
@@ -59,7 +60,10 @@ Item {
     ColumnLayout {
         id: body
         anchors.fill: parent
-        anchors.margins: root.padding
+        anchors.leftMargin: root.padding
+        anchors.rightMargin: root.padding
+        anchors.topMargin: root.verticalPadding
+        anchors.bottomMargin: root.verticalPadding
         spacing: 16
     }
 }

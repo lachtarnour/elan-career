@@ -1,7 +1,8 @@
 """Desktop facade for Batch analysis, kept separate from offer browsing."""
 
-from smartapply.config import get_settings
+from smartapply.config import get_llm_settings
 from smartapply.database.session import ensure_startup_maintenance_complete
+from smartapply.llm.routes import resolve_route
 from smartapply.pipeline.batch_analysis.coordinator import BatchAnalysisCoordinator
 from smartapply.pipeline.batch_analysis.presentation import analysis_workspace
 from smartapply.pipeline.errors import TaskCancelledError
@@ -17,8 +18,10 @@ class AnalysisServiceMixin:
 
     def start_analysis_batch(self, job_ids, *, progress=None, stop_requested=None):
         ensure_startup_maintenance_complete()
-        if get_settings().llm_provider != "openai":
-            raise ValueError("Le traitement Batch nécessite le fournisseur OpenAI.")
+        settings = get_llm_settings()
+        for purpose in ("job_scope_screening", "job_offer_extraction", "job_fit_assessment"):
+            if resolve_route(settings, purpose).provider not in {"openai", "anthropic"}:
+                raise ValueError("Le traitement Batch nécessite OpenAI ou Anthropic.")
         from smartapply.pipeline import Pipeline
 
         if progress:
@@ -39,6 +42,9 @@ class AnalysisServiceMixin:
 
     def start_immediate_analysis(self, job_ids, *, stop_requested=None):
         ensure_startup_maintenance_complete()
+        settings = get_llm_settings()
+        for purpose in ("job_scope_screening", "job_offer_extraction", "job_fit_assessment"):
+            resolve_route(settings, purpose)
         ids = list(dict.fromkeys(int(job_id) for job_id in job_ids if int(job_id) > 0))
         if not ids:
             raise ValueError("Sélectionnez au moins une offre à analyser.")

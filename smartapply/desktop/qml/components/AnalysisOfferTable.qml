@@ -16,19 +16,22 @@ Item {
     readonly property real contentHeight: candidateList.contentHeight
     readonly property real viewportHeight: candidateList.height
     readonly property real usableWidth: Math.max(0, width - Theme.scrollGutter - 24)
+    readonly property real tableScale: Math.min(1, Math.max(0, (usableWidth - 540) / 440))
+    readonly property int rowHeight: Math.round(68 + 4 * tableScale)
+    readonly property int tableTextSize: Math.round(12 + 2 * tableScale)
     readonly property bool showExperience: usableWidth >= 520
     readonly property bool showDate: usableWidth >= 480
-    readonly property int gap: 6
+    readonly property int gap: Math.round(6 + 4 * tableScale)
     readonly property int selectWidth: 24
-    readonly property int companyWidth: Math.min(240, Math.round(usableWidth * 0.16))
-    readonly property int experienceWidth: showExperience ? (usableWidth >= 800 ? 70 : 50) : 0
-    readonly property int locationWidth: Math.round(usableWidth * 0.16)
-    readonly property int dateWidth: showDate ? (usableWidth >= 800 ? 80 : 68) : 0
-    readonly property int stateWidth: usableWidth >= 900 ? 128 : 110
-    readonly property int visibleGaps: 4 + (showExperience ? 1 : 0) + (showDate ? 1 : 0)
-    readonly property int titleWidth: Math.max(65, Math.round(usableWidth - selectWidth
-        - companyWidth - experienceWidth - locationWidth - dateWidth - stateWidth
-        - gap * visibleGaps))
+    readonly property int experienceWidth: showExperience ? Math.round(52 + 12 * tableScale) : 0
+    readonly property int dateWidth: showDate ? Math.round(76 + 12 * tableScale) : 0
+    readonly property int visibleGaps: 3 + (showExperience ? 1 : 0) + (showDate ? 1 : 0)
+    readonly property real textColumnsWidth: Math.max(0, usableWidth - selectWidth
+        - experienceWidth - dateWidth - gap * visibleGaps)
+    readonly property int companyWidth: Math.round(textColumnsWidth * 0.26)
+    readonly property int locationWidth: Math.round(textColumnsWidth * 0.30)
+    readonly property int titleWidth: Math.max(65, Math.round(textColumnsWidth
+        - companyWidth - locationWidth))
     readonly property var sortedOffers: {
         var rows = (offers || []).slice()
         var key = sortKey
@@ -70,17 +73,6 @@ Item {
         return source ? source.toUpperCase() : ""
     }
 
-    Surface {
-        objectName: "analysisTableSurface"
-        anchors.fill: parent
-        padding: 0
-        elevated: false
-        radiusValue: 16
-        surfaceColor: "#121119"
-        surfaceEndColor: surfaceColor
-        strokeColor: "#2C2836"
-    }
-
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -88,11 +80,7 @@ Item {
             Layout.fillWidth: true
             Layout.preferredHeight: 42
             color: "#191720"
-            radius: 16
-            Rectangle {
-                anchors.left: parent.left; anchors.right: parent.right
-                anchors.bottom: parent.bottom; height: 14; color: parent.color
-            }
+            radius: 0
             RowLayout {
                 anchors.fill: parent
                 anchors.leftMargin: 12
@@ -149,14 +137,6 @@ Item {
                     active: root.sortKey === sortKey; ascending: root.ascending
                     onSortRequested: function(key) { root.sortBy(key) }
                 }
-                SortHeader {
-                    Layout.preferredWidth: root.stateWidth
-                    objectName: "analysisStateHeader"
-                    title: "État"
-                    sortKey: "state_label"
-                    active: root.sortKey === sortKey; ascending: root.ascending
-                    onSortRequested: function(key) { root.sortBy(key) }
-                }
             }
         }
         Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: "#2C2836" }
@@ -180,13 +160,22 @@ Item {
                     id: row
                     required property var modelData
                     width: Math.max(0, candidateList.width - Theme.scrollGutter)
-                    height: 62
+                    height: root.rowHeight
                     radius: 9
-                    color: root.selected(modelData.id) ? "#252034"
-                        : Number(modelData.id) === root.focusedOfferId ? Theme.surfaceRaised
-                        : hover.hovered ? "#1D1B26" : "transparent"
-                    border.color: root.selected(modelData.id) ? "#49405F"
-                        : Number(modelData.id) === root.focusedOfferId ? Theme.lineStrong : "transparent"
+                    readonly property bool current: Number(modelData.id) === root.focusedOfferId
+                    color: current ? "#252034" : hover.hovered ? "#1D1B26"
+                        : root.selected(modelData.id) ? "#1C1927" : "transparent"
+                    border.color: current ? "#49405F" : "transparent"
+                    border.width: Theme.lineWidth
+                    Rectangle {
+                        visible: parent.current
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 2
+                        height: 24
+                        radius: 2
+                        color: Theme.accentBright
+                    }
                     RowLayout {
                         anchors.fill: parent
                         anchors.leftMargin: 8
@@ -208,13 +197,13 @@ Item {
                         }
                         ColumnLayout {
                             Layout.preferredWidth: root.companyWidth
-                            spacing: 3
+                            spacing: 4
                             Text {
                                 Layout.fillWidth: true
                                 text: String(modelData.company || "—")
                                 textFormat: Text.PlainText
                                 color: Theme.inkSoft
-                                font.pixelSize: 12
+                                font.pixelSize: root.tableTextSize - 1
                                 font.weight: Font.Medium
                                 maximumLineCount: 2
                                 wrapMode: Text.WordWrap
@@ -225,6 +214,7 @@ Item {
                                 text: root.sourceLabel(modelData.source)
                                 color: Theme.inkFaint
                                 font.pixelSize: 9
+                                font.letterSpacing: 0.2
                                 elide: Text.ElideRight
                             }
                         }
@@ -233,18 +223,19 @@ Item {
                             text: String(modelData.title || "Offre sans titre")
                             textFormat: Text.PlainText
                             color: Theme.ink
-                            font.pixelSize: 12
+                            font.pixelSize: root.tableTextSize
                             font.weight: Font.Medium
                             maximumLineCount: 2
                             wrapMode: Text.WordWrap
                             elide: Text.ElideRight
+                            lineHeight: 1.2
                         }
                         Text {
                             visible: root.showExperience
                             Layout.preferredWidth: root.experienceWidth
                             text: String(modelData.experience || "—")
                             color: Theme.inkMuted
-                            font.pixelSize: 11
+                            font.pixelSize: root.tableTextSize - 1
                             elide: Text.ElideRight
                         }
                         Text {
@@ -252,29 +243,19 @@ Item {
                             text: String(modelData.location || "—")
                             textFormat: Text.PlainText
                             color: Theme.inkMuted
-                            font.pixelSize: 11
+                            font.pixelSize: root.tableTextSize - 1
                             maximumLineCount: 2
                             wrapMode: Text.WordWrap
                             elide: Text.ElideRight
+                            lineHeight: 1.2
                         }
                         Text {
                             visible: root.showDate
                             Layout.preferredWidth: root.dateWidth
                             text: root.dateLabel(modelData.published_date)
                             color: Theme.inkMuted
-                            font.pixelSize: 11
+                            font.pixelSize: root.tableTextSize - 1
                             horizontalAlignment: Text.AlignHCenter
-                        }
-                        Text {
-                            Layout.preferredWidth: root.stateWidth
-                            text: String(modelData.state_label || "À extraire")
-                            color: root.selectionEnabled ? Theme.accentBright : Theme.inkMuted
-                            font.pixelSize: 11
-                            font.weight: Font.DemiBold
-                            elide: Text.ElideRight
-                            ToolTip.visible: statusHover.hovered
-                            ToolTip.text: text
-                            HoverHandler { id: statusHover }
                         }
                     }
                     HoverHandler { id: hover; cursorShape: Qt.PointingHandCursor }
@@ -287,6 +268,8 @@ Item {
                                     String(modelData.offer_status || "scraped"))
                         }
                     }
+                    Behavior on color { ColorAnimation { duration: Theme.motionFast } }
+                    Behavior on border.color { ColorAnimation { duration: Theme.motionFast } }
                 }
             }
             EmptyState {

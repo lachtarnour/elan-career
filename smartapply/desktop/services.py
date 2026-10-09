@@ -16,13 +16,18 @@ from typing import Any
 
 from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.engine import make_url
-from sqlalchemy.orm import joinedload, load_only, undefer
+from sqlalchemy.orm import joinedload, load_only
 from sqlalchemy.orm.attributes import set_committed_value
 
 from smartapply.concurrency import TaskConflictError, job_operation
-from smartapply.config import ENV_FILE, get_settings, get_source_settings
+from smartapply.config import ENV_FILE, get_llm_settings, get_settings, get_source_settings
 from smartapply.database import init_db, session_scope, write_session_scope
 from smartapply.database.display_metadata import display_metadata_current
+from smartapply.database.fit_ranking import (
+    current_fit_expression,
+    fit_metadata_columns,
+    fit_ranking_columns,
+)
 from smartapply.database.models import (
     Application,
     AppSetting,
@@ -54,23 +59,36 @@ from smartapply.database.session import (
     run_startup_maintenance,
     startup_maintenance_pending,
 )
-from smartapply.dedup.copy_groups import group_strict_copies
 from smartapply.desktop.analysis_services import AnalysisServiceMixin
 from smartapply.desktop.classification_explanation import classification_explanation
+from smartapply.desktop.fit_presentation import fit_detail, fit_summary
+from smartapply.desktop.llm_settings import (
+    llm_configuration,
+    reasoning_options,
+    save_application_settings,
+    save_llm_api_key,
+    save_llm_calls,
+)
 from smartapply.desktop.source_health import (
     SourceHealth,
     check_source_health,
     pending_source_health,
 )
 from smartapply.filtering.types import FilterDisposition
-from smartapply.jobsearch.archive_reasons import archive_reason_labels
+from smartapply.jobsearch.archive_reasons import (
+    ARCHIVE_ORIGINS,
+    archive_reason_labels,
+    archive_sub_label,
+)
 from smartapply.jobsearch.offer_state import (
     application_has_documents as _application_has_documents,
 )
 from smartapply.jobsearch.offer_state import (
     completed_offer_expression,
+    has_manual_rescue,
     offer_state,
     recorded_filter_disposition,
+    rescued_duplicate_review_expression,
 )
 from smartapply.jobsearch.offer_state import (
     is_reusable_reservation as _is_reusable_reservation,
@@ -85,10 +103,11 @@ from smartapply.jobsearch.status import (
     display_status as visible_status,
 )
 from smartapply.jobsearch.workflow import APPLICATION_STATUSES, next_action_for
+from smartapply.llm_policy import CallConfigurationError, resolve_route
 from smartapply.logging_setup import get_logger
 from smartapply.pipeline.process.analysis_admission import analysis_queue_job_ids
 from smartapply.pipeline.process.filter_state import is_current_hard_reject_survivor
-from smartapply.pipeline.process.ranking import RankingMixin
+from smartapply.pipeline.process.ranking import ShortlistMixin
 from smartapply.profile import get_profile
 from smartapply.utils.experience import required_min_years
 
@@ -225,22 +244,6 @@ class DuplicateReviewDetail:
 
 
 @dataclass(frozen=True)
-class DuplicateCopyVersion:
-    """A real offer shown inside a presentation group, without changing its state."""
-
-    id: int
-    company: str
-    title: str
-    location: str
-    source: str
-    url: str
-    published_date: str
-    scraped_at: str
-    status_label: str
-    filter_disposition: str
-
-
-@dataclass(frozen=True)
 class JobRow:
     id: int
     company: str
@@ -251,7 +254,6 @@ class JobRow:
     status_label: str
     filter_disposition: str
     published_date: str
-    score: float | None
     llm_score: float | None
     contract: str
     experience: str
@@ -261,6 +263,7 @@ class JobRow:
     can_generate: bool
     can_send: bool
     scraped_at: str
+    archive_sub_label: str = ""
     analyzed_at: str = "—"
     ready_at: str = "—"
     operation_date: str = "—"
@@ -269,8 +272,10 @@ class JobRow:
     possible_duplicate_of_id: int | None = None
     duplicate_confidence: float | None = None
     duplicate_candidate: DuplicateReviewDetail | None = None
-    strict_copy_group_ids: tuple[int, ...] = ()
-    strict_copy_versions: tuple[DuplicateCopyVersion, ...] = ()
+    fit_current: bool = False
+    fit_status_label: str = ""
+    candidacy_status: str = ""
+    candidacy_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -286,6 +291,10 @@ class JobDetail(JobRow):
     match_reasons: tuple[str, ...] = ()
     risks: tuple[str, ...] = ()
     archive_reasons: tuple[str, ...] = ()
+    fit_axes: tuple[dict, ...] = ()
+    fit_admissibility: tuple[dict, ...] = ()
+    fit_reliability: tuple[dict, ...] = ()
+    fit_warnings: tuple[str, ...] = ()
     application: ApplicationDetail | None = None
 
 
@@ -331,6 +340,21 @@ class ApplicationDetail:
 
 
 @dataclass(frozen=True)
+class ProfileExperienceItem:
+    id: str
+    title: str
+    company: str
+    start_date: str
+    end_date: str
+
+
+@dataclass(frozen=True)
+class ProfileProjectItem:
+    id: str
+    title: str
+
+
+@dataclass(frozen=True)
 class ProfileSnapshot:
     name: str
     title: str
@@ -344,6 +368,8 @@ class ProfileSnapshot:
     skill_categories: tuple[tuple[str, tuple[str, ...]], ...]
     experiences: int
     projects: int
+    experience_items: tuple[ProfileExperienceItem, ...]
+    project_items: tuple[ProfileProjectItem, ...]
     education: int
     profile_dir: str
 
@@ -556,17 +582,15 @@ class DesktopService(AnalysisServiceMixin):
         ids_only: bool = False,
         only_pending_duplicates: bool = False,
         filter_disposition: str = "",
+        archive_origin: str = "",
+        mission_relation: str = "",
         min_llm_score: float | None = None,
     ) -> list[JobRow] | tuple[list[JobRow], int] | list[int]:
         # Old routes/bookmarks using the review-only state open Prête too.
         if status == JobStatus.QUALITY_REJECTED:
             status = JobStatus.READY_FOR_FORM_SUBMISSION
         if sort_key == "default":
-            sort_key = (
-                "llm_score"
-                if status in {JobStatus.ANALYZED, JobStatus.READY_FOR_FORM_SUBMISSION}
-                else "score"
-            )
+            sort_key = "llm_score"
         supported_dispositions = {
             "",
             FilterDisposition.REJECTED.value,
@@ -576,6 +600,14 @@ class DesktopService(AnalysisServiceMixin):
             raise ValueError(f"Unsupported filter disposition: {filter_disposition}")
         if filter_disposition and status != JobStatus.SCRAPED:
             raise ValueError("Filter disposition is available only for new offers")
+        if archive_origin not in {"", *ARCHIVE_ORIGINS, "confirmed_duplicate"}:
+            raise ValueError(f"Unsupported archive origin: {archive_origin}")
+        if archive_origin and status != JobStatus.ARCHIVED:
+            raise ValueError("Archive origin is available only for archived offers")
+        if mission_relation not in {"", "direct", "adjacent", "clearly_outside", "unknown"}:
+            raise ValueError(f"Unsupported mission relation: {mission_relation}")
+        if mission_relation and status != JobStatus.ANALYZED:
+            raise ValueError("Mission relation is available only for analyzed offers")
         if min_llm_score is not None and (
             status != JobStatus.ANALYZED or not 0 <= min_llm_score <= 1
         ):
@@ -607,13 +639,11 @@ class DesktopService(AnalysisServiceMixin):
                     Job.shortlisted_at,
                     Job.analyzed_at,
                     Job.duplicate_review_status,
+                    Job.canonical_job_id,
                     Job.possible_duplicate_of_id,
                     Job.duplicate_confidence,
                 ),
-                joinedload(Job.score).load_only(
-                    JobScore.final_score,
-                    JobScore.components,
-                ),
+                joinedload(Job.score).load_only(JobScore.components),
                 joinedload(Job.analysis).load_only(
                     JobAnalysis.fit_score, JobAnalysis.seniority, JobAnalysis.created_at,
                 ),
@@ -637,16 +667,6 @@ class DesktopService(AnalysisServiceMixin):
             # pending rows below. A pair with one active offer still needs a
             # human decision so that the active version is not lost.
             stmt = stmt.where(Job.duplicate_review_status == JobDuplicateStatus.PENDING)
-            # Strict copy grouping compares the original content. Normal
-            # offer lists keep their light metadata-only loading path.
-            stmt = stmt.options(
-                undefer(Job.description),
-                undefer(Job.cleaned_description),
-                undefer(Job.source_data),
-                undefer(Job.external_id),
-                undefer(Job.application_url),
-                undefer(Job.canonical_job_id),
-            )
         elif status != JobStatus.ARCHIVED:
             # Probable duplicates stay out of every normal queue until the
             # user explicitly decides whether the offers are identical.
@@ -654,7 +674,8 @@ class DesktopService(AnalysisServiceMixin):
                 or_(
                     Job.duplicate_review_status.is_(None),
                     Job.duplicate_review_status != JobDuplicateStatus.PENDING,
-                )
+                ),
+                ~rescued_duplicate_review_expression(),
             )
 
         if status == JobStatus.SHORTLISTED:
@@ -691,7 +712,8 @@ class DesktopService(AnalysisServiceMixin):
             if status == JobStatus.ARCHIVED:
                 stmt = stmt.where(
                     or_(
-                        Application.status == JobStatus.ARCHIVED,
+                        (Application.status == JobStatus.ARCHIVED)
+                        & ~rescued_duplicate_review_expression(),
                         Job.archived_at.is_not(None),
                         Job.status == JobStatus.ARCHIVED,
                     )
@@ -711,8 +733,52 @@ class DesktopService(AnalysisServiceMixin):
                 func.json_extract(JobScore.components, "$.filter_disposition")
                 == filter_disposition
             )
+        if archive_origin:
+            origin = func.json_extract(JobScore.components, "$.archive_origin")
+            stage = func.json_extract(JobScore.components, "$.rejection_stage")
+            reasons = func.json_each(
+                JobScore.components, "$.rejection_reasons"
+            ).table_valued("value")
+
+            def has_reason(code: str):
+                return (
+                    (func.json_type(JobScore.components, "$.rejection_reasons") == "array")
+                    & select(1).select_from(reasons).where(reasons.c.value == code).exists()
+                )
+
+            archive_class = case(
+                (
+                    (Job.canonical_job_id.is_not(None))
+                    & (Job.duplicate_review_status == JobDuplicateStatus.CONFIRMED),
+                    "confirmed_duplicate",
+                ),
+                (origin.in_(ARCHIVE_ORIGINS), origin),
+                (or_(stage == "manual", has_reason("manual_archive")), "manual"),
+                (
+                    or_(stage == "extraction_screening", has_reason("mission_clearly_outside")),
+                    "mission_screen",
+                ),
+                (
+                    stage.in_((
+                        "local_filter", "rules", "experience_validation",
+                        "role_validation", "contract_validation",
+                    )),
+                    "automatic_filter",
+                ),
+                else_="",
+            )
+            stmt = stmt.where(archive_class == archive_origin)
+        stmt = stmt.add_columns(*fit_metadata_columns())
         if min_llm_score is not None:
-            stmt = stmt.where(JobAnalysis.fit_score >= min_llm_score)
+            stmt = stmt.where(or_(
+                ~current_fit_expression(), JobAnalysis.fit_score >= min_llm_score,
+            ))
+        if mission_relation:
+            stmt = stmt.where(
+                func.json_extract(
+                    JobScore.components, "$.extraction_screen.mission_relation"
+                ) == mission_relation
+            )
         needle = search.strip()
         if needle:
             term = f"%{needle}%"
@@ -740,7 +806,6 @@ class DesktopService(AnalysisServiceMixin):
             ready_date = func.coalesce(Application.ready_at, document_dates.c.prepared_at)
         sort_columns = {
             "duplicate_confidence": Job.duplicate_confidence,
-            "score": JobScore.final_score,
             "llm_score": JobAnalysis.fit_score,
             # The deterministic classification has exactly two active states.
             # Legacy or missing values remain last until their migration.
@@ -776,16 +841,21 @@ class DesktopService(AnalysisServiceMixin):
             "contract": Job.contract_type,
             "status": func.coalesce(Application.status, Job.status),
         }
-        sort_column = sort_columns.get(sort_key, JobScore.final_score)
+        sort_column = sort_columns.get(sort_key, JobAnalysis.fit_score)
         if sort_key == "operation_date":
             # Group by the displayed local calendar day, then rank that day's
             # offers by IA score. A precise timestamp is only a final tie-break.
             local_day = func.date(sort_column, "localtime")
             stmt = stmt.order_by(
                 (local_day.asc() if sort_ascending else local_day.desc()).nulls_last(),
-                JobAnalysis.fit_score.desc().nulls_last(),
+                *fit_ranking_columns(),
                 sort_column.desc().nulls_last(),
                 Job.id.asc(),
+            )
+        elif sort_key == "llm_score" or sort_key not in sort_columns:
+            stmt = stmt.order_by(
+                *fit_ranking_columns(ascending=sort_ascending),
+                JobAnalysis.created_at.desc().nulls_last(), Job.id.asc(),
             )
         else:
             ordering = sort_column.asc() if sort_ascending else sort_column.desc()
@@ -807,7 +877,18 @@ class DesktopService(AnalysisServiceMixin):
                     stmt = stmt.limit(limit)
                 if offset:
                     stmt = stmt.offset(offset)
-            jobs = session.execute(stmt).unique().scalars().all()
+            records = session.execute(stmt).unique().all()
+            jobs = [record[0] for record in records]
+            fit_metadata = {
+                record[0].id: {
+                    "policy_fingerprint": record.fit_policy,
+                    "admissibility": {
+                        "mandatory_conditions": {"status": record.fit_mandatory},
+                        "candidate_preferences": {"status": record.fit_preferences},
+                    },
+                }
+                for record in records
+            }
             if status == JobStatus.DUPLICATE_REVIEW:
                 jobs = [
                     job
@@ -835,16 +916,10 @@ class DesktopService(AnalysisServiceMixin):
                         set_committed_value(job, "description", row.description)
                         set_committed_value(job, "cleaned_description", row.cleaned_description)
             grouped_ids = application_ids_for_confirmed_groups(session, [job.id for job in jobs])
-            copy_groups = (
-                self._strict_copy_presentation(session, jobs)
-                if status == JobStatus.DUPLICATE_REVIEW
-                else {}
-            )
             rows = [
-                replace(
-                    self._job_row(job, related_application_id=grouped_ids.get(job.id)),
-                    strict_copy_group_ids=copy_groups.get(job.id, ((), ()))[0],
-                    strict_copy_versions=copy_groups.get(job.id, ((), ()))[1],
+                self._job_row(
+                    job, related_application_id=grouped_ids.get(job.id),
+                    fit_summary_data=fit_metadata[job.id],
                 )
                 for job in jobs
             ]
@@ -868,89 +943,6 @@ class DesktopService(AnalysisServiceMixin):
             return None
 
     @staticmethod
-    def _strict_copy_presentation(
-        session,
-        jobs: list[Job],
-    ) -> dict[int, tuple[tuple[int, ...], tuple[DuplicateCopyVersion, ...]]]:
-        """Group identical content for display while keeping every review pair.
-
-        References and confirmed aliases remain real versions in the expanded
-        card. Pending siblings never become evidence of confirmed identity.
-        This read path does not confirm duplicates or alter any persisted row.
-        """
-        if not jobs:
-            return {}
-        offers = {int(job.id): job for job in jobs}
-        for job in jobs:
-            if job.possible_duplicate_of_id is not None:
-                reference = canonical_job(session, int(job.possible_duplicate_of_id))
-                if reference is not None:
-                    offers[int(reference.id)] = reference
-
-        # Confirmed aliases may contain another source, date or dossier. Include
-        # them in the proof and version list without following pending links.
-        frontier = set(offers)
-        while frontier:
-            aliases = session.execute(
-                select(Job).where(
-                    Job.canonical_job_id.in_(frontier),
-                    Job.duplicate_review_status == JobDuplicateStatus.CONFIRMED,
-                )
-            ).scalars().all()
-            frontier = {int(job.id) for job in aliases} - offers.keys()
-            offers.update((int(job.id), job) for job in aliases)
-
-        groups = group_strict_copies(list(offers.values()))
-        member_ids = {job_id for group_ids in groups for job_id in group_ids}
-        if not member_ids:
-            return {}
-        # Load the same workflow evidence as normal rows, without offer bodies.
-        session.execute(select(Job).where(Job.id.in_(member_ids)).options(
-            load_only(Job.id),
-            joinedload(Job.score).load_only(JobScore.components),
-            joinedload(Job.analysis).load_only(JobAnalysis.id),
-            joinedload(Job.application).load_only(
-                Application.status, Application.form_submitted_at,
-                Application.cv_docx_path, Application.cv_pdf_path,
-            ).joinedload(Application.documents).load_only(GeneratedDocument.id),
-        )).unique().scalars().all()
-        result = {}
-        pending_ids = {int(job.id) for job in jobs}
-        for group_ids in groups:
-            members = [offers[job_id] for job_id in group_ids]
-            members.sort(
-                key=lambda job: (
-                    (job.published_date or job.scraped_at).isoformat()
-                    if job.published_date or job.scraped_at
-                    else "",
-                    job.scraped_at.isoformat() if job.scraped_at else "",
-                    int(job.id),
-                ),
-                reverse=True,
-            )
-            ordered_ids = tuple(int(job.id) for job in members)
-            versions = tuple(DesktopService._strict_copy_version(job) for job in members)
-            for job_id in pending_ids.intersection(group_ids):
-                result[job_id] = (ordered_ids, versions)
-        return result
-
-    @staticmethod
-    def _strict_copy_version(job: Job) -> DuplicateCopyVersion:
-        state = offer_state(job)
-        return DuplicateCopyVersion(
-            id=int(job.id),
-            company=job.company,
-            title=job.title,
-            location=job.location or "",
-            source=job.source,
-            url=job.application_url or "",
-            published_date=_date_text(job.published_date),
-            scraped_at=_date_text(job.scraped_at),
-            status_label=DesktopService._desktop_status_label(state.status),
-            filter_disposition=state.filter_disposition,
-        )
-
-    @staticmethod
     def _duplicate_pair_is_fully_archived(session, job: Job) -> bool:
         """Return whether both offers in a pending pair are archived.
 
@@ -970,7 +962,7 @@ class DesktopService(AnalysisServiceMixin):
 
     @staticmethod
     def _duplicate_pair_has_active_offer(session, job: Job) -> bool:
-        """Keep an unresolved pair if either offer is neither rejected nor archived.
+        """Keep a pair if either offer is neither filter-rejected nor archived.
 
         Completed offers remain eligible: analysis or a prepared dossier does
         not remove the need to resolve a duplicate. Read historical filter
@@ -982,7 +974,7 @@ class DesktopService(AnalysisServiceMixin):
         if candidate is None:
             return False
         return any(
-            offer_state(offer).workflow_status not in {JobStatus.ARCHIVED, JobStatus.REJECTED}
+            offer_state(offer).workflow_status != JobStatus.ARCHIVED
             and recorded_filter_disposition(
                 offer.score.components if offer.score is not None else None
             ) != FilterDisposition.REJECTED.value
@@ -1026,11 +1018,7 @@ class DesktopService(AnalysisServiceMixin):
             # itself was never marked archived.  The list already exposes
             # those rows as « Archivée » via the application status; keep the
             # detail panel consistent so its archive reason is not hidden.
-            archived = bool(
-                job.archived_at
-                or job.status == JobStatus.ARCHIVED
-                or (job.application and job.application.status == JobStatus.ARCHIVED)
-            )
+            archived = base.status == JobStatus.ARCHIVED
             raw_archive_reasons = (
                 components.get("rejection_reasons")
                 or (components.get("reasons") if archived else [])
@@ -1045,6 +1033,7 @@ class DesktopService(AnalysisServiceMixin):
                 ]
             return JobDetail(
                 **base_values,
+                **fit_detail(analysis.fit_diagnostics if analysis else None),
                 remote=job.remote_policy or "",
                 url=job.application_url or "",
                 description=job.cleaned_description or job.description or "",
@@ -1107,7 +1096,10 @@ class DesktopService(AnalysisServiceMixin):
         )
 
     @staticmethod
-    def _job_row(job: Job, *, related_application_id: int | None = None) -> JobRow:
+    def _job_row(
+        job: Job, *, related_application_id: int | None = None,
+        fit_summary_data: dict | None = None,
+    ) -> JobRow:
         years = (
             job.display_metadata.get("required_min_years")
             if display_metadata_current(job.display_metadata)
@@ -1132,7 +1124,10 @@ class DesktopService(AnalysisServiceMixin):
                 application = None
         analyzed = state.analyzed
         duplicate_review_status = job.duplicate_review_status or JobDuplicateStatus.NONE
-        duplicate_review_pending = duplicate_review_status == JobDuplicateStatus.PENDING
+        duplicate_review_pending = (
+            duplicate_review_status == JobDuplicateStatus.PENDING
+            or state.status == JobStatus.DUPLICATE_REVIEW
+        )
         display_status = state.status
         return JobRow(
             id=job.id,
@@ -1142,10 +1137,22 @@ class DesktopService(AnalysisServiceMixin):
             source=job.source,
             status=display_status,
             status_label=DesktopService._desktop_status_label(display_status),
+            archive_sub_label=archive_sub_label(
+                archived=archived,
+                confirmed_duplicate=(
+                    job.canonical_job_id is not None
+                    and duplicate_review_status == JobDuplicateStatus.CONFIRMED
+                ),
+                components=job.score.components if job.score is not None else None,
+            ),
             filter_disposition=filter_disposition,
             published_date=_date_text(job.published_date),
-            score=(job.score.final_score if job.score else None),
             llm_score=llm_score,
+            **fit_summary(
+                fit_summary_data if fit_summary_data is not None else
+                job.analysis.fit_diagnostics if job.analysis else None,
+                has_score=llm_score is not None,
+            ),
             contract=job.contract_type or "",
             experience=experience,
             shortlisted=bool(job.shortlisted_at and analyzed and not archived),
@@ -1295,9 +1302,6 @@ class DesktopService(AnalysisServiceMixin):
                 and (
                     job.analyzed_at is None
                     or job.filtered_at is None
-                    or job.ranked_at is None
-                    or job.score is None
-                    or job.score.final_score is None
                 )
             )
 
@@ -1378,11 +1382,6 @@ class DesktopService(AnalysisServiceMixin):
                     if analysis.analyzed == 0 and analysis.already_analyzed == 0:
                         report["errors"].extend(analysis.errors)
                         continue
-                    # Numeric ranking belongs to this explicit selection action,
-                    # after analysis; it never decides which offers get analyzed.
-                    pipeline.rank_pending(
-                        top_k_ranked=1, job_ids=[job_id], persist_shortlist=False,
-                    )
                     report["shortlisted"] += int(self.set_job_shortlisted(job_id, selected=True))
             except Exception as exc:
                 report["errors"].append({"job_id": job_id, "message": str(exc)})
@@ -1642,7 +1641,7 @@ class DesktopService(AnalysisServiceMixin):
             candidates = list(
                 session.execute(
                     select(Job)
-                    .join(JobScore, JobScore.job_id == Job.id)
+                    .join(JobAnalysis, JobAnalysis.job_id == Job.id)
                     .outerjoin(Application, Application.job_id == Job.id)
                     .options(
                         joinedload(Job.score),
@@ -1658,10 +1657,11 @@ class DesktopService(AnalysisServiceMixin):
                             Job.duplicate_review_status.is_(None),
                             Job.duplicate_review_status != JobDuplicateStatus.PENDING,
                         ),
-                        JobScore.final_score.is_not(None),
+                        JobAnalysis.fit_score.is_not(None),
+                        current_fit_expression(),
                         Application.id.is_(None),
                     )
-                    .order_by(JobScore.final_score.desc(), Job.id.asc())
+                    .order_by(*fit_ranking_columns(), Job.id.asc())
                 )
                 .unique()
                 .scalars()
@@ -1675,8 +1675,8 @@ class DesktopService(AnalysisServiceMixin):
                 )
             ]
             shortlist_n = min(max(1, int(top_k)), len(candidates)) if candidates else 0
-            selected = RankingMixin._mixed_score_shortlist(candidates, shortlist_n)
-            shortlisted = RankingMixin._replace_automatic_shortlist(session, selected)
+            selected = candidates[:shortlist_n]
+            shortlisted = ShortlistMixin._replace_automatic_shortlist(session, selected)
             return {
                 "total": len(candidates),
                 "kept_after_filter": len(candidates),
@@ -1894,7 +1894,7 @@ class DesktopService(AnalysisServiceMixin):
         application_url: str,
         progress=None,
     ) -> dict[str, Any]:
-        """Persist the offer without constructing an LLM or embeddings provider."""
+        """Persist the offer without constructing an LLM provider."""
         from smartapply.pipeline.ingestor import Ingestor
 
         ensure_startup_maintenance_complete()
@@ -2020,7 +2020,7 @@ class DesktopService(AnalysisServiceMixin):
             }
         )
         set_score(session, job.id, components=components)
-        mark_archived(session, job.id)
+        mark_archived(session, job.id, origin="manual")
 
     def delete_ready_offer(self, job_id: int):
         from smartapply.desktop.offer_deletion import delete_ready_offer
@@ -2054,7 +2054,7 @@ class DesktopService(AnalysisServiceMixin):
                 }
             )
             set_score(session, job.id, components=components)
-            mark_archived(session, job.id)
+            mark_archived(session, job.id, origin="manual")
             return True
 
     def mark_job_sent(self, job_id: int) -> bool:
@@ -2124,9 +2124,6 @@ class DesktopService(AnalysisServiceMixin):
                         ):
                             report["skipped"] += 1
                             continue
-                        # A confirmed source alias shares its dossier with the
-                        # canonical offer. Resume that dossier without splitting
-                        # the group or creating a second application.
                         target = canonical_job(session, job_id)
                         if target is None:
                             raise ValueError("Offre principale introuvable.")
@@ -2135,23 +2132,73 @@ class DesktopService(AnalysisServiceMixin):
                             target if target.duplicate_review_status == JobDuplicateStatus.PENDING
                             else pending_duplicate_for_group(session, canonical_id)
                         )
+                        if pending is None:
+                            # Explicit restoration reopens one confirmed link
+                            # for review before generation. Existing pending
+                            # decisions and dossiers take precedence.
+                            pending = (
+                                job if job.canonical_job_id is not None
+                                and job.duplicate_review_status == JobDuplicateStatus.CONFIRMED
+                                else session.scalars(
+                                    select(Job).where(
+                                        Job.canonical_job_id == canonical_id,
+                                        Job.duplicate_review_status == JobDuplicateStatus.CONFIRMED,
+                                    ).order_by(Job.id)
+                                ).first()
+                            )
+                            if pending is not None:
+                                rescue_archived_job(
+                                    session, int(pending.id),
+                                    justification="Désarchivée pour vérification du doublon",
+                                )
+                                pending.canonical_job_id = None
+                                pending.possible_duplicate_of_id = canonical_id
+                                pending.duplicate_review_status = JobDuplicateStatus.PENDING
                         if pending is not None:
                             # Restore availability first so the hidden pair becomes
                             # reviewable again. Do not infer an identity decision or
                             # generate documents while that decision is pending.
-                            if canonical_id in handled:
+                            reference = (
+                                canonical_job(session, int(pending.possible_duplicate_of_id))
+                                if pending.possible_duplicate_of_id is not None else target
+                            )
+                            reference_id = int(reference.id if reference is not None else target.id)
+                            if reference_id in handled:
                                 report["skipped"] += 1
                                 continue
-                            handled.add(canonical_id)
-                            rescue_archived_job(
-                                session, canonical_id,
-                                justification="Désarchivée pour vérification du doublon",
-                            )
+                            handled.add(reference_id)
+                            for review_job in {pending.id: pending, reference_id: reference}.values():
+                                if review_job is not None and (
+                                    (review_job is pending
+                                     and not has_manual_rescue(
+                                         review_job.score.components if review_job.score else None
+                                     ))
+                                    or review_job.archived_at or review_job.status == JobStatus.ARCHIVED
+                                    or (review_job.application
+                                        and review_job.application.status == JobStatus.ARCHIVED
+                                        and offer_state(review_job).status != JobStatus.DUPLICATE_REVIEW)
+                                ):
+                                    rescue_archived_job(
+                                        session, int(review_job.id),
+                                        justification="Désarchivée pour vérification du doublon",
+                                    )
+                                if review_job is not None and review_job.score is not None:
+                                    components = dict(review_job.score.components or {})
+                                    if has_manual_rescue(components):
+                                        review_job.score = set_score(
+                                            session, int(review_job.id), components={
+                                                **components,
+                                                "manual_rescue": {
+                                                    **components["manual_rescue"],
+                                                    "duplicate_review_job_id": int(pending.id),
+                                                },
+                                            },
+                                        )
                             report["rescued"] += 1
-                            report["job_ids"].append(canonical_id)
+                            report["job_ids"].append(reference_id)
                             report.setdefault("duplicate_review_ids", []).append(int(pending.id))
                             report["warnings"].append({
-                                "job_id": canonical_id,
+                                "job_id": reference_id,
                                 "category": "duplicate_review",
                                 "message": "Offre désarchivée. Vérifiez la paire dans Doublons avant de préparer la candidature.",
                             })
@@ -2308,6 +2355,20 @@ class DesktopService(AnalysisServiceMixin):
             ),
             experiences=len(profile.experiences),
             projects=len(profile.projects),
+            experience_items=tuple(
+                ProfileExperienceItem(
+                    id=experience.id,
+                    title=experience.title,
+                    company=experience.company,
+                    start_date=experience.start_date,
+                    end_date=experience.end_date,
+                )
+                for experience in profile.experiences
+            ),
+            project_items=tuple(
+                ProfileProjectItem(id=project.id, title=project.name)
+                for project in profile.projects
+            ),
             education=len(profile.education),
             profile_dir=str(settings.profile_dir.expanduser().resolve()),
         )
@@ -2376,6 +2437,11 @@ class DesktopService(AnalysisServiceMixin):
         with self._diagnostics_lock:
             source_health = dict(self._source_health_cache or pending_source_health(settings))
         sources = {key: health.ready for key, health in source_health.items()}
+        llm_settings = get_llm_settings()
+        try:
+            writing_route = resolve_route(llm_settings, "application_texts")
+        except CallConfigurationError:
+            writing_route = None
         return RuntimeDiagnostics(
             database_url=url.render_as_string(hide_password=True),
             database_path=database_path,
@@ -2383,17 +2449,63 @@ class DesktopService(AnalysisServiceMixin):
             output_dir=str(settings.output_dir.expanduser().resolve()),
             profile_dir=str(settings.profile_dir.expanduser().resolve()),
             env_file=str(ENV_FILE),
-            llm_provider=settings.llm_provider,
-            llm_model=settings.openai_model_smart,
+            llm_provider=writing_route.provider if writing_route else "",
+            llm_model=writing_route.model if writing_route else "",
             source_ready=sources,
             source_health=source_health,
         )
 
     @staticmethod
+    def llm_configuration() -> dict:
+        result = llm_configuration()
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from smartapply.database.models import LLMUsage
+
+        try:
+            with session_scope() as session:
+                for call in result["calls"]:
+                    usage = session.scalar(
+                        select(LLMUsage).where(
+                            LLMUsage.purpose == call["purpose"], LLMUsage.cached.is_(False)
+                        ).order_by(LLMUsage.id.desc()).limit(1)
+                    )
+                    if usage is not None:
+                        call["last_request"] = {
+                            "provider": usage.provider,
+                            "model": usage.model,
+                            "requested_model": usage.requested_model,
+                            "reasoning": usage.reasoning_effort,
+                            "configuration_recorded": usage.requested_model is not None,
+                            "at": usage.created_at.isoformat(),
+                        }
+        except SQLAlchemyError:
+            # Fresh installations may show settings before database setup.
+            pass
+        return result
+
+    @staticmethod
+    def save_llm_calls(calls: list[dict]) -> dict:
+        save_llm_calls(calls)
+        return DesktopService.llm_configuration()
+
+    llm_reasoning_options = staticmethod(reasoning_options)
+
+    @staticmethod
+    def save_llm_api_key(provider: str, api_key: str) -> dict:
+        save_llm_api_key(provider, api_key)
+        return DesktopService.llm_configuration()
+
+    @staticmethod
+    def save_application_settings(updates: dict) -> dict:
+        save_application_settings(updates)
+        return DesktopService.llm_configuration()
+
+    @staticmethod
     def job_statuses() -> list[tuple[str, str]]:
-        # ``filtered`` is an internal pipeline marker. All other workflow
-        # states, including application tracking, are visible on the unified
-        # Offers page.
+        # ``filtered`` is an internal pipeline marker and duplicate reviews
+        # have their own page. The remaining offer/application states are
+        # visible on the unified Offers page.
         return [
             (row["status"], row["label"])
             for row in STATUS_FLOW
