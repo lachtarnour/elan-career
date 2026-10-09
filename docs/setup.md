@@ -25,40 +25,70 @@ Set credentials in `.env` for the providers you use:
 
 | Setting | Purpose |
 | --- | --- |
-| `OPENAI_API_KEY` | AI analysis, document generation, and OpenAI embeddings |
+| `OPENAI_API_KEY` | OpenAI analysis and document generation |
+| `ANTHROPIC_API_KEY` | Claude analysis and document generation |
 | `FRANCETRAVAIL_CLIENT_ID`, `FRANCETRAVAIL_CLIENT_SECRET` | France Travail API access |
 | `APIFY_TOKEN` | LinkedIn collection through Apify |
 | `SERPAPI_API_KEY` | Google Jobs collection |
 | `WTTJ_COOKIE` | Authenticated Welcome to the Jungle feed |
-| `EMBEDDINGS_PROVIDER` | `openai`, `local`, or `mock` |
 
 See [`.env.example`](../.env.example) for defaults and the [source guides](sources/README.md) for connector-specific setup.
 
-To explore without an AI API key, use:
+Configure each LLM call in `model_config.json` or under
+**Configuration → Modèles LLM**. The active file is shown in the page. `.env`
+contains API keys, database and paths, source credentials, pipeline and logging
+settings. These general values can be edited under **Configuration → Application**.
+The complete call catalogue and initial values are in
+[provider settings](llm-providers.md). Missing or invalid call settings are
+reported by stage and field before a request is sent.
 
-```dotenv
-LLM_PROVIDER=mock
-EMBEDDINGS_PROVIDER=mock
-```
+The native OpenAI request uses `reasoning_effort`. Anthropic uses
+`output_config.effort` and `output_config.format` for structured JSON. It does
+not send `temperature`. Each call's `max_output_tokens` reserves room for the
+response and reasoning; it is an output ceiling, not fixed consumption.
 
-Mock providers return deterministic responses. They do not replace live job sources; add offers manually or configure a source to collect real listings.
+New operations read the current `model_config.json`. Running operations and
+Batch runs keep their recorded provider, model, reasoning and output budget.
+Changing the JSON does not change the active database, profile or output paths.
+Application secrets are never returned in clear text by the settings service.
+
+To explore without an AI API key, put explicit `mock` entries for the calls you
+exercise in a copy of `model_config.json`. Each such entry needs its own model,
+`reasoning: "auto"`, and `max_output_tokens`. Mocks are deterministic and do not
+replace live job sources.
 
 ## Run from source
 
-The desktop launcher changes its working directory to the application runtime. Use absolute paths so the desktop app and CLI share the same development data. Run this block from the repository root in each new terminal session:
+To develop with the installed application's existing offers, analyses, profile
+and documents, create a separate runtime once, from the repository root:
 
 ```bash
-export ELAN_ENV_FILE="$PWD/.env"
-export DATABASE_URL="sqlite:///$PWD/data/smartapply.db"
-export PROFILE_DIR="$PWD/smartapply/profile/data"
-export OUTPUT_DIR="$PWD/data/output"
-export CACHE_DIR="$PWD/data/cache"
-
-make init-db
+.venv/bin/python scripts/clone_development_runtime.py
 make run-desktop
 ```
 
-Environment variables take precedence over `.env`. Keep `.env`, the private profile, and generated data out of version control; these paths are already excluded by `.gitignore`.
+The copy lives under `data/development-runtime`. SQLite's backup API includes
+committed WAL transactions. The script copies the installed profile, documents
+and cache, redirects document paths only in the copied database, and changes
+the four runtime paths in the project's `.env`. Credentials and
+`model_config.json` remain the project's configuration. The previous `.env`
+is saved privately as `data/development-runtime/.env.before-copy`.
+
+Subsequent launches only need `make run-desktop`; initialization applies the
+current schema to the copied database. The script refuses to overwrite an
+existing copy. The installed bundle and its runtime remain unchanged. The two
+databases are independent snapshots: later changes are not synchronized.
+
+Environment variables take precedence over `.env`. If an earlier terminal
+session exported runtime overrides, clear them before launching:
+
+```bash
+unset ELAN_HOME ELAN_ENV_FILE DATABASE_URL PROFILE_DIR OUTPUT_DIR CACHE_DIR
+make run-desktop
+```
+
+Keep `.env`, the private profile, and generated data out of version control;
+these paths are already excluded by `.gitignore`.
 
 ## Build the macOS app
 
@@ -130,10 +160,8 @@ No rebuild is needed after copying profile data. Existing CVs are not regenerate
 
 The next desktop operation reloads changed profile JSON files (the in-memory
 cache tracks each file's modification time and size). A running batch keeps the
-profile it started with. Embedding cache keys include the model and the exact
-text being embedded: changed profile or project text is computed on its next
-use, while unchanged text remains reusable. `make refresh-embeddings` can
-precompute the current profile and project vectors without clearing other entries.
+profile it started with. CV adaptation receives the complete profile and selects
+projects through the LLM, with local validation of their eligibility and evidence.
 
 Prompt builders read their system and user templates for each request, including
 the shared summary rules. There is no process-wide snapshot of the prompt text.
@@ -141,8 +169,12 @@ The response-cache key includes the rendered system/user messages, model,
 temperature and complete JSON schema, so changed instructions or supplied profile
 content cannot reuse a response for the previous request.
 
-New job analyses use two separate calls to `OPENAI_MODEL_CHEAP` (currently
-`gpt-5.4-mini`). `job_offer_analysis` extracts offer facts and supporting excerpts
+At startup, a migration removes the obsolete `embedding_cache` and
+`job_embeddings` tables, along with embedding usage and response-cache records.
+Offers, analyses, applications, generated documents and other AI caches are
+preserved. Historical cost totals therefore exclude retired embedding usage.
+
+New job analyses use separate configured calls. `job_offer_extraction` extracts offer facts and supporting excerpts
 without any candidate profile. `job_fit_assessment` receives those facts and the
 candidate's declared skills, all experiences and projects, education, languages
 and actual preferences. Its strict output schema permits only the fit score,
@@ -224,27 +256,6 @@ Recommended order:
 make test-fast
 ```
 
-For changes to the deterministic rejection rules, also run both frozen audit
-guards. The first protects the reviewed rejection cohort. The second evaluates
-every offer that was previously classified `relevant` or `uncertain`:
-
-```bash
-.venv/bin/python scripts/replay_hard_reject_audit.py --strict \
-  --output /private/tmp/hard-reject-replay.json
-.venv/bin/python scripts/replay_hard_reject_positive_control.py --strict \
-  --output /private/tmp/hard-reject-positive-control.json
-```
-
-For the former `relevant` cohort, the positive control uses the reviewed
-ID-level decisions in its manifest: an unreviewed rejection and every reviewed
-false or ambiguous rejection fail the guard. The former `uncertain` cohort is
-also protected by its exhaustively reviewed rejected-ID allowlist and by an
-explicit aggregate ceiling. `--strict` fails if a rules change rejects a former
-`uncertain` offer outside that allowlist or raises the rejected count above the
-ceiling. An allowed rejection may be released without failure. Any new rejected
-ID must be reviewed before the manifest changes. Neither replay writes to the
-frozen database.
-
 The current deterministic filter stores only `rejected` and
 `pending_relevance`. Relevance is evaluated separately after this first filter.
 The Nouvelle class selector therefore offers only `Rejeté` and `À classer`,
@@ -267,12 +278,14 @@ alone is not an exemption. Existing archived offers are not automatically reopen
 
 To migrate persisted legacy `uncertain` decisions, run the dedicated command
 against the active database. It previews changes by default; add `--apply` to
-create a backup and apply exactly the reviewed plan atomically:
+create a backup and apply exactly the reviewed plan atomically. Supply an external
+schema-v3 manifest that satisfies the guarded migration contract; historical
+audit manifests are not bundled with the repository:
 
 ```bash
 .venv/bin/python -m scripts.migrate_legacy_filter \
   --database "/absolute/path/to/smartapply.db" \
-  --review-manifest audit_manifests/classification-audit-20261005/positive-control-decisions.json \
+  --review-manifest "/absolute/path/to/reviewed-manifest.json" \
   --output /private/tmp/legacy-filter-plan.json
 ```
 
@@ -282,7 +295,7 @@ offer inputs, decisions, or audit manifest:
 ```bash
 .venv/bin/python -m scripts.migrate_legacy_filter \
   --database "/absolute/path/to/smartapply.db" \
-  --review-manifest audit_manifests/classification-audit-20261005/positive-control-decisions.json \
+  --review-manifest "/absolute/path/to/reviewed-manifest.json" \
   --apply --expected-plan /private/tmp/legacy-filter-plan.json
 ```
 
@@ -428,8 +441,6 @@ provider-level transport retries), with at most two calls to the cheap reviewer.
 There is no extra planner call or automatic escalation to another review model.
 Actual cost depends on the configured models, token usage and cache hits; routing
 the review to a cheaper model does not guarantee equal quality or a fixed saving.
-The previous joint `application_draft` call and one-defect letter repair are no
-longer used by the application pipeline.
 CV-only generation remains available. No historical document or stored analysis
 is migrated automatically when this generation code changes.
 
