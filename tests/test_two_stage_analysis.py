@@ -32,6 +32,7 @@ from smartapply.pipeline.process.analysis import (
 from smartapply.pipeline.rescore import reusable_offer
 from smartapply.profile import get_profile
 from tests.fit_fixtures import evaluation_from_user
+from tests.scope_fixtures import seed_neutral_scope
 
 BODY = "Build forecasting models. Python is required. SQL is preferred."
 
@@ -51,9 +52,7 @@ def offer_result():
 
 
 def extraction_offer_result():
-    return OfferExtractionOutput.model_validate(
-        {**offer_result().model_dump(), "seniority": "unknown"}
-    )
+    return OfferExtractionOutput.model_validate({**offer_result().model_dump(), "seniority": "unknown"})
 
 
 def fit_result():
@@ -85,7 +84,6 @@ def insert_job():
             filtered_at=now,
             ranked_at=now,
             score=JobScore(
-                final_score=0.7,
                 components={
                     "filter_disposition": "pending_relevance",
                     "hard_reject": HardRejectResult(decisions=()).audit_payload(),
@@ -94,6 +92,7 @@ def insert_job():
         )
         session.add(job)
         session.flush()
+        seed_neutral_scope(session, job)
         return job.id
 
 
@@ -142,10 +141,10 @@ def test_analysis_requires_a_current_kept_filter_decision(isolated_db, component
         job = session.get(Job, job_id)
         assert job.analysis is None and job.analyzed_at is None
         assert job.score.components == components
-        assert job.score.final_score == 0.7
+        assert job.score is not None
 
 
-@pytest.mark.parametrize("changed_purpose", ["job_offer_analysis", "job_fit_assessment"])
+@pytest.mark.parametrize("changed_purpose", ["job_offer_extraction", "job_fit_assessment"])
 def test_rejection_during_analysis_stops_remaining_calls_and_publication(
     isolated_db,
     changed_purpose,
@@ -167,18 +166,18 @@ def test_rejection_during_analysis_stops_remaining_calls_and_publication(
                 }
         return (
             extraction_offer_result()
-            if kwargs["purpose"] == "job_offer_analysis"
+            if kwargs["purpose"] == "job_offer_extraction"
             else evaluation_from_user(kwargs["user"])
         )
 
-    instance = runner(SimpleNamespace(complete_json=complete, cheap_model="mock"))
+    instance = runner(SimpleNamespace(name="openai", complete_json=complete, cheap_model="mock"))
     with pytest.raises(StaleTaskResultError):
         instance._analyze_one(job_id=job_id)
 
     assert calls == (
-        ["job_offer_analysis"]
-        if changed_purpose == "job_offer_analysis"
-        else ["job_offer_analysis", "job_fit_assessment"]
+        ["job_offer_extraction"]
+        if changed_purpose == "job_offer_extraction"
+        else ["job_offer_extraction", "job_fit_assessment"]
     )
     with session_scope() as session:
         assert session.get(Job, job_id).analysis is None
@@ -364,7 +363,7 @@ def test_wrapper_tolerance_does_not_accept_changed_missing_or_empty_quotes(quote
     assert "excluded" in grounded.offer_risks[-1]
 
 
-@pytest.mark.parametrize("failed_purpose", ["job_offer_analysis", "job_fit_assessment"])
+@pytest.mark.parametrize("failed_purpose", ["job_offer_extraction", "job_fit_assessment"])
 def test_failure_does_not_save_partial_analysis_or_mark_job_analyzed(isolated_db, failed_purpose):
     calls = []
 
@@ -374,11 +373,11 @@ def test_failure_does_not_save_partial_analysis_or_mark_job_analyzed(isolated_db
             raise LLMError("Simulated controller failure")
         return extraction_offer_result()
 
-    instance = runner(SimpleNamespace(complete_json=complete, cheap_model="gpt-5.4-mini"))
+    instance = runner(SimpleNamespace(name="openai", complete_json=complete, cheap_model="gpt-5.4-mini"))
     job_id = insert_job()
     with pytest.raises(LLMError):
         instance._analyze_one(job_id=job_id)
-    assert len(calls) == (1 if failed_purpose == "job_offer_analysis" else 2)
+    assert len(calls) == (1 if failed_purpose == "job_offer_extraction" else 2)
     with session_scope() as session:
         job = session.get(Job, job_id)
         assert job.analysis is None
@@ -393,7 +392,12 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(
     isolated_db, monkeypatch, retry_after_failure, wrapped_excerpts
 ):
     """Exercise the real cache/provider boundary; network calls are replaced locally."""
-    provider = OpenAIProvider()
+    from tests.scope_fixtures import set_test_routes
+    set_test_routes(monkeypatch, isolated_db, {
+        purpose: {"provider": "openai", "model": "gpt-5.4-mini", "reasoning": "medium", "max_output_tokens": 6000}
+        for purpose in ("job_scope_screening", "job_offer_extraction", "job_fit_assessment")
+    })
+    provider = OpenAIProvider(model="gpt-5.4-mini")
     calls = []
     fail_fit_once = retry_after_failure
     extracted = extraction_offer_result()
@@ -450,7 +454,7 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(
             job.analysis.raw_response["supporting_excerpts"] == offer_result().supporting_excerpts
         )
         assert job.analysis.raw_response["offer_risks"] == offer_result().offer_risks
-        cached = session.query(LLMCache).filter_by(purpose="job_offer_analysis").one()
+        cached = session.query(LLMCache).filter_by(purpose="job_offer_extraction").one()
         assert json.loads(cached.response)["supporting_excerpts"] == extracted.supporting_excerpts
     from smartapply.pipeline.apply.cv_writer import CvWriterMixin
 
@@ -486,13 +490,13 @@ def test_failed_evaluation_checkpoint_obeys_exact_extraction_contract(
 
     def complete(**kwargs):
         calls.append(kwargs["purpose"])
-        if kwargs["purpose"] == "job_offer_analysis":
+        if kwargs["purpose"] == "job_offer_extraction":
             return extraction_offer_result()
         if fail_fit:
             raise LLMError("Evaluation temporarily unavailable")
         return evaluation_from_user(kwargs["user"])
 
-    instance = runner(SimpleNamespace(complete_json=complete, cheap_model="mock"))
+    instance = runner(SimpleNamespace(name="openai", complete_json=complete, cheap_model="mock"))
     job_id = insert_job()
     with pytest.raises(LLMError):
         instance._analyze_one(job_id=job_id)
@@ -514,12 +518,12 @@ def test_failed_evaluation_checkpoint_obeys_exact_extraction_contract(
         )
     assert instance._analyze_one(job_id=job_id, allow_existing=False)
     expected_extractions = 1 if change in {"none", "profile"} else 2
-    assert calls.count("job_offer_analysis") == expected_extractions
+    assert calls.count("job_offer_extraction") == expected_extractions
     assert calls.count("job_fit_assessment") == 2
     with session_scope() as session:
         assert session.get(AnalysisCheckpoint, job_id) is None
     assert instance.analyze_jobs([job_id]).already_analyzed == 1
-    assert calls.count("job_offer_analysis") == expected_extractions
+    assert calls.count("job_offer_extraction") == expected_extractions
 
 
 def test_cancel_after_valid_extraction_keeps_checkpoint_before_stopping(isolated_db):
@@ -538,7 +542,7 @@ def test_cancel_after_valid_extraction_keeps_checkpoint_before_stopping(isolated
 
     instance = runner(
         CancellableProvider(
-            SimpleNamespace(cheap_model="mock", complete_json=complete),
+            SimpleNamespace(name="openai", cheap_model="mock", complete_json=complete),
             lambda: stopped,
         )
     )
@@ -546,7 +550,7 @@ def test_cancel_after_valid_extraction_keeps_checkpoint_before_stopping(isolated
     job_id = insert_job()
     with pytest.raises(TaskCancelledError):
         instance._analyze_one(job_id=job_id)
-    assert calls == ["job_offer_analysis"]
+    assert calls == ["job_offer_extraction"]
     with session_scope() as session:
         assert session.get(AnalysisCheckpoint, job_id) is not None
         assert session.get(Job, job_id).analysis is None

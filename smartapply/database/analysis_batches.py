@@ -1,4 +1,4 @@
-"""Durable execution journal for the two dependent analysis batches.
+"""Durable execution journal for the dependent screening, extraction and fit batches.
 
 These states describe processing, never offer classifications. Completed offer
 analyses still live in ``job_analyses``; intermediate results belong to a run
@@ -26,8 +26,15 @@ class AnalysisBatchRun(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     state: Mapped[str] = mapped_column(String(32), default="active", index=True)
     model: Mapped[str] = mapped_column(String(128))
+    provider: Mapped[str] = mapped_column(String(32))
+    # Freeze the extraction budget when starting a run.
+    max_completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Auto reasoning is represented by null for models without this option.
+    extraction_effort: Mapped[str | None] = mapped_column(String(16), nullable=True)
     profile_data: Mapped[dict[str, Any]] = mapped_column(JSON)
     fit_context: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # Completed production journals without a prefilter remain consultable.
+    scope_context: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
     last_error: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
@@ -46,8 +53,9 @@ class AnalysisBatchItem(Base):
     title: Mapped[str] = mapped_column(Text)
     company: Mapped[str] = mapped_column(Text)
     analyzer_input: Mapped[dict[str, Any]] = mapped_column(JSON)
-    state: Mapped[str] = mapped_column(String(32), default="extraction_pending", index=True)
+    state: Mapped[str] = mapped_column(String(32), default="screening_pending", index=True)
     offer_data: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    scope_data: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str] = mapped_column(Text, default="")
 
 

@@ -7,6 +7,7 @@ from datetime import date
 from typing import Any
 
 from smartapply.company_identity import is_anonymous_company
+from smartapply.config import get_llm_settings
 from smartapply.cv.letter_writer import OBJECTIVE_TEXT_WARNING_PREFIXES, ApplicationTextWriter
 from smartapply.cv.motivation_validator import normalize_french_elisions
 from smartapply.cv.role_family import (
@@ -26,6 +27,8 @@ from smartapply.llm import (
     MotivationLetterRepair,
 )
 from smartapply.llm.prompts import motivation_letter_repair
+from smartapply.llm.routes import provider_for
+from smartapply.llm_policy import resolve_route
 from smartapply.logging_setup import get_logger
 from smartapply.pipeline.reports import ApplyReport
 
@@ -143,7 +146,7 @@ class CvWriterMixin:
         refresh_cache: bool = False,
     ) -> tuple[Any, MotivationLetter]:
         """Assemble CV content, write summary and letter together, then review."""
-        assembled, _selection = self.adapter.adapt(
+        assembled = self.adapter.adapt(
             analysis,
             job_title=job.title,
             job_company=document_company,
@@ -279,7 +282,7 @@ class CvWriterMixin:
         job_id: int,
         refresh_cache: bool = False,
     ) -> MotivationLetter:
-        """Repair one letter-only defect with at most one cheap-model call.
+        """Repair one letter-only defect with at most one smart-model call.
 
         The original letter is retained when there is no defect, more than one
         defect, a provider failure, or a repair that introduces any new issue.
@@ -304,15 +307,22 @@ class CvWriterMixin:
             letter=letter_draft,
         )
         try:
-            repair = self.llm.complete_json(
+            provider = provider_for(self.llm, "motivation_letter_repair")
+            route = resolve_route(
+                getattr(self.llm, "_settings", None) or get_llm_settings(),
+                "motivation_letter_repair",
+            )
+            repair = provider.complete_json(
                 system=motivation_letter_repair.build_system_prompt(),
                 user=prompt,
                 schema=MotivationLetterRepair,
-                model=self.llm.smart_model,
+                model=route.model,
                 temperature=0.1,
                 purpose="motivation_letter_repair",
                 job_id=job_id,
                 refresh_cache=refresh_cache,
+                effort=route.reasoning,
+                max_completion_tokens=route.max_output_tokens,
             )
         except LLMError as exc:
             logger.warning(

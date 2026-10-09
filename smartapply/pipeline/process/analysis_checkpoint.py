@@ -7,16 +7,26 @@ from smartapply.database.analysis_checkpoints import AnalysisCheckpoint
 from smartapply.llm import OfferAnalysis, OfferExtractionOutput
 from smartapply.llm.cache import make_cache_key
 from smartapply.llm.prompts import job_analysis
+from smartapply.llm.request_options import request_cache_extra
 
 
-def extraction_key(analyzer_input, model: str) -> str:
+def extraction_key(
+    analyzer_input, model: str, *, provider: str = "openai", effort: str | None = None
+) -> str:
     return make_cache_key(
+        provider=provider,
         model=model,
         system=job_analysis.build_system_prompt(),
         user=job_analysis.build_user_prompt_from_input(analyzer_input=analyzer_input),
         schema_name=OfferExtractionOutput.__name__,
-        extra={"temperature": 0.2, "schema": OfferExtractionOutput.model_json_schema()},
+        extra=request_cache_extra(OfferExtractionOutput, 0.2, effort),
     )
+
+
+def read_extraction(data):
+    if not isinstance(data, dict):
+        raise ValueError("Missing extraction facts")
+    return OfferExtractionOutput.model_validate(data)
 
 
 def save_extraction(session, job, key: str, offer: OfferAnalysis) -> None:
@@ -31,19 +41,15 @@ def save_extraction(session, job, key: str, offer: OfferAnalysis) -> None:
 def load_extraction(session, job, key: str) -> OfferAnalysis | None:
     """Only an identical model, prompt, source input and schema may be resumed.
 
-    Legacy Batch journals are recovered lazily for selected offers. Their
-    persisted request key is required: rebuilding a past prompt with today's
-    code would incorrectly accept an extraction made with an older contract.
+    Completed Batch outputs may be reused when their recorded request has
+    the exact same key as this extraction.
     """
     checkpoint = session.get(AnalysisCheckpoint, job.id)
-    if checkpoint is not None:
-        if checkpoint.extraction_key == key:
-            try:
-                return OfferExtractionOutput.model_validate(checkpoint.offer_data)
-            except ValueError:
-                pass
-        session.delete(checkpoint)
-        session.flush()
+    if checkpoint is not None and checkpoint.extraction_key == key:
+        try:
+            return read_extraction(checkpoint.offer_data)
+        except ValueError:
+            pass
     items = session.scalars(
         select(AnalysisBatchItem)
         .where(
@@ -66,7 +72,7 @@ def load_extraction(session, job, key: str) -> OfferAnalysis | None:
         ):
             continue
         try:
-            offer = OfferExtractionOutput.model_validate(item.offer_data)
+            offer = read_extraction(item.offer_data)
         except ValueError:
             continue
         save_extraction(session, job, key, offer)

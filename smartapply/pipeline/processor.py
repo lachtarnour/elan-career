@@ -1,37 +1,32 @@
-"""Deterministic preparation, exhaustive analysis and independent ranking."""
+"""Deterministic preparation, exhaustive analysis and Top selection."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
 from smartapply.config import get_settings
-from smartapply.dedup import Deduplicator
 from smartapply.filtering import DeterministicRejector
 from smartapply.llm import LLMProvider
 from smartapply.pipeline.process import (
     AnalysisMixin,
-    DeduplicationMixin,
     LocalFilterMixin,
-    RankingMixin,
+    ShortlistMixin,
     _is_anonymous_company,
     _should_replace_job_company,
     _should_replace_job_location,
 )
 from smartapply.pipeline.reports import ProcessReport
 from smartapply.profile import Profile
-from smartapply.ranking import JobScorer
 
 
-class Processor(AnalysisMixin, LocalFilterMixin, RankingMixin, DeduplicationMixin):
-    """Analyze all deterministic survivors; ranking remains an optional operation."""
+class Processor(AnalysisMixin, LocalFilterMixin, ShortlistMixin):
+    """Analyze all deterministic survivors and maintain the Top selection."""
 
     def __init__(
         self,
         *,
         profile: Profile,
-        deduplicator: Deduplicator,
         job_filter: DeterministicRejector,
-        scorer: JobScorer,
         llm: LLMProvider,
         stop_requested: Callable[[], bool] | None = None,
         use_global_profile: bool = False,
@@ -39,9 +34,7 @@ class Processor(AnalysisMixin, LocalFilterMixin, RankingMixin, DeduplicationMixi
         self.stop_requested = stop_requested
         self.profile = profile
         self._uses_global_profile = use_global_profile
-        self.deduplicator = deduplicator
         self.filter = job_filter
-        self.scorer = scorer
         self.llm = llm
         self.settings = get_settings()
 
@@ -55,7 +48,7 @@ class Processor(AnalysisMixin, LocalFilterMixin, RankingMixin, DeduplicationMixi
         """Prepare and analyze the entire pending queue or explicit selection.
 
         ``top_k_analyze`` is retained for compatibility with older callers and
-        deliberately does not truncate analysis. No embedding call is needed.
+        deliberately does not truncate analysis.
         """
         prepared = self.prepare_analysis(
             job_ids=job_ids,

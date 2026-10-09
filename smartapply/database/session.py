@@ -84,6 +84,12 @@ def init_db(*, run_maintenance: bool = True) -> None:
     still require Alembic.
     """
     Base.metadata.create_all(get_engine())
+    from smartapply.database.match_score_migration import remove_match_score
+
+    remove_match_score(get_engine())
+    from smartapply.database.embedding_migration import remove_embeddings
+
+    remove_embeddings(get_engine())
     auto_migrate()
     ensure_indexes()
     from smartapply.pipeline.output_deletion import recover_application_deletions

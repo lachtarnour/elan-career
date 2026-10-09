@@ -1,6 +1,6 @@
 """Integration tests for the end-to-end pipeline.
 
-Every external dependency is mocked: scrapers, LLM and embeddings. The
+Every external dependency is mocked: scrapers and LLM. The
 pipeline is exercised against fictional profile evidence so the
 anti-hallucination contract is validated too.
 """
@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 from collections import Counter
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -23,8 +22,8 @@ from smartapply.llm import (
     MotivationLetter,
     OfferExtractionOutput,
 )
+from smartapply.llm.schemas import JobScopeScreening
 from smartapply.offers import RawJob
-from smartapply.ranking import MockEmbeddingsProvider
 from tests.fit_fixtures import evaluation_from_user
 
 
@@ -60,8 +59,11 @@ def _ingest_search_offer(*, text, title, company, location=None, application_url
 
 def _register_llm_responses() -> None:
     MockLLMProvider.clear()
+    MockLLMProvider.register("job_scope_screening", JobScopeScreening(mission_screen={
+        "mission_relation": "unknown", "mission_evidence": "insufficient",
+    }))
     MockLLMProvider.register(
-        "job_offer_analysis",
+        "job_offer_extraction",
         OfferExtractionOutput(
             role_type="Data Scientist NLP",
             seniority="mid",
@@ -147,7 +149,7 @@ def test_ingest_text_persists_job() -> None:
     from smartapply.offers import ManualOfferInput
     from smartapply.pipeline import Pipeline
 
-    p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    p = Pipeline(llm=MockLLMProvider())
     report = p.ingest_manual_offer(
         ManualOfferInput(
             company="Acme",
@@ -174,7 +176,7 @@ def test_manual_offer_reuses_existing_url_for_regeneration() -> None:
     from smartapply.offers import ManualOfferInput
     from smartapply.pipeline import Pipeline
 
-    p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    p = Pipeline(llm=MockLLMProvider())
     first = p.ingest_manual_offer(
         ManualOfferInput(
             company="Old Company",
@@ -222,7 +224,7 @@ def test_manual_offers_with_shared_url_keep_separate_job_rows() -> None:
     from smartapply.offers import ManualOfferInput
     from smartapply.pipeline import Pipeline
 
-    p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    p = Pipeline(llm=MockLLMProvider())
     shared_url = "https://jobs.example.com/search?ref=semantic_search_landing_page"
     first = p.ingest_manual_offer(
         ManualOfferInput(
@@ -521,7 +523,7 @@ def test_ingestor_reports_cancelled_collection(monkeypatch: pytest.MonkeyPatch) 
 def test_pipeline_rejects_unbounded_serpapi_ingest() -> None:
     from smartapply.pipeline import Pipeline
 
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    pipeline = Pipeline(llm=MockLLMProvider())
 
     with pytest.raises(ValueError, match="serpapi requires"):
         pipeline.ingest("serpapi", "Data Scientist", max_results=None)
@@ -556,7 +558,7 @@ def test_pipeline_uses_configured_linkedin_default_when_unbounded(
                 )
 
     monkeypatch.setattr("smartapply.pipeline.ingestor.get_scraper", lambda source: FakeScraper())
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    pipeline = Pipeline(llm=MockLLMProvider())
 
     report = pipeline.ingest("linkedin", "Unmapped Specialist", max_results=None)
 
@@ -575,7 +577,7 @@ def test_pipeline_rejects_linkedin_limit_above_configured_max(
 
     monkeypatch.setenv("LINKEDIN_MAX_RESULTS", "1")
     get_settings.cache_clear()
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    pipeline = Pipeline(llm=MockLLMProvider())
 
     with pytest.raises(ValueError, match="LINKEDIN_MAX_RESULTS"):
         pipeline.ingest("linkedin", "Data Scientist", max_results=3)
@@ -587,7 +589,7 @@ def test_process_pending_can_analyze_only_selected_jobs() -> None:
     from smartapply.database.models import Job, JobStatus
     from smartapply.pipeline import Pipeline
 
-    p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    p = Pipeline(llm=MockLLMProvider())
     first = p.ingest_text(
         text="Build RAG pipelines with Python.",
         title="Data Scientist NLP",
@@ -615,7 +617,7 @@ def test_process_pending_can_analyze_only_selected_jobs() -> None:
 def test_analysis_failure_is_returned_in_report(monkeypatch: pytest.MonkeyPatch) -> None:
     from smartapply.pipeline import Pipeline
 
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    pipeline = Pipeline(llm=MockLLMProvider())
     ingested = pipeline.ingest_text(
         text="Build RAG pipelines with Python.",
         title="Data Scientist NLP",
@@ -628,7 +630,7 @@ def test_analysis_failure_is_returned_in_report(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(pipeline._processor, "_analyze_one", fail_analysis)
 
-    pipeline.rank_pending(job_ids=ingested.job_ids, persist_shortlist=False)
+    pipeline.prepare_analysis(job_ids=ingested.job_ids)
     report = pipeline.analyze_jobs(ingested.job_ids)
 
     assert report.analyzed == 0
@@ -646,7 +648,7 @@ def test_analysis_failure_is_returned_in_report(monkeypatch: pytest.MonkeyPatch)
 def test_analysis_replaces_job_board_company_with_extracted_employer() -> None:
     MockLLMProvider.clear()
     MockLLMProvider.register(
-        "job_offer_analysis",
+        "job_offer_extraction",
         OfferExtractionOutput(
             role_type="Data Scientist IA",
             seniority="mid",
@@ -668,7 +670,7 @@ def test_analysis_replaces_job_board_company_with_extracted_employer() -> None:
     from smartapply.database.models import Job
     from smartapply.pipeline import Pipeline
 
-    p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    p = Pipeline(llm=MockLLMProvider())
     ingested = p.ingest_text(
         text=(
             "En tant qu'organisateur de forums de recrutement, Talents Handicap "
@@ -692,400 +694,12 @@ def test_analysis_replaces_job_board_company_with_extracted_employer() -> None:
         assert job.company == "EXAMPLE INDUSTRY"
 
 
-def test_rank_pending_scores_without_llm_analysis() -> None:
-    from smartapply.database import session_scope
-    from smartapply.database.models import Job, JobStatus
-    from smartapply.pipeline import Pipeline
-
-    p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
-    first = _ingest_search_offer(
-        text="Construire des modèles Machine Learning avec Python, SQL et PyTorch. CDI Paris.",
-        title="Data Scientist",
-        company="ScoreCo",
-        location="Paris",
-    )
-    second = _ingest_search_offer(
-        text="Analyser des données produit avec Python, SQL et expérimentation. CDI Lyon.",
-        title="Product Data Analyst",
-        company="RankCo",
-        location="Lyon",
-    )
-
-    report = p.rank_pending(
-        top_k_ranked=1,
-        job_ids=[first.job_ids[0], second.job_ids[0]],
-    )
-
-    assert report.total == 2
-    assert report.ranked == 2
-    assert report.shortlisted == 0
-    with session_scope() as s:
-        jobs = s.query(Job).filter(Job.id.in_(report.ranked_ids)).all()
-        assert all(job.score and job.score.final_score is not None for job in jobs)
-        assert all(job.analyzed_at is None for job in jobs)
-        assert sum(job.status == JobStatus.SHORTLISTED for job in jobs) == 0
-        assert sum(job.shortlisted_at is not None for job in jobs) == 0
-        assert sum(job.status == JobStatus.FILTERED for job in jobs) == 2
-        assert all(job.archived_at is None for job in jobs)
-
-
-@pytest.mark.parametrize(
-    ("legacy_disposition", "title", "description", "rejected"),
-    [
-        (
-            "uncertain",
-            "Data Scientist Stage",
-            "Stage de six mois en data science.",
-            True,
-        ),
-        (
-            "relevant",
-            "Machine Learning Engineer",
-            "Construire des modèles de machine learning avec Python. CDI à Paris.",
-            False,
-        ),
-    ],
-)
-def test_rank_pending_refilters_legacy_state_before_scoring(
-    legacy_disposition: str,
-    title: str,
-    description: str,
-    rejected: bool,
-) -> None:
-    from smartapply.database import session_scope
-    from smartapply.database.models import Job, JobStatus
-    from smartapply.database.repository import mark_filtered, set_score
-    from smartapply.pipeline import Pipeline
-
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
-    ingested = pipeline.ingest_text(
-        text=description,
-        title=title,
-        company="Legacy Filter Co",
-        location="Paris",
-    )
-    job_id = ingested.job_ids[0]
-    with session_scope() as session:
-        mark_filtered(session, job_id)
-        set_score(
-            session,
-            job_id,
-            components={
-                "filter_disposition": legacy_disposition,
-                "reasons": ["legacy_state"],
-            },
-        )
-
-    scored_ids: list[int] = []
-    rank = pipeline.scorer.rank
-
-    def capture_rank(jobs):
-        scored_ids.extend(int(job.id) for job in jobs)
-        return rank(jobs)
-
-    pipeline.scorer.rank = capture_rank
-    report = pipeline.rank_pending(job_ids=[job_id], persist_shortlist=False)
-
-    assert scored_ids == ([] if rejected else [job_id])
-    assert report.ranked_ids == ([] if rejected else [job_id])
-    with session_scope() as session:
-        job = session.get(Job, job_id)
-        assert job is not None and job.score is not None
-        assert job.score.components["filter_disposition"] == (
-            "rejected" if rejected else "pending_relevance"
-        )
-        assert job.score.components["hard_reject"]["ruleset_version"] == "hard-reject-v2"
-        assert job.score.components["hard_reject"]["rejected"] is rejected
-        assert (job.status == JobStatus.ARCHIVED) is rejected
-
-
-def test_explicit_override_revalidates_already_ranked_current_rejection() -> None:
-    from smartapply.database import session_scope
-    from smartapply.database.models import Job, JobStatus
-    from smartapply.database.repository import mark_ranked, set_score
-    from smartapply.pipeline import Pipeline
-    from smartapply.pipeline.process.filter_state import MANUAL_KEEP_OVERRIDE_REASON
-
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
-    ingested = _ingest_search_offer(
-        text="Stage de six mois en data science.",
-        title="Data Scientist Stage",
-        company="Override Co",
-        location="Paris",
-    )
-    job_id = ingested.job_ids[0]
-    pipeline.filter_pending(job_ids=[job_id])
-    with session_scope() as session:
-        job = session.get(Job, job_id)
-        assert job is not None and job.score is not None
-        job.archived_at = None
-        job.status = JobStatus.FILTERED
-        mark_ranked(session, job_id)
-        set_score(session, job_id, final_score=0.91)
-
-    scored_ids: list[int] = []
-    rank = pipeline.scorer.rank
-
-    def capture_rank(jobs):
-        scored_ids.extend(int(job.id) for job in jobs)
-        return rank(jobs)
-
-    pipeline.scorer.rank = capture_rank
-    report = pipeline.rank_pending(
-        job_ids=[job_id],
-        local_filter_override_ids=[job_id],
-        persist_shortlist=False,
-    )
-
-    assert scored_ids == [job_id]
-    assert report.ranked_ids == [job_id]
-    with session_scope() as session:
-        job = session.get(Job, job_id)
-        assert job is not None and job.score is not None
-        components = job.score.components
-        assert job.archived_at is None
-        assert components["filter_disposition"] == "pending_relevance"
-        assert components["hard_reject"]["rejected"] is True
-        assert MANUAL_KEEP_OVERRIDE_REASON in components["reasons"]
-
-
-def test_persisted_manual_keep_is_preserved_when_legacy_proof_is_rebuilt() -> None:
-    from smartapply.database import session_scope
-    from smartapply.database.models import Job
-    from smartapply.database.repository import mark_filtered, set_score
-    from smartapply.pipeline import Pipeline
-    from smartapply.pipeline.process.filter_state import MANUAL_KEEP_OVERRIDE_REASON
-
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
-    job_id = pipeline.ingest_text(
-        text="Stage de six mois en data science.",
-        title="Data Scientist Stage",
-        company="Persisted Override Co",
-        location="Paris",
-    ).job_ids[0]
-    with session_scope() as session:
-        mark_filtered(session, job_id)
-        set_score(
-            session,
-            job_id,
-            components={
-                "filter_disposition": "pending_relevance",
-                "reasons": [MANUAL_KEEP_OVERRIDE_REASON],
-            },
-        )
-
-    report = pipeline.rank_pending(job_ids=[job_id], persist_shortlist=False)
-
-    assert report.ranked_ids == [job_id]
-    with session_scope() as session:
-        job = session.get(Job, job_id)
-        assert job is not None and job.score is not None
-        components = job.score.components
-        assert job.archived_at is None
-        assert components["filter_disposition"] == "pending_relevance"
-        assert components["hard_reject"]["rejected"] is True
-        assert MANUAL_KEEP_OVERRIDE_REASON in components["reasons"]
-
-
-def test_nonarchived_rejected_scores_never_enter_ranking_selection() -> None:
-    from smartapply.database import session_scope
-    from smartapply.database.models import Job, JobStatus, ShortlistOrigin
-    from smartapply.database.repository import (
-        mark_analyzed,
-        mark_filtered,
-        mark_ranked,
-        set_score,
-        set_shortlisted,
-    )
-    from smartapply.pipeline import Pipeline
-
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
-    survivor = _ingest_search_offer(
-        text="Construire des modèles de machine learning avec Python. CDI à Paris.",
-        title="Machine Learning Engineer",
-        company="Survivor Co",
-        location="Paris",
-    ).job_ids[0]
-    rejected = _ingest_search_offer(
-        text="Stage de six mois en data science.",
-        title="Data Scientist Stage",
-        company="Rejected Co",
-        location="Paris",
-    ).job_ids[0]
-    pipeline.filter_pending(job_ids=[survivor, rejected])
-    with session_scope() as session:
-        rejected_job = session.get(Job, rejected)
-        assert rejected_job is not None
-        rejected_job.archived_at = None
-        rejected_job.status = JobStatus.FILTERED
-        mark_filtered(session, rejected)
-        for job_id, score in ((survivor, 0.20), (rejected, 0.99)):
-            mark_ranked(session, job_id)
-            mark_analyzed(session, job_id)
-            set_score(session, job_id, final_score=score)
-        assert (
-            set_shortlisted(
-                session,
-                rejected,
-                selected=True,
-                origin=ShortlistOrigin.MANUAL,
-            )
-            is not None
-        )
-
-    report = pipeline.rank_pending(top_k_ranked=1, persist_shortlist=True)
-
-    assert report.ranked_ids == [survivor]
-    assert report.shortlisted_ids == [survivor]
-    with session_scope() as session:
-        rejected_job = session.get(Job, rejected)
-        survivor_job = session.get(Job, survivor)
-        assert rejected_job is not None and survivor_job is not None
-        assert rejected_job.shortlist_origin == ShortlistOrigin.MANUAL
-        assert rejected_job.shortlisted_at is not None
-        assert survivor_job.shortlist_origin == ShortlistOrigin.AUTOMATIC
-
-
-def test_automatic_shortlist_averages_matching_and_llm_scores() -> None:
-    from smartapply.pipeline.process.ranking import RankingMixin
-
-    candidates = [
-        SimpleNamespace(
-            id=1, score=SimpleNamespace(final_score=0.99), analysis=SimpleNamespace(fit_score=0.10)
-        ),
-        SimpleNamespace(
-            id=2, score=SimpleNamespace(final_score=0.98), analysis=SimpleNamespace(fit_score=0.20)
-        ),
-        SimpleNamespace(
-            id=3, score=SimpleNamespace(final_score=0.97), analysis=SimpleNamespace(fit_score=0.30)
-        ),
-        SimpleNamespace(
-            id=4, score=SimpleNamespace(final_score=0.40), analysis=SimpleNamespace(fit_score=0.99)
-        ),
-        SimpleNamespace(
-            id=5, score=SimpleNamespace(final_score=0.30), analysis=SimpleNamespace(fit_score=0.98)
-        ),
-        SimpleNamespace(
-            id=6, score=SimpleNamespace(final_score=0.20), analysis=SimpleNamespace(fit_score=0.97)
-        ),
-    ]
-
-    selected = RankingMixin._mixed_score_shortlist(candidates, 5)
-
-    assert [job.id for job in selected] == [4, 5, 3, 2, 6]
-
-
-def test_each_ranking_run_replaces_the_previous_automatic_top() -> None:
-    from smartapply.database import session_scope
-    from smartapply.database.models import Job
-    from smartapply.pipeline import Pipeline
-
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
-    first = pipeline.ingest_text(
-        text="Machine learning, Python, PyTorch et modèles prédictifs.",
-        title="Data Scientist",
-        company="Alpha",
-        location="Paris",
-    )
-    second = pipeline.ingest_text(
-        text="Analyse produit, Python, SQL et expérimentation.",
-        title="Data Analyst",
-        company="Beta",
-        location="Paris",
-    )
-    ids = [first.job_ids[0], second.job_ids[0]]
-
-    initial = pipeline.rank_pending(top_k_ranked=2, job_ids=ids)
-    refreshed = pipeline.rank_pending(top_k_ranked=1)
-
-    assert initial.shortlisted == 0
-    assert refreshed.shortlisted == 0
-    with session_scope() as session:
-        jobs = session.query(Job).filter(Job.id.in_(ids)).all()
-        assert sum(job.shortlisted_at is not None for job in jobs) == 0
-        assert all(job.archived_at is None for job in jobs)
-
-
-def test_analysis_top_k_ignores_already_analyzed_higher_scored_offers() -> None:
-    from smartapply.database import session_scope
-    from smartapply.database.models import Job
-    from smartapply.pipeline import Pipeline
-
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
-    first = pipeline.ingest_text(
-        text="Machine learning, Python, PyTorch et modèles prédictifs.",
-        title="Data Scientist",
-        company="AlreadyAnalyzedCo",
-        location="Paris",
-    )
-    second = pipeline.ingest_text(
-        text="Analyse produit, Python, SQL et expérimentation.",
-        title="Data Analyst",
-        company="PendingAnalysisCo",
-        location="Paris",
-    )
-    first_id = first.job_ids[0]
-    second_id = second.job_ids[0]
-
-    pipeline.rank_pending(top_k_ranked=1, job_ids=[first_id, second_id])
-    pipeline.analyze_jobs([first_id])
-    report = pipeline.process_pending(top_k_analyze=1)
-
-    assert report.analyzed == 1
-    with session_scope() as session:
-        analyzed = session.get(Job, second_id)
-        assert analyzed is not None and analyzed.analyzed_at is not None
-
-
-def test_automatic_refresh_preserves_manually_pinned_offer() -> None:
-    from smartapply.database import session_scope
-    from smartapply.database.models import Job, JobStatus, ShortlistOrigin
-    from smartapply.database.repository import mark_analyzed, set_shortlisted
-    from smartapply.pipeline import Pipeline
-
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
-    first = pipeline.ingest_text(
-        text="Machine learning, Python, PyTorch et modèles prédictifs.",
-        title="Data Scientist",
-        company="Alpha",
-        location="Paris",
-    )
-    second = pipeline.ingest_text(
-        text="Analyse produit, Python, SQL et expérimentation.",
-        title="Data Analyst",
-        company="Beta",
-        location="Paris",
-    )
-    ids = [first.job_ids[0], second.job_ids[0]]
-    initial = pipeline.rank_pending(top_k_ranked=1, job_ids=ids)
-    manual_id = next(job_id for job_id in ids if job_id not in initial.shortlisted_ids)
-    with session_scope() as session:
-        mark_analyzed(session, manual_id)
-        set_shortlisted(
-            session,
-            manual_id,
-            selected=True,
-            origin=ShortlistOrigin.MANUAL,
-        )
-
-    refreshed = pipeline.rank_pending(top_k_ranked=1)
-
-    assert set(refreshed.shortlisted_ids) == {manual_id}
-    with session_scope() as session:
-        manual = session.get(Job, manual_id)
-        assert manual is not None
-        assert manual.shortlist_origin == ShortlistOrigin.MANUAL
-        assert manual.shortlisted_at is not None
-        assert manual.status == JobStatus.SHORTLISTED
-        assert manual.archived_at is None
-
-
 def test_filter_pending_archives_internships_before_llm() -> None:
     from smartapply.database import session_scope
     from smartapply.database.models import Job, JobStatus
     from smartapply.pipeline import Pipeline
 
-    p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    p = Pipeline(llm=MockLLMProvider())
     stage = _ingest_search_offer(
         text="Stage de six mois en data science.",
         title="Data Scientist Stage",
@@ -1111,6 +725,7 @@ def test_filter_pending_archives_internships_before_llm() -> None:
         cdi_job = s.get(Job, cdi.job_ids[0])
         assert stage_job.status == JobStatus.ARCHIVED
         assert stage_job.score.components["rejection_stage"] == "local_filter"
+        assert stage_job.score.components["archive_origin"] == "automatic_filter"
         assert any(
             "blocked_contract_visible_text:stage" in reason
             for reason in stage_job.score.components["rejection_reasons"]
@@ -1123,7 +738,7 @@ def test_filter_pending_persists_offer_for_future_relevance_classification() -> 
     from smartapply.database.models import Job
     from smartapply.pipeline import Pipeline
 
-    p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    p = Pipeline(llm=MockLLMProvider())
     ingested = _ingest_search_offer(
         text="Concevoir des architectures neurosymboliques pour l'aide à la décision.",
         title="Ingénieur en systèmes décisionnels avancés",
@@ -1137,9 +752,6 @@ def test_filter_pending_persists_offer_for_future_relevance_classification() -> 
     assert report.rejected == 0
     assert report.pending_relevance == 1
     assert report.pending_relevance_ids == ingested.job_ids
-    ranking_report = p.rank_pending(job_ids=ingested.job_ids)
-    assert ranking_report.ranked == 1
-    assert ranking_report.shortlisted == 0
     with session_scope() as session:
         job = session.get(Job, ingested.job_ids[0])
         assert job is not None
@@ -1147,65 +759,6 @@ def test_filter_pending_persists_offer_for_future_relevance_classification() -> 
         assert job.filtered_at is not None
         assert job.score.components["filter_disposition"] == "pending_relevance"
         assert job.score.components["hard_reject"]["rejected"] is False
-
-
-def test_refiltering_clears_stale_relevance_scores() -> None:
-    from smartapply.database import session_scope
-    from smartapply.database.models import Job
-    from smartapply.pipeline import Pipeline
-
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
-    ingested = pipeline.ingest_text(
-        text="Build machine-learning models with Python.",
-        title="Machine Learning Engineer",
-        company="RefreshCo",
-        location="Paris",
-    )
-    job_id = ingested.job_ids[0]
-
-    pipeline.rank_pending(job_ids=[job_id])
-    with session_scope() as session:
-        job = session.get(Job, job_id)
-        assert job is not None and job.score.final_score is not None
-        job.score.components = {
-            **job.score.components,
-            "future_audit_namespace": {"source": "independent-maintenance"},
-        }
-        job.filtered_at = None
-        job.analyzed_at = None
-
-    pipeline.filter_pending(job_ids=[job_id])
-
-    with session_scope() as session:
-        job = session.get(Job, job_id)
-        assert job is not None and job.score is not None
-        for field in (
-            "rule_based_score",
-            "semantic_score",
-            "skill_score",
-            "title_score",
-            "seniority_score",
-            "location_score",
-            "domain_score",
-            "final_score",
-        ):
-            assert getattr(job.score, field) is None
-        assert job.score.components["filter_disposition"] == "pending_relevance"
-        assert job.score.components["future_audit_namespace"] == {
-            "source": "independent-maintenance"
-        }
-        assert "semantic" not in job.score.components
-        assert "final" not in job.score.components
-        assert job.ranked_at is None
-
-    ranking_report = pipeline.rank_pending(job_ids=[job_id], persist_shortlist=False)
-
-    assert ranking_report.ranked == 1
-    with session_scope() as session:
-        job = session.get(Job, job_id)
-        assert job is not None and job.score is not None
-        assert job.ranked_at is not None
-        assert job.score.final_score is not None
 
 
 def test_full_pipeline_with_mocked_dependencies() -> None:
@@ -1217,7 +770,7 @@ def test_full_pipeline_with_mocked_dependencies() -> None:
     _register_llm_responses()
     from smartapply.pipeline import Pipeline
 
-    p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    p = Pipeline(llm=MockLLMProvider())
 
     # Mock two fetched jobs without HTTP; automatic filtering remains in scope.
     _ingest_search_offer(
@@ -1252,7 +805,6 @@ def test_full_pipeline_with_mocked_dependencies() -> None:
         analyzed = s.scalar(select(Job).where(Job.company == "Acme AI"))
         assert analyzed is not None and analyzed.analysis is not None
         assert analyzed.ranked_at is None
-        assert analyzed.score.final_score is None
         raw = analyzed.analysis.raw_response
         assert raw["company_context"] == (
             "Acme AI builds HealthTech tools for clinical NLP workflows."
@@ -1277,7 +829,7 @@ def test_run_manual_offer_executes_direct_manual_pipeline() -> None:
     from smartapply.offers import ManualOfferInput
     from smartapply.pipeline import Pipeline
 
-    p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    p = Pipeline(llm=MockLLMProvider())
     report = p.run_manual_offer(
         ManualOfferInput(
             company="Acme AI",
@@ -1296,7 +848,7 @@ def test_run_manual_offer_executes_direct_manual_pipeline() -> None:
         assert job is not None
         assert job.filtered_at is not None
         assert job.ranked_at is None
-        assert job.score is not None and job.score.final_score is None
+        assert job.score is not None and job.analysis is not None
     application = report["applications"][0]
     assert application.application_id is not None
     assert application.form_url == "https://jobs.acme.ai/42"
@@ -1313,7 +865,7 @@ def test_apply_to_generates_only_application_documents() -> None:
     from smartapply.database.models import Application, GeneratedDocument, JobStatus
     from smartapply.pipeline import Pipeline
 
-    p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    p = Pipeline(llm=MockLLMProvider())
     ingested = p.ingest_text(
         text="Build RAG pipelines with Python and PyTorch for a product team.",
         title="Machine Learning Engineer",
@@ -1359,7 +911,7 @@ def test_force_regenerate_refreshes_the_application_llm_cache() -> None:
     from smartapply.database import Application, session_scope
     from smartapply.pipeline import Pipeline
 
-    p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    p = Pipeline(llm=MockLLMProvider())
     ingested = p.ingest_text(
         text="Build RAG pipelines with Python and PyTorch for a product team.",
         title="Machine Learning Engineer",
@@ -1411,7 +963,7 @@ def test_application_selects_cv_then_generates_summary_and_letter_then_persists_
     from smartapply.pipeline import Pipeline
     from smartapply.profile import get_profile
 
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    pipeline = Pipeline(llm=MockLLMProvider())
     offer_description = (
         "Build RAG pipelines with Python and PyTorch for a product team. "
         "The product must retain source citations for clinical teams."
@@ -1434,10 +986,11 @@ def test_application_selects_cv_then_generates_summary_and_letter_then_persists_
     pipeline.process_pending(top_k_analyze=1, job_ids=[job_id])
     assert pipeline.llm.cheap_model != pipeline.llm.smart_model
     assert [call["purpose"] for call in calls] == [
-        "job_offer_analysis",
+        "job_scope_screening",
+        "job_offer_extraction",
         "job_fit_assessment",
     ]
-    assert [call["schema"] for call in calls] == [OfferExtractionOutput, JobFitDecisionEvaluation]
+    assert [call["schema"] for call in calls] == [JobScopeScreening, OfferExtractionOutput, JobFitDecisionEvaluation]
     assert all(call["model"] == pipeline.llm.cheap_model for call in calls)
     calls.clear()
     with session_scope() as session:
@@ -1556,7 +1109,7 @@ def test_advisory_review_does_not_block_or_rewrite_application(category: str) ->
     from smartapply.database.models import Application, JobStatus
     from smartapply.pipeline import Pipeline
 
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    pipeline = Pipeline(llm=MockLLMProvider())
     ingested = pipeline.ingest_text(
         text="Build RAG pipelines with Python and PyTorch for a product team.",
         title="Data Scientist NLP",
@@ -1605,7 +1158,7 @@ def test_confirmed_local_correction_survives_advisory_only_confirmation() -> Non
     from smartapply.database.models import Application, JobStatus
     from smartapply.pipeline import Pipeline
 
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    pipeline = Pipeline(llm=MockLLMProvider())
     ingested = pipeline.ingest_text(
         text="Build RAG pipelines with Python and PyTorch for a product team.",
         title="Data Scientist NLP",
@@ -1716,7 +1269,7 @@ def test_confirmed_cv_title_correction_is_persisted_and_rendered_without_reassem
     from smartapply.database.models import Application, JobStatus
     from smartapply.pipeline import Pipeline
 
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    pipeline = Pipeline(llm=MockLLMProvider())
     ingested = pipeline.ingest_text(
         text="Build RAG pipelines with Python and PyTorch for a product team.",
         title="Data Scientist NLP",
@@ -1848,7 +1401,7 @@ def test_unavailable_review_keeps_dossier_available_with_incomplete_control() ->
     from smartapply.llm import LLMError
     from smartapply.pipeline import Pipeline
 
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    pipeline = Pipeline(llm=MockLLMProvider())
     ingested = pipeline.ingest_text(
         text="Build RAG pipelines with Python and PyTorch for a product team.",
         title="Data Scientist NLP",
@@ -1908,7 +1461,7 @@ def test_overlimit_documents_remain_available_with_diagnostics_without_truncatio
     from smartapply.database.models import Application, JobStatus
     from smartapply.pipeline import Pipeline
 
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    pipeline = Pipeline(llm=MockLLMProvider())
     ingested = pipeline.ingest_text(
         text="Build RAG pipelines with Python and PyTorch for a product team.",
         title="Data Scientist NLP",
@@ -1987,7 +1540,7 @@ def test_invalid_review_source_persists_incomplete_control_without_factual_accus
     from smartapply.database.models import Application, JobStatus
     from smartapply.pipeline import Pipeline
 
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    pipeline = Pipeline(llm=MockLLMProvider())
     ingested = pipeline.ingest_text(
         text="Build RAG pipelines with Python and PyTorch for a product team.",
         title="Data Scientist NLP",
@@ -2049,7 +1602,7 @@ def test_unresolved_document_review_is_preserved_without_blocking_the_dossier() 
     from smartapply.database.models import Application, JobStatus
     from smartapply.pipeline import Pipeline
 
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    pipeline = Pipeline(llm=MockLLMProvider())
     ingested = pipeline.ingest_text(
         text="Build RAG pipelines with Python and PyTorch for a product team.",
         title="Data Scientist NLP",
@@ -2084,7 +1637,7 @@ def test_failed_generation_releases_reservation_so_retry_is_possible() -> None:
     from smartapply.database.models import Application
     from smartapply.pipeline import Pipeline
 
-    p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    p = Pipeline(llm=MockLLMProvider())
     ingested = p.ingest_text(
         text="Build RAG pipelines with Python and PyTorch for a product team.",
         title="Machine Learning Engineer",
@@ -2121,7 +1674,7 @@ def test_atomic_output_removes_partial_files_and_releases_reservation() -> None:
     from smartapply.database.models import Application
     from smartapply.pipeline import Pipeline
 
-    p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    p = Pipeline(llm=MockLLMProvider())
     ingested = p.ingest_text(
         text="Build RAG pipelines with Python and PyTorch for a product team.",
         title="Machine Learning Engineer",
@@ -2152,7 +1705,7 @@ def test_atomic_force_regeneration_restores_previous_complete_directory() -> Non
 
     from smartapply.pipeline import Pipeline
 
-    p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    p = Pipeline(llm=MockLLMProvider())
     ingested = p.ingest_text(
         text="Build RAG pipelines with Python and PyTorch for a product team.",
         title="Machine Learning Engineer",
@@ -2187,7 +1740,7 @@ def test_old_empty_reservation_is_reclaimed_after_a_crash() -> None:
     from smartapply.database.repository import create_or_get_application
     from smartapply.pipeline import Pipeline
 
-    p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    p = Pipeline(llm=MockLLMProvider())
     ingested = p.ingest_text(
         text="Build RAG pipelines with Python and PyTorch for a product team.",
         title="Machine Learning Engineer",
@@ -2212,7 +1765,7 @@ def test_old_empty_reservation_is_reclaimed_after_a_crash() -> None:
 def test_pipeline_invalid_source_raises() -> None:
     from smartapply.pipeline import Pipeline
 
-    p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    p = Pipeline(llm=MockLLMProvider())
     with pytest.raises(RuntimeError):
         p.ingest("serpapi", "data scientist")  # no API key in tests
 

@@ -573,11 +573,12 @@ def _ingest_history_is_protected(job: Job) -> bool:
     application = job.application
     return bool(
         job.archived_at is not None
-        or job.status in {JobStatus.ARCHIVED, JobStatus.SENT, JobStatus.INTERVIEW, JobStatus.REJECTED}
+        or job.status in {JobStatus.ARCHIVED, JobStatus.SENT, JobStatus.INTERVIEW}
         or (application is not None and (
             application.form_submitted_at is not None
-            or application.status in {JobStatus.SENT, JobStatus.INTERVIEW,
-                                      JobStatus.REJECTED, JobStatus.ARCHIVED}
+            or application.status in {
+                JobStatus.SENT, JobStatus.INTERVIEW, JobStatus.ARCHIVED,
+            }
             or application.status != JobStatus.ANALYZED
             or application.cv_json or application.cv_docx_path or application.cv_pdf_path
         ))

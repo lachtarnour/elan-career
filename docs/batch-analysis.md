@@ -1,104 +1,50 @@
-# Batch analysis
+# Analyse par Batch
 
-The **Analyse** page sits after **Doublons**. Its offer table follows the
-**Offres → Nouvelle** layout: sortable company, title, experience, location,
-publication date and analysis state columns, adapting to the available width.
-**À analyser** opens first. Select individual rows or all displayed rows, then
-use **Analyse par Batch** or **Analyse immédiate** for precisely that selection.
-**Offres de l’analyse** keeps every offer in the selected run visible and searchable, with its
-individual progress and a link to the full offer. Several Batch runs can progress at once on distinct offers,
-alongside an immediate analysis. The run selector keeps their progress, retry
-and cancellation independent. Offers must pass deterministic rejection,
-be active and unanalysed, and have no application or unresolved duplicate review
-in their group. Numeric ranking and the historical Top 25 do not limit analysis.
-The two offer classes remain **Rejeté** and **À classer**.
+[Accueil de la documentation](README.md) · [Parcours d'une offre](parcours-offre.md) · [Fournisseurs IA](llm-providers.md#batch-et-suivi)
 
-Analysis uses the existing cheap OpenAI model and the same two structured calls:
+La page **Analyse**, après **Doublons**, regroupe les offres actives à classer. Sélectionnez des lignes ou toutes les lignes affichées, puis lancez **Analyse par Batch** (mode économique) ou **Analyse immédiate** pour cette sélection. Les deux modes appliquent le filtre déterministe et les mêmes contrats d'extraction et d'évaluation. Une offre déjà analysée, dotée d'une candidature ou liée à un doublon non résolu n'entre pas dans la file courante. Aucun classement numérique ni ancien « Top 25 » ne limite le nombre d'offres analysables.
 
-1. **Extraction**: offer facts and requirements, independent of the profile.
-2. **Évaluation**: comparison with the candidate profile.
+L'analyse comprend trois étapes structurées :
 
-In Économique mode, each phase is submitted through OpenAI Batch, with a completion window of up to
-24 hours per phase. The second phase starts automatically after the first phase's
-successful outputs have been validated. Batch processing has a 50% discount
-relative to the corresponding standard token rates. It requires
-`LLM_PROVIDER=openai` and a configured `OPENAI_API_KEY`.
-Immédiate mode runs the same two calls per offer through the standard endpoint
-and publishes each complete analysis without waiting for a Batch window.
+1. **Préfiltre des missions**, indépendant du candidat. Seules les missions clairement hors périmètre et suffisamment décrites sont archivées.
+2. **Extraction** des faits et exigences des annonces conservées, sans recevoir le verdict du préfiltre.
+3. **Évaluation** de ces faits par rapport au profil candidat. Seule une analyse complète est publiée dans `job_analyses`.
 
-## Progress and recovery
+Le mode immédiat exécute les trois étapes pour chaque offre et publie chaque analyse terminée. Le mode Batch soumet chaque étape à **OpenAI Batch** ou **Anthropic Message Batches** selon le fournisseur configuré. L'extraction attend la fin du préfiltre ; l'évaluation commence après validation des extractions réussies. Une clé API du fournisseur choisi est nécessaire. Les différences de transport, de récupération d'un envoi ambigu et d'estimation des coûts sont décrites dans [Fournisseurs IA](llm-providers.md#batch-et-suivi).
 
-The upper workspace places the offer table on the left and the offer
-reading pane on the right, with an adjustable divider. Clicking a row opens its full
-description, classification reason and text zoom directly on this page;
-checkboxes independently select offers for analysis. The description component
-is shared with **Offres**, and only the opened offer body is read from SQLite.
-Analysis preview reads use their own state and latest-request guard, preserving
-the dossier and note drafts in **Offres**.
-A transparent tracking area, separated by a single fine line below, follows the selected run on one three-step
-timeline and shows its status, Batch count and analysed offer count. **Voir les détails** reveals the size and progress of
-each Batch by phase, the last update and individual failures. Details scroll
-independently and never hide the table or its bottom action bar. Selection,
-search and sorting survive passive updates and opening or closing details.
-The run selector, retry and stop actions remain directly accessible.
-Customer messages explain service failures without displaying API permissions
-or obsolete errors on completed or cancelled runs. Provider counters count requests, which can differ
-from offer counts because exact copies share a request, cache hits need no request
-and retries add attempts. There is no reliable queue position or exact finish time.
+## Travail dans la page Analyse
 
-Élan checks every two minutes while a run is active, independently of the visible
-page. **Actualiser** checks immediately. OpenAI continues submitted batches while
-Élan is closed; local importing and launching the next phase resume when Élan
-reopens. No extra background service is installed.
+La liste affiche notamment l'entreprise, le poste, l'expérience, le lieu, la date de publication et l'état d'analyse. Cliquer une ligne ouvre sa description complète et les raisons de classification ; cocher la ligne l'ajoute à la sélection. La recherche, le tri et la sélection restent en place lors des mises à jour passives. La lecture de l'offre dans **Analyse** ne modifie pas le dossier ou les notes ouverts dans **Offres**.
 
-**Reprendre** sends only failed requests. Valid extractions from that run survive
-an interrupted evaluation. A cancellation preserves already imported analyses,
-requests cancellation from OpenAI and prevents another phase from being sent.
-Partial successful provider results remain usable after expiration or cancellation.
-The preparation screen also has an **Arrêter** action: a cancellation before a
-provider submission creates no Batch; an already submitted Batch receives a
-cancellation request and remains visible until OpenAI confirms its final state.
+La zone de suivi montre le parcours sélectionné, son état, le nombre de lots et les offres analysées. **Voir les détails** présente l'avancement par étape, les dernières mises à jour et les échecs individuels. Plusieurs parcours Batch peuvent avancer en parallèle sur des offres distinctes, en même temps qu'une analyse immédiate. Le compteur de requêtes fournisseur peut différer du nombre d'offres : les copies exactes peuvent partager une requête, le cache évite certains appels et les reprises ajoutent des tentatives. Il n'existe pas de position fiable dans la file ni d'heure exacte de fin.
 
-The current exact response cache and its retention stay unchanged. Only complete
-analyses enter `job_analyses`; a Batch execution journal records intermediate
-results for recovery. Repeated polling imports neither results nor usage twice.
-Offer, profile and group history are checked before submission, before evaluation
-and before publication. Obsolete results are skipped and explained on the page.
+## Suivi, reprise et annulation
 
-If a submission's outcome is uncertain, Élan searches OpenAI using the journaled
-metadata instead of resending it. An unresolved submission stays visibly marked
-**Envoi à vérifier**. Repeated checks cannot create another paid batch.
+Élan vérifie les parcours actifs toutes les deux minutes, même lorsque la page n'est pas visible. **Actualiser** déclenche une vérification immédiate. Les lots déjà soumis continuent chez le fournisseur lorsque l'application est fermée ; l'import local et le lancement de l'étape suivante reprennent à la réouverture, sans service supplémentaire installé en arrière-plan.
 
-## Code responsibilities
+**Reprendre** renvoie uniquement les requêtes en échec. Une extraction valide survit à une interruption pendant l'évaluation. **Arrêter** avant l'envoi ne crée pas de lot ; après l'envoi, Élan demande l'annulation au fournisseur et attend sa confirmation. Les analyses et résultats partiels déjà importés sont conservés. Une annulation empêche la soumission d'une nouvelle étape pour ce parcours et n'affecte pas les autres parcours.
 
-| Module | Responsibility |
+Le journal Batch sauvegarde les requêtes, résultats et états nécessaires à la reprise. L'import répété ne publie pas deux fois un résultat et ne double pas son usage. L'offre, le profil et l'historique du groupe sont revérifiés avant envoi, avant évaluation et avant publication ; un résultat devenu obsolète est écarté et signalé.
+
+Si le fournisseur n'a pas répondu à l'envoi d'un lot, Élan affiche **Envoi à vérifier** et utilise la procédure de récupération propre au fournisseur. Il n'envoie pas automatiquement une seconde fois les requêtes payantes. Voir [le cas d'envoi incertain](llm-providers.md#envoi-dont-la-réponse-est-perdue).
+
+## Checkpoints
+
+Chaque tentative de préfiltre est conservée dans `scope_checkpoints`, avec sa clé, son résultat ou son erreur fail-open. Une reprise identique ne relance pas cette étape.
+
+### Extraction
+
+Une extraction validée en attente d'évaluation reste dans `analysis_checkpoints`. Les deux modes la réutilisent uniquement si le modèle, le fournisseur, les paramètres d'effort, les prompts, le schéma et l'entrée normalisée correspondent. L'expiration du cache de réponse n'efface pas ce checkpoint. Une analyse complète le retire. Un résultat du parcours actuel peut aussi être retrouvé dans son journal Batch par sa clé de requête exacte.
+
+## Repères dans le code
+
+| Module | Responsabilité |
 | --- | --- |
-| `llm/batch.py` | JSONL requests, SDK transport, provider states and output parsing |
-| `database/analysis_batches.py` | Durable runs, items and submission journal |
-| `pipeline/process/analysis_admission.py` | Shared deterministic admission and history safeguards |
-| `pipeline/batch_analysis/coordinator.py` | Two-phase transitions, recovery, retry and cancellation |
-| `pipeline/batch_analysis/results.py` | Existing prompt/schema/cache contracts and atomic result import |
-| `pipeline/batch_analysis/presentation.py` | Lightweight progress and eligible offer list |
-| `desktop/analysis_services.py` | Desktop facade |
-| `desktop/analysis_controller.py` | Worker scheduling, polling and completion notification |
-| `desktop/analysis_offer_controller.py` | Independent, asynchronous offer preview |
-| `desktop/qml/components/AnalysisOfferDetail.qml` | Offer reading pane and zoom |
-| `desktop/qml/components/OfferDescription.qml` | Shared description rendering in Offres and Analyse |
-| `desktop/qml/pages/AnalysisPage.qml` | Dedicated analysis workspace |
-
-See the [OpenAI Batch guide](https://developers.openai.com/api/docs/guides/batch)
-for provider behavior and limits.
-
-## Interrupted analyses
-
-A validated extraction awaiting evaluation is stored in `analysis_checkpoints`.
-Both execution modes resume it only when the model, prompts, normalized source
-input and schema match exactly. Cache expiry does not erase this checkpoint.
-A complete published analysis removes it. Earlier Batch journals can be recovered
-lazily through their persisted extraction request key.
-
-Cancellation applies to the selected launched Batch parcours. While provider
-confirmation is pending, that parcours remains visible and reserves its offers.
-Once confirmed, it disappears from the page; the execution journal and received
-results remain available for safe resumption. Other parcours are unaffected.
-Batch monitoring and cancellation remain available during immediate analysis.
+| `smartapply/llm/batch.py`, `smartapply/llm/anthropic_batch.py` | Transport, états et lecture des résultats Batch |
+| `smartapply/database/analysis_batches.py` | Parcours, éléments et journal d'envoi durables |
+| `smartapply/pipeline/process/analysis_admission.py` | Admission des offres et protection de leur historique |
+| `smartapply/pipeline/batch_analysis/coordinator.py` | Passage entre les étapes, reprise et annulation |
+| `smartapply/pipeline/batch_analysis/results.py` | Validation et import des résultats |
+| `smartapply/pipeline/batch_analysis/presentation.py` | Progression et liste des offres admissibles |
+| `smartapply/desktop/analysis_services.py`, `analysis_controller.py` | Actions et suivi depuis l'application |
+| `smartapply/desktop/qml/pages/AnalysisPage.qml` | Espace Analyse |

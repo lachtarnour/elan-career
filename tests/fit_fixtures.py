@@ -2,16 +2,28 @@
 
 import json
 
-from smartapply.llm.schemas import JobFitDecisionEvaluation, JobFitEvaluation
+from smartapply.config import get_llm_settings
+from smartapply.llm.schemas import JobFitDecisionEvaluation
+from smartapply.llm_policy import resolve_route
+from smartapply.pipeline.process.scope_screening import scope_context
 
 
-def decision_response(
-    *, states=("strong_fit", "strong_fit", "credible_limited_adaptation"), conflict="unknown"
-):
+def screening_context():
+    settings = get_llm_settings()
+    route = resolve_route(settings, "job_scope_screening")
+    return scope_context(
+        provider=route.provider,
+        model=route.model,
+        settings=settings,
+        max_completion_tokens=route.max_output_tokens,
+        effort=route.reasoning,
+    )
+
+
+def decision_response(*, states=("strong_fit", "strong_fit", "credible_fit")):
     return {
         "decision": {
             **dict(zip(("missions", "essentials", "responsibilities"), states, strict=True)),
-            "preference_conflict": conflict,
         }
     }
 
@@ -76,30 +88,35 @@ def evaluation_from_user(user, *, levels=(4, 3, 3), reasons=None):
                     "text": "Appui central partiel dans cette fixture",
                 }
             )
-    if user.startswith("=== SCORING POLICY VERSION ===\nevidence_fit_v6"):
-        states = (
-            "very_low_support",
-            "weak_support",
-            "partial_core_fit",
-            "credible_limited_adaptation",
-            "strong_fit",
-        )
-        return JobFitDecisionEvaluation.model_validate(
-            {
-                "decision": {
-                    **{axis: states[level] for axis, level in zip(dimensions, levels, strict=True)},
-                    "preference_conflict": "unknown",
-                },
-                "dimensions": {
-                    axis: {"findings": item["findings"]} for axis, item in dimensions.items()
-                },
-                "issues": [
-                    {key: value for key, value in item.items() if key != "code"} for item in issues
-                ],
-                "neutral_offer_refs": [],
-                "offer_interpretations": [],
-            }
-        )
-    return JobFitEvaluation.model_validate(
-        {"dimensions": dimensions, "issues": issues, "neutral_offer_refs": []}
+    states = (
+        "very_low_support",
+        "weak_support",
+        "partial_core_fit",
+        "credible_fit",
+        "strong_fit",
+    )
+    return JobFitDecisionEvaluation.model_validate(
+        {
+            "decision": {
+                **{axis: states[level] for axis, level in zip(dimensions, levels, strict=True)},
+            },
+            "dimensions": {
+                axis: {"findings": item["findings"]} for axis, item in dimensions.items()
+            },
+            "issues": [
+                {key: value for key, value in item.items() if key != "code"} for item in issues
+            ],
+            "admissibility": {
+                dimension: {"status": "compatible", "findings": []}
+                for dimension in ("mandatory_conditions", "candidate_preferences")
+            },
+            "reliability": {
+                "offer_information": "Activités et capacités attendues documentées",
+                "candidate_information": "Réalisations et compétences renseignées",
+                "traceability": "Appuis reliés aux références fournies",
+                "business_uncertainties": [],
+            },
+            "neutral_offer_refs": [],
+            "offer_interpretations": [],
+        }
     )

@@ -34,7 +34,7 @@ from smartapply.pipeline.process.filter_state import (
 from smartapply.pipeline.reports import LocalFilterReport
 from smartapply.pipeline.snapshots import check_cancelled, job_is_active, job_snapshot_key
 
-_SUBMITTED_STATUSES = {JobStatus.SENT, JobStatus.INTERVIEW, JobStatus.REJECTED}
+_SUBMITTED_STATUSES = {JobStatus.SENT, JobStatus.INTERVIEW}
 
 
 def analysis_group_available(
@@ -267,7 +267,7 @@ class AnalysisAdmissionMixin:
         include_analyzed: bool = False,
         exclude_applications: bool = True,
     ) -> LocalFilterReport:
-        """Repair deterministic filter state before analysis, without embeddings.
+        """Repair deterministic filter state before analysis.
 
         Explicit keep overrides retain their audit. Existing workflow records
         receive metadata repairs only; their analysis, rank and dossier survive.

@@ -1,12 +1,11 @@
 """Ownership rules for the shared ``job_scores.components`` JSON object.
 
-Each pipeline phase may replace only the keys it owns. Independent audit and
-maintenance namespaces must survive later filtering and ranking passes.
+Filter updates preserve independent audit and maintenance namespaces.
 """
 
 from __future__ import annotations
 
-RANKING_COMPONENT_KEYS = frozenset(
+LEGACY_MATCH_COMPONENT_KEYS = frozenset(
     {
         "rule_based",
         "semantic",
@@ -32,22 +31,13 @@ FILTER_COMPONENT_KEYS = frozenset(
 )
 
 
-def replace_ranking_components(
-    previous: dict[str, object],
-    current: dict[str, object],
-) -> dict[str, object]:
-    """Replace ranking values and preserve all independent namespaces."""
-
-    return _replace_owned(previous, current, RANKING_COMPONENT_KEYS)
-
-
 def replace_filter_components(
     previous: dict[str, object],
     current: dict[str, object],
 ) -> dict[str, object]:
-    """Replace active filter state and invalidate stale ranking values."""
+    """Replace active filter state and discard legacy Match values."""
 
-    owned = FILTER_COMPONENT_KEYS | RANKING_COMPONENT_KEYS
+    owned = FILTER_COMPONENT_KEYS | LEGACY_MATCH_COMPONENT_KEYS
     return _replace_owned(previous, current, owned)
 
 
@@ -55,7 +45,7 @@ def replace_filter_state_components(
     previous: dict[str, object],
     current: dict[str, object],
 ) -> dict[str, object]:
-    """Replace filter metadata while preserving an existing historical rank."""
+    """Replace filter metadata while preserving unrelated evidence."""
 
     return _replace_owned(previous, current, FILTER_COMPONENT_KEYS)
 
@@ -71,8 +61,7 @@ def _replace_owned(
 
 __all__ = [
     "FILTER_COMPONENT_KEYS",
-    "RANKING_COMPONENT_KEYS",
+    "LEGACY_MATCH_COMPONENT_KEYS",
     "replace_filter_components",
     "replace_filter_state_components",
-    "replace_ranking_components",
 ]

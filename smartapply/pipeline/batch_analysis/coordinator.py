@@ -14,7 +14,7 @@ from uuid import uuid4
 from sqlalchemy import select
 
 from smartapply.concurrency import job_operation
-from smartapply.config import get_settings
+from smartapply.config import get_llm_settings
 from smartapply.database import session_scope, write_session_scope
 from smartapply.database.analysis_batches import (
     ACTIVE_ANALYSIS_RUN_STATES,
@@ -23,34 +23,40 @@ from smartapply.database.analysis_batches import (
     AnalysisBatchWave,
 )
 from smartapply.database.repository.llm_cache import purge_expired_cache
-from smartapply.llm.batch import BatchRequest, OpenAIBatchTransport, encode_requests, split_requests
+from smartapply.llm.batch import BatchRequest, encode_requests, get_batch_transport, split_requests
 from smartapply.llm.fit_context import build_fit_context
 from smartapply.llm.provider import LLMValidationError
+from smartapply.llm.routes import resolve_route
 from smartapply.logging_setup import get_logger
 from smartapply.pipeline.batch_analysis.locking import batch_operation
 from smartapply.pipeline.batch_analysis.results import (
+    FrozenConfigurationError,
     accept_cache,
     current_job,
+    fail_open_screening,
     import_result,
     item_request,
     new_item,
+    phase_route,
 )
+from smartapply.pipeline.process.scope_screening import scope_context
 from smartapply.pipeline.snapshots import check_cancelled
 
 logger = get_logger(__name__)
 ACTIVE_RUN_STATES = ACTIVE_ANALYSIS_RUN_STATES
-PENDING_ITEM_STATES = ("extraction_pending", "evaluation_pending")
+PENDING_ITEM_STATES = ("screening_pending", "extraction_pending", "evaluation_pending")
 POLLING_RUN_STATES = ("active", "attention")
 
 
-def _upload_access_message(error: str) -> str:
-    if "api.files.write" in error:
+def _upload_access_message(error: str, provider="openai") -> str:
+    label = "Anthropic" if provider == "anthropic" else "OpenAI"
+    if provider == "openai" and "api.files.write" in error:
         return (
             "Accès OpenAI requis : la clé utilisée ne peut pas envoyer les fichiers Batch "
             "(api.files.write). Corrige ses permissions, puis reprends cette analyse."
         )
     return (
-        "L’envoi du fichier Batch a été refusé par OpenAI. Vérifie les permissions "
+        f"L’envoi Batch a été refusé par {label}. Vérifie les permissions "
         "de la clé utilisée, puis reprends cette analyse."
     )
 
@@ -93,9 +99,17 @@ def _waves(session, run_id):
 
 class BatchAnalysisCoordinator:
     def __init__(self, *, transport=None, pipeline=None):
-        self.settings = get_settings()
-        self.transport = transport or OpenAIBatchTransport()
+        self.settings = get_llm_settings()
+        self.transport = transport
+        self._transports = {}
         self.pipeline = pipeline
+
+    def _transport(self, provider):
+        if self.transport is not None:
+            return self.transport
+        if provider not in self._transports:
+            self._transports[provider] = get_batch_transport(provider, settings=self.settings)
+        return self._transports[provider]
 
     def start(self, job_ids: list[int] | None = None) -> str:
         if self.pipeline is None:
@@ -103,12 +117,22 @@ class BatchAnalysisCoordinator:
         stop_requested = getattr(self.pipeline, "stop_requested", None)
         with batch_operation():
             check_cancelled(stop_requested)
+            screening = resolve_route(self.settings, "job_scope_screening")
+            extraction = resolve_route(self.settings, "job_offer_extraction")
+            fit = resolve_route(self.settings, "job_fit_assessment")
+            if any(
+                route.provider not in {"openai", "anthropic"}
+                for route in (screening, extraction, fit)
+            ):
+                raise ValueError("Le traitement Batch nécessite OpenAI ou Anthropic.")
             self.pipeline.prepare_analysis(job_ids=job_ids)
             check_cancelled(stop_requested)
             candidates = self.pipeline.analysis_candidates(job_ids)
             if not candidates:
                 raise ValueError("Aucune offre disponible à analyser dans cette sélection.")
             run_id = str(uuid4())
+            provider = extraction.provider
+            options = self.settings
             with (
                 job_operation(
                     [job.id for job in candidates],
@@ -120,17 +144,40 @@ class BatchAnalysisCoordinator:
                 run = AnalysisBatchRun(
                     id=run_id,
                     state="active",
-                    model=self.settings.openai_model_cheap,
+                    model=extraction.model,
+                    provider=provider,
+                    max_completion_tokens=extraction.max_output_tokens,
+                    extraction_effort=extraction.reasoning,
                     profile_data=self.pipeline.profile.model_dump(mode="json"),
                     fit_context=build_fit_context(
-                        self.pipeline.profile, self.settings.openai_model_cheap
+                        self.pipeline.profile,
+                        fit.model,
+                        provider=fit.provider,
+                        max_completion_tokens=fit.max_output_tokens,
+                        settings=options,
+                    ),
+                    scope_context=scope_context(
+                        provider=screening.provider,
+                        model=screening.model,
+                        settings=options,
+                        max_completion_tokens=screening.max_output_tokens,
                     ),
                     last_error="",
                 )
                 session.add(run)
                 session.flush()
                 for job in candidates:
-                    session.add(new_item(run_id, job, session=session, model=run.model))
+                    session.add(
+                        new_item(
+                            run_id,
+                            job,
+                            session=session,
+                            model=run.model,
+                            provider=provider,
+                            effort=run.extraction_effort,
+                            screening_context=run.scope_context,
+                        )
+                    )
             if stop_requested is not None and stop_requested():
                 with write_session_scope() as session:
                     session.get(AnalysisBatchRun, run_id).cancel_requested = True
@@ -238,12 +285,14 @@ class BatchAnalysisCoordinator:
                 run.last_error = (
                     run.last_error + " " + str(exc) if run.state == "attention" else str(exc)
                 )
+                if isinstance(exc, FrozenConfigurationError):
+                    run.state = "blocked"
                 run.updated_at = _now()
 
     def _advance(self, run_id: str) -> None:
-        # At most the two dependent phases plus their cached-only transitions.
+        # Three dependent phases plus their cached-only transitions.
         # Provider waiting always returns immediately rather than occupying a worker.
-        for _ in range(6):
+        for _ in range(9):
             with session_scope() as session:
                 run = session.get(AnalysisBatchRun, run_id)
                 waves = [wave for wave in _waves(session, run_id) if wave.state != "imported"]
@@ -257,7 +306,7 @@ class BatchAnalysisCoordinator:
                 with write_session_scope() as session:
                     run = session.get(AnalysisBatchRun, run_id)
                     run.state = "blocked"
-                    run.last_error = _upload_access_message(error)
+                    run.last_error = _upload_access_message(error, run.provider)
                     run.updated_at = _now()
                 return
             if waves:
@@ -272,7 +321,14 @@ class BatchAnalysisCoordinator:
                                 if session.get(AnalysisBatchRun, run_id).state == "blocked":
                                     return
                             continue
-                    if not self._refresh_wave(wave.id, cancelling=cancelling):
+                    try:
+                        refreshed = self._refresh_wave(wave.id, cancelling=cancelling)
+                    except Exception as exc:
+                        if wave.phase != "screening" or cancelling:
+                            raise
+                        self._screening_wave_failed(wave.id, exc)
+                        refreshed = True
+                    if not refreshed:
                         waiting = True
                 if waiting:
                     return
@@ -283,7 +339,9 @@ class BatchAnalysisCoordinator:
             with session_scope() as session:
                 items = _items(session, run_id)
                 phase = (
-                    "extraction"
+                    "screening"
+                    if any(i.state == "screening_pending" for i in items)
+                    else "extraction"
                     if any(i.state == "extraction_pending" for i in items)
                     else "evaluation"
                     if any(i.state == "evaluation_pending" for i in items)
@@ -304,11 +362,19 @@ class BatchAnalysisCoordinator:
                     continue
                 try:
                     request = item_request(
-                        item, run, phase, self.settings.openai_max_completion_tokens
+                        item,
+                        run,
+                        phase,
+                        run.max_completion_tokens,
                     )
+                except FrozenConfigurationError:
+                    raise
                 except (ValueError, LLMValidationError) as exc:
-                    item.state = f"{phase}_failed"
-                    item.error = str(exc)
+                    if phase == "screening":
+                        fail_open_screening(session, item, run, exc)
+                    else:
+                        item.state = f"{phase}_failed"
+                        item.error = str(exc)
                     continue
                 if accept_cache(session, item, run, phase, request):
                     continue
@@ -381,10 +447,18 @@ class BatchAnalysisCoordinator:
             BatchRequest(record["custom_id"], record["body"], record["cache_key"])
             for record in records
         ]
+        with session_scope() as session:
+            wave = session.get(AnalysisBatchWave, wave_id)
+            run = session.get(AnalysisBatchRun, wave.run_id)
+            provider, _ = phase_route(run, wave.phase)
+        transport = self._transport(provider)
         if not input_file_id:
             try:
-                input_file_id = self.transport.upload(encode_requests(requests))
+                input_file_id = transport.upload(encode_requests(requests))
             except Exception as exc:
+                if wave.phase == "screening":
+                    self._screening_wave_failed(wave_id, exc)
+                    return False
                 status_code = getattr(exc, "status_code", None) or getattr(
                     exc.__cause__, "status_code", None
                 )
@@ -393,7 +467,7 @@ class BatchAnalysisCoordinator:
                         wave = session.get(AnalysisBatchWave, wave_id)
                         run = session.get(AnalysisBatchRun, wave.run_id)
                         run.state = "blocked"
-                        run.last_error = _upload_access_message(str(exc))
+                        run.last_error = _upload_access_message(str(exc), provider)
                         run.updated_at = _now()
                     return False
                 raise
@@ -409,8 +483,17 @@ class BatchAnalysisCoordinator:
             wave.state = "submitting"
             metadata = {"elan_run_id": wave.run_id, "elan_wave_id": wave.id}
         try:
-            snapshot = self.transport.create(input_file_id, metadata=metadata)
+            snapshot = (
+                transport.create(input_file_id, metadata=metadata, requests=requests)
+                if getattr(transport, "requires_journal", False)
+                else transport.create(input_file_id, metadata=metadata)
+            )
         except Exception as exc:
+            if wave.phase == "screening":
+                # A failed/ambiguous prefilter is fail-open. Keep the intent in
+                # the journal and never resubmit it, even if POST was accepted.
+                self._screening_wave_failed(wave_id, exc)
+                return False
             status_code = getattr(exc, "status_code", None) or getattr(
                 exc.__cause__, "status_code", None
             )
@@ -432,13 +515,13 @@ class BatchAnalysisCoordinator:
                             item.state = f"{wave.phase}_failed"
                             item.error = str(exc)
                 return False
-            # An exception does not establish whether OpenAI accepted the POST.
+            # An exception does not establish whether the provider accepted POST.
             with write_session_scope() as session:
                 wave = session.get(AnalysisBatchWave, wave_id)
                 run = session.get(AnalysisBatchRun, wave.run_id)
                 run.state = "attention"
                 run.last_error = (
-                    "Envoi à vérifier : Élan recherche le lot chez OpenAI avant toute reprise. "
+                    "Envoi à vérifier : Élan recherche le lot chez le fournisseur avant toute reprise. "
                     "Aucun nouvel envoi automatique ne sera effectué."
                 )
             raise
@@ -462,8 +545,21 @@ class BatchAnalysisCoordinator:
     def _refresh_wave(self, wave_id: str, *, cancelling: bool) -> bool:
         with session_scope() as session:
             wave = session.get(AnalysisBatchWave, wave_id)
+            run = session.get(AnalysisBatchRun, wave.run_id)
+            provider, _ = phase_route(run, wave.phase)
+        transport = self._transport(provider)
+        metadata = {"elan_run_id": wave.run_id, "elan_wave_id": wave.id}
         if not wave.provider_batch_id:
-            matches = self.transport.recover({"elan_run_id": wave.run_id, "elan_wave_id": wave.id})
+            if getattr(transport, "requires_journal", False):
+                requests = [
+                    BatchRequest(record["custom_id"], record["body"], record["cache_key"])
+                    for record in wave.requests
+                ]
+                matches = transport.recover(
+                    metadata, requests=requests, created_after=wave.created_at
+                )
+            else:
+                matches = transport.recover(metadata)
             if len(matches) != 1:
                 with write_session_scope() as session:
                     run = session.get(AnalysisBatchRun, wave.run_id)
@@ -471,23 +567,32 @@ class BatchAnalysisCoordinator:
                     run.last_error = (
                         "Envoi à vérifier : aucun lot retrouvé pour l’instant. "
                         "Le suivi réessaiera sans renvoyer les demandes."
+                        + (
+                            " Chez Anthropic, l’identification attend les résultats du lot."
+                            if provider == "anthropic"
+                            else ""
+                        )
                         if not matches
                         else "Plusieurs lots correspondent à cet envoi. Vérification nécessaire."
                     )
                 return False
             snapshot = matches[0]
         else:
-            snapshot = self.transport.retrieve(wave.provider_batch_id)
+            snapshot = transport.retrieve(wave.provider_batch_id)
         self._save_snapshot(wave_id, snapshot)
         if cancelling and not snapshot.terminal and snapshot.status != "cancelling":
-            snapshot = self.transport.cancel(snapshot.id)
+            snapshot = transport.cancel(snapshot.id)
             self._save_snapshot(wave_id, snapshot)
         if not snapshot.terminal:
             return False
         results = {}
         for file_id in (snapshot.output_file_id, snapshot.error_file_id):
             if file_id:
-                downloaded = self.transport.download(file_id)
+                downloaded = (
+                    transport.download(file_id, metadata=metadata)
+                    if getattr(transport, "requires_journal", False)
+                    else transport.download(file_id)
+                )
                 if results.keys() & downloaded.keys():
                     raise ValueError("Une réponse apparaît dans deux fichiers Batch.")
                 results.update(downloaded)
@@ -508,10 +613,14 @@ class BatchAnalysisCoordinator:
                 else:
                     for item_id in request["item_ids"]:
                         item = session.get(AnalysisBatchItem, item_id)
-                        item.state = f"{wave.phase}_failed"
-                        item.error = f"Batch {snapshot.status} : aucune réponse disponible. " + str(
+                        error = f"Batch {snapshot.status} : aucune réponse disponible. " + str(
                             snapshot.errors or ""
                         )
+                        if wave.phase == "screening":
+                            fail_open_screening(session, item, run, error, key=request["cache_key"])
+                        else:
+                            item.state = f"{wave.phase}_failed"
+                            item.error = error
                 consumed.add(custom_id)
             wave.consumed_ids = sorted(consumed)
             wave.state = "imported"
@@ -522,6 +631,23 @@ class BatchAnalysisCoordinator:
         with write_session_scope() as session:
             wave = session.get(AnalysisBatchWave, wave_id)
             wave.state = "imported"
+
+    def _screening_wave_failed(self, wave_id, error):
+        with write_session_scope() as session:
+            wave = session.get(AnalysisBatchWave, wave_id)
+            run = session.get(AnalysisBatchRun, wave.run_id)
+            for record in wave.requests:
+                for item_id in record["item_ids"]:
+                    fail_open_screening(
+                        session,
+                        session.get(AnalysisBatchItem, item_id),
+                        run,
+                        error,
+                        key=record["cache_key"],
+                    )
+            wave.state = "imported"
+            wave.last_error = str(error)
+            wave.consumed_ids = [record["custom_id"] for record in wave.requests]
 
     def _finish_cancel(self, run_id):
         with write_session_scope() as session:
@@ -538,6 +664,10 @@ class BatchAnalysisCoordinator:
             run = session.get(AnalysisBatchRun, run_id)
             items = _items(session, run_id)
             success = sum(item.state == "completed" for item in items)
-            run.state = "completed" if success == len(items) else "partial" if success else "failed"
+            screened_out = sum(item.state in {"filtered_after_screening"} for item in items)
+            finished = success + screened_out
+            run.state = (
+                "completed" if finished == len(items) else "partial" if finished else "failed"
+            )
             run.completed_at = run.updated_at = _now()
             run.last_error = ""

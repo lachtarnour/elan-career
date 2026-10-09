@@ -23,7 +23,10 @@ from smartapply.filtering.manual_policy import (
     manual_filter_bypass_result,
 )
 from smartapply.pipeline.process.audit import _rejection_audit_components
-from smartapply.pipeline.process.filter_state import MANUAL_KEEP_OVERRIDE_REASON
+from smartapply.pipeline.process.filter_state import (
+    MANUAL_KEEP_OVERRIDE_REASON,
+    has_manual_keep_override,
+)
 from smartapply.pipeline.process.score_components import (
     replace_filter_components,
     replace_filter_state_components,
@@ -83,6 +86,7 @@ class LocalFilterMixin:
         previous_components = (
             dict(job.score.components) if job.score is not None and job.score.components else {}
         )
+        force_keep = force_keep or has_manual_keep_override(previous_components)
         if has_manual_filter_bypass(previous_components):
             result = manual_filter_bypass_result()
         kept, current_components = cls._filter_decision_components(
@@ -116,6 +120,7 @@ class LocalFilterMixin:
         previous_components = (
             dict(job.score.components) if job.score is not None and job.score.components else {}
         )
+        force_keep = force_keep or has_manual_keep_override(previous_components)
         if has_manual_filter_bypass(previous_components):
             # A keep choice recorded during evaluation supersedes that stale
             # automatic result as well as future filtering passes.
@@ -126,22 +131,13 @@ class LocalFilterMixin:
         )
 
         components = replace_filter_components(previous_components, current_components)
-        # Filtering invalidates every downstream ranking/selection artifact.
-        # A later rank pass must compute a fresh score from this filter result.
+        # Filtering invalidates any previous Top selection.
         job.ranked_at = None
         job.shortlisted_at = None
         job.shortlist_origin = None
         set_score(
             session,
             job.id,
-            rule_based_score=None,
-            semantic_score=None,
-            skill_score=None,
-            title_score=None,
-            seniority_score=None,
-            location_score=None,
-            domain_score=None,
-            final_score=None,
             components=components,
         )
         if kept:
@@ -149,27 +145,7 @@ class LocalFilterMixin:
             if update_pipeline_status:
                 update_status(session, job.id, JobStatus.FILTERED)
         else:
-            mark_archived(session, job.id)
-        return kept
-
-    def _apply_local_filter(
-        self,
-        session,
-        jobs: list[Job],
-        *,
-        override_ids: set[int] | None = None,
-    ) -> list[Job]:
-        kept: list[Job] = []
-        override_ids = override_ids or set()
-        for job in jobs:
-            if self._persist_filter_result(
-                session,
-                job,
-                evaluate_or_bypass(self.filter, job),
-                force_keep=job.id in override_ids,
-                update_pipeline_status=True,
-            ):
-                kept.append(job)
+            mark_archived(session, job.id, origin="automatic_filter")
         return kept
 
     def filter_pending(self, *, job_ids: list[int] | None = None) -> LocalFilterReport:

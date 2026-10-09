@@ -27,13 +27,36 @@ class CancellableProvider:
     def __getattr__(self, name):
         return getattr(self._provider, name)
 
+    def for_purpose(self, purpose):
+        from smartapply.llm.routes import provider_for
+
+        return CancellableProvider(provider_for(self._provider, purpose), self._stop_requested)
+
+    def for_request(self, name, model):
+        from smartapply.llm.routes import frozen_provider
+
+        return CancellableProvider(
+            frozen_provider(self._provider, name, model), self._stop_requested
+        )
+
+    def for_frozen_route(self, purpose, name, model, reasoning, max_output_tokens):
+        from smartapply.llm.routes import frozen_provider
+
+        return CancellableProvider(
+            frozen_provider(
+                self._provider, name, model, purpose=purpose,
+                reasoning=reasoning, max_output_tokens=max_output_tokens,
+            ),
+            self._stop_requested,
+        )
+
     def complete_json(self, **kwargs):
         check_cancelled(self._stop_requested)
         result = self._provider.complete_json(**kwargs)
         # A validated extraction is an unfinished processing checkpoint. Its
         # caller stores it before checking cancellation, without publishing an
         # analysis or starting the evaluation. This avoids buying it again.
-        if kwargs.get("purpose") != "job_offer_analysis":
+        if kwargs.get("purpose") not in {"job_offer_extraction", "job_scope_screening"}:
             check_cancelled(self._stop_requested)
         return result
 
@@ -59,8 +82,7 @@ def job_snapshot_key(job: Job) -> str:
 def job_is_active(job: Job) -> bool:
     return (
         job.archived_at is None
-        and job.status not in {JobStatus.ARCHIVED, JobStatus.SENT, JobStatus.INTERVIEW,
-                               JobStatus.REJECTED}
+        and job.status not in {JobStatus.ARCHIVED, JobStatus.SENT, JobStatus.INTERVIEW}
         and job.duplicate_review_status != JobDuplicateStatus.PENDING
     )
 
@@ -91,7 +113,8 @@ class PublicationSnapshot:
     def validate(self, job: Job | None, application: Application | None) -> None:
         if (job is None or application is None or not job_is_active(job)
                 or application.form_submitted_at is not None
-                or application.status in {JobStatus.SENT, JobStatus.INTERVIEW,
-                                          JobStatus.REJECTED, JobStatus.ARCHIVED}
+                or application.status in {
+                    JobStatus.SENT, JobStatus.INTERVIEW, JobStatus.ARCHIVED,
+                }
                 or self != self.capture(job, application)):
             raise StaleTaskResultError()

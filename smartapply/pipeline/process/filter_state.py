@@ -9,7 +9,7 @@ from smartapply.filtering.hard_reject.types import (
     HardRejectResult,
 )
 from smartapply.filtering.manual_policy import has_manual_filter_bypass
-from smartapply.jobsearch.offer_state import recorded_filter_disposition
+from smartapply.jobsearch.offer_state import has_manual_rescue, recorded_filter_disposition
 
 MANUAL_KEEP_OVERRIDE_REASON = "Manual override: kept by user"
 CURRENT_HARD_REJECT_RULESET = HardRejectResult(decisions=()).ruleset_version
@@ -20,6 +20,8 @@ def has_manual_keep_override(components: object) -> bool:
 
     if not isinstance(components, Mapping):
         return False
+    if has_manual_rescue(components):
+        return True
     reasons = components.get("reasons")
     return (
         isinstance(reasons, (list, tuple))
