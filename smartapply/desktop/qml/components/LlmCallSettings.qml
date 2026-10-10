@@ -74,17 +74,17 @@ Rectangle {
     }
     function applyRecommendedSettings() {
         const purpose = configuration.purpose
-        if (purpose === "job_scope_screening" && provider === "anthropic" && modelName === "claude-haiku-5-5") {
-            reasoning = "high"; maxOutputTokens = "16000"
+        if (["job_scope_screening", "job_offer_extraction", "job_fit_assessment"].indexOf(purpose) >= 0
+                && provider === "anthropic" && modelName === "claude-haiku-5-5") {
+            reasoning = "high"
+            maxOutputTokens = purpose === "job_fit_assessment" ? "32000" : "16000"
         } else if (purpose === "job_offer_extraction" && provider === "openai" && modelName === "gpt-5.4-mini") {
             reasoning = "medium"; maxOutputTokens = "16000"
         } else if (purpose === "job_fit_assessment" && provider === "openai" && modelName === "gpt-5.4-mini") {
             reasoning = "medium"; maxOutputTokens = "32000"
-        } else if (purpose === "job_fit_assessment" && provider === "anthropic" && modelName === "claude-haiku-5-5") {
-            reasoning = "high"; maxOutputTokens = "60000"
         } else if (["cv_adaptation", "application_texts", "document_review"].indexOf(purpose) >= 0
                 && provider === "openai" && modelName === "gpt-5.4") {
-            reasoning = purpose === "cv_adaptation" || purpose === "application_texts" ? "medium" : "high"
+            reasoning = "medium"
             maxOutputTokens = "32000"
         } else { reasoning = "" }
     }

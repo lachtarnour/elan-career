@@ -107,16 +107,15 @@ def simulated_provider(calls, screen=None, *, fit_error=False):
     return SimpleNamespace(for_purpose=for_purpose)
 
 
-def test_reference_configuration_has_two_independent_routes():
+def test_reference_configuration_routes_analysis_to_haiku():
 
     payload = json.loads(Path("model_config.json").read_text())
-    for purpose, provider, model, reasoning in (
-        ("job_scope_screening", "anthropic", "claude-haiku-5-5", "high"),
-        ("job_offer_extraction", "openai", "gpt-5.4-mini", "medium"),
-    ):
-        assert payload[purpose]["provider"] == provider
-        assert payload[purpose]["model"] == model
-        assert payload[purpose]["reasoning"] == reasoning
+    for purpose in ("job_scope_screening", "job_offer_extraction", "job_fit_assessment"):
+        assert payload[purpose] == {
+            "provider": "anthropic", "model": "claude-haiku-5-5",
+            "reasoning": "high",
+            "max_output_tokens": 32000 if purpose == "job_fit_assessment" else 16000,
+        }
 
 
 def test_configuration_lists_and_saves_both_calls_independently(reference_routes):

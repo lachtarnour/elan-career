@@ -10,11 +10,11 @@ Chaque entrée exige `provider`, `model`, `reasoning` et `max_output_tokens` :
 | Appel | Provider initial | Modèle initial | Reasoning | Tokens max. |
 | --- | --- | --- | --- | ---: |
 | `job_scope_screening` | Anthropic | `claude-haiku-5-5` | `high` | 16000 |
-| `job_offer_extraction` | OpenAI | `gpt-5.4-mini` | `medium` | 16000 |
-| `job_fit_assessment` | OpenAI | `gpt-5.4-mini` | `medium` | 32000 |
+| `job_offer_extraction` | Anthropic | `claude-haiku-5-5` | `high` | 16000 |
+| `job_fit_assessment` | Anthropic | `claude-haiku-5-5` | `high` | 32000 |
 | `cv_adaptation` | OpenAI | `gpt-5.4` | `medium` | 32000 |
 | `application_texts` | OpenAI | `gpt-5.4` | `medium` | 32000 |
-| `document_review` | OpenAI | `gpt-5.4` | `high` | 32000 |
+| `document_review` | OpenAI | `gpt-5.4` | `medium` | 32000 |
 
 La génération des documents expose trois configurations : sélection du CV,
 résumé du CV et lettre, puis relecture. Les corrections conservent exactement
@@ -25,9 +25,10 @@ réutilise `document_review`. Leurs noms restent distincts dans l'historique des
 appels, sans réglage indépendant. Les anciennes entrées JSON des corrections
 sont ignorées et retirées lors de la prochaine sauvegarde des modèles.
 
-Dans la page de configuration, choisir `claude-haiku-5-5` pour le Fit propose
-`high` et 60 000 tokens. Choisir les combinaisons initiales ci-dessus
-propose aussi leur raisonnement et leur limite correspondants. Ces valeurs
+Dans la page de configuration, choisir `claude-haiku-5-5` pour l'un des trois
+appels d'analyse propose `high`, avec 16 000 tokens pour le préfiltre et
+l'extraction ou 32 000 tokens pour l'évaluation. Les autres combinaisons
+initiales du tableau proposent aussi leurs valeurs correspondantes. Ces valeurs
 restent modifiables avant l'enregistrement.
 
 Le fichier du dépôt [model_config.json](../model_config.json) est la

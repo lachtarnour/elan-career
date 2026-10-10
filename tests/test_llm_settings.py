@@ -50,16 +50,21 @@ def test_six_configurations_cover_analysis_and_the_three_document_steps(llm_env,
     monkeypatch.setenv("LLM_JOB_FIT_ASSESSMENT_MODEL", "ignored-model")
     settings = config.get_llm_settings()
     assert len(settings.calls) == len(CALL_TYPES) == 6
-    assert resolve_route(settings, "job_scope_screening").max_output_tokens == 16000
-    assert resolve_route(settings, "job_offer_extraction").max_output_tokens == 16000
-    assert resolve_route(settings, "job_fit_assessment").model == "gpt-5.4-mini"
-    assert resolve_route(settings, "job_fit_assessment").reasoning == "medium"
-    assert resolve_route(settings, "job_fit_assessment").max_output_tokens == 32000
+    for purpose in ("job_scope_screening", "job_offer_extraction"):
+        route = resolve_route(settings, purpose)
+        assert (route.provider, route.model, route.reasoning, route.max_output_tokens) == (
+            "anthropic", "claude-haiku-5-5", "high", 16000,
+        )
+    fit = resolve_route(settings, "job_fit_assessment")
+    assert (fit.provider, fit.model, fit.reasoning, fit.max_output_tokens) == (
+        "anthropic", "claude-haiku-5-5", "high", 32000,
+    )
     for purpose in (
         "cv_adaptation", "application_texts", "document_review",
         "motivation_letter_repair", "cv_selection_correction",
     ):
         assert resolve_route(settings, purpose).max_output_tokens == 32000
+    assert resolve_route(settings, "document_review").reasoning == "medium"
     assert "llm_job_fit_assessment_model" not in config.Settings.model_fields
     assert "llm_provider" not in config.Settings.model_fields
 
@@ -70,11 +75,11 @@ def test_six_configurations_cover_analysis_and_the_three_document_steps(llm_env,
         ({"provider": ""}, "provider"),
         ({"provider": "invalid"}, "provider"),
         ({"model": ""}, "model"),
-        ({"model": "claude-haiku-5-5"}, "model"),
+        ({"model": "gpt-5.4-mini"}, "model"),
         ({"model": "not-a-model"}, "model"),
         ({"reasoning": ""}, "reasoning"),
         ({"reasoning": "auto"}, "reasoning"),
-        ({"reasoning": "max"}, "reasoning"),
+        ({"reasoning": "none"}, "reasoning"),
         ({"max_output_tokens": None}, "max_output_tokens"),
         ({"max_output_tokens": 100001}, "max_output_tokens"),
     ],
@@ -106,7 +111,7 @@ def test_missing_call_is_not_filled_from_another_call(llm_env):
     edit_call(llm_env, "job_fit_assessment", remove_call=True)
     with pytest.raises(CallConfigurationError, match="job_fit_assessment.configuration"):
         resolve_route(config.get_llm_settings(), "job_fit_assessment")
-    assert resolve_route(config.get_llm_settings(), "job_offer_extraction").model == "gpt-5.4-mini"
+    assert resolve_route(config.get_llm_settings(), "job_offer_extraction").model == "claude-haiku-5-5"
 
 
 @pytest.mark.parametrize(("purpose", "parent"), INHERITED_CALLS.items())
@@ -159,8 +164,8 @@ def test_json_save_is_independent_atomic_and_visible_next_call(llm_env):
     }])
     assert result["model_config_path"] == str(llm_env.with_name("model_config.json"))
     assert resolve_route(config.get_llm_settings(), "job_fit_assessment").max_output_tokens == 8192
-    assert resolve_route(previous, "job_fit_assessment").provider == "openai"
-    assert resolve_route(config.get_llm_settings(), "job_offer_extraction").model == "gpt-5.4-mini"
+    assert resolve_route(previous, "job_fit_assessment").max_output_tokens == 32000
+    assert resolve_route(config.get_llm_settings(), "job_offer_extraction").model == "claude-haiku-5-5"
     assert llm_env.read_text(encoding="utf-8") == original_env
 
 
@@ -244,13 +249,13 @@ def test_explicit_transport_values_cannot_bypass_invalid_route(llm_env, monkeypa
 def test_direct_provider_reads_only_its_call_model(llm_env, isolated_db, monkeypatch):
     from pydantic import BaseModel
 
-    from smartapply.llm.openai_provider import OpenAIProvider
+    from smartapply.llm.anthropic_provider import AnthropicProvider
     from smartapply.llm.structured import Completion
 
     class Answer(BaseModel):
         value: str
 
-    provider = OpenAIProvider(settings=config.get_llm_settings())
+    provider = AnthropicProvider(settings=config.get_llm_settings())
     sent = []
 
     def generate(body):
@@ -262,8 +267,8 @@ def test_direct_provider_reads_only_its_call_model(llm_env, isolated_db, monkeyp
         system="s", user="u", schema=Answer, purpose="job_fit_assessment",
         use_cache=False,
     ).value == "ok"
-    assert sent[0]["model"] == "gpt-5.4-mini"
-    assert sent[0]["reasoning_effort"] == "medium"
+    assert sent[0]["model"] == "claude-haiku-5-5"
+    assert sent[0]["output_config"]["effort"] == "high"
     assert sent[0]["max_completion_tokens"] == 32000
 
 
@@ -388,7 +393,7 @@ fit_editor.setProperty("provider","anthropic")
 fit_editor.setProperty("modelName","claude-haiku-5-5")
 assert QMetaObject.invokeMethod(fit_editor,"applyRecommendedSettings")
 assert fit_editor.property("reasoning")=="high"
-assert fit_editor.property("maxOutputTokens")=="60000"
+assert fit_editor.property("maxOutputTokens")=="32000"
 fit_editor.setProperty("provider","openai")
 fit_editor.setProperty("modelName","gpt-5.4-mini")
 assert QMetaObject.invokeMethod(fit_editor,"applyRecommendedSettings")
@@ -435,7 +440,7 @@ assert review_editor is not None
 review_editor.setProperty("provider","openai")
 review_editor.setProperty("modelName","gpt-5.4")
 assert QMetaObject.invokeMethod(review_editor,"applyRecommendedSettings")
-assert review_editor.property("reasoning")=="high"
+assert review_editor.property("reasoning")=="medium"
 assert review_editor.property("maxOutputTokens")=="32000"
 nav=find(page,"settingsNav_app")
 assert nav is not None

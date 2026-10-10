@@ -99,7 +99,7 @@ Les réglages indépendants sont exposés dans la page Configuration et dans
 `model_config.json`, la source unique de configuration des appels :
 
 - `job_scope_screening` : Anthropic, `claude-haiku-5-5`, `high` dans la configuration de référence.
-- `job_offer_extraction` : OpenAI, `gpt-5.4-mini`, `medium` dans la configuration de référence.
+- `job_offer_extraction` : Anthropic, `claude-haiku-5-5`, `high` dans la configuration de référence.
 
 Chaque entrée contient `provider`, `model`, `reasoning` et `max_output_tokens`.
 Une configuration absente ou invalide produit une erreur explicite avant l'appel.
