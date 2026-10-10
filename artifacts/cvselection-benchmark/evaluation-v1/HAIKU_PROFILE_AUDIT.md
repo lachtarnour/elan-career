@@ -14,6 +14,8 @@ Contrôle en lecture seule des 40 `structured_response` de `claude-haiku-5-5` da
 | Certifications | 30 sélections sur 18 offres ; chaque ID correspond à l'un des deux certificats du profil. |
 | Raisons de projet | Lecture des 120 raisons : aucune attribution factuelle précise étrangère au projet source repérée. Les liens indirects sont généralement qualifiés de transférables. Cette vérification humaine ne prouve pas l'exhaustivité des faits. |
 
+Contrôle complémentaire de nomenclature : les 120 IDs de projet, 30 IDs de certificat, 478 libellés de compétence, 147 IDs de blocs de compétences et 40 `skills_profile_id` correspondent exactement aux identifiants/libellés du profil. Tous les IDs de `skills_order` existent aussi dans le profil. Sur trois offres (11845, 10592, 11846), `skills_order` mentionne des catégories valides sans bloc de compétences sélectionné ; le moteur de rendu ignore ces catégories vides. Les noms de projets et certificats affichés sont résolus depuis le profil à partir des IDs, et les compétences affichées sont canonisées avec le catalogue du profil.
+
 ## Réserves concrètes
 
 1. **Compétences RL déclarées mais projet source désactivé.** Les offres 10803, 10773 et 7578 affichent `Q-learning` et/ou `SARSA` ; 10773 affiche aussi `Policy gradients`. `Q-learning` et `SARSA` sont bien dans `skills.json`, mais leur réalisation précise apparaît dans `proj_rl_gym`, marqué `disabled` et jamais sélectionné. `Policy gradients` figure au catalogue sans réalisation identifiée dans les expériences ou projets. Cela respecte actuellement la règle applicative qui interdit le *projet* `disabled` tout en autorisant les compétences déclarées ; cela peut néanmoins donner un signal RL plus fort que les projets affichés dans le CV.
