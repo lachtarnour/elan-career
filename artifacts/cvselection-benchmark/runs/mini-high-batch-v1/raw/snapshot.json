@@ -5,37 +5,37 @@
   "endpoint": "/v1/chat/completions",
   "input_file_id": "file-GWP7AEyQGouXEkMRiooWYV",
   "object": "batch",
-  "status": "in_progress",
+  "status": "completed",
   "cancelled_at": null,
   "cancelling_at": null,
-  "completed_at": null,
+  "completed_at": 1791654637,
   "error_file_id": null,
   "errors": null,
   "expired_at": null,
   "expires_at": 1791740596,
   "failed_at": null,
-  "finalizing_at": null,
+  "finalizing_at": 1791654634,
   "in_progress_at": 1791654197,
   "metadata": {
     "elan_benchmark": "cvselection-mini-high-v1",
     "run_id": "99379ed863654fc689aa493dffb8ac12"
   },
   "model": "gpt-5.4-mini-2026-03-17",
-  "output_file_id": null,
+  "output_file_id": "file-CZNhfBNp6cHPfsHPQDyjkq",
   "request_counts": {
-    "completed": 0,
+    "completed": 40,
     "failed": 0,
     "total": 40
   },
   "usage": {
-    "input_tokens": 0,
+    "input_tokens": 474645,
     "input_tokens_details": {
-      "cached_tokens": 0
+      "cached_tokens": 377856
     },
-    "output_tokens": 0,
+    "output_tokens": 626376,
     "output_tokens_details": {
-      "reasoning_tokens": 0
+      "reasoning_tokens": 602266
     },
-    "total_tokens": 0
+    "total_tokens": 1101021
   }
 }
