@@ -224,7 +224,9 @@ def build_fit_context(
         "candidate_refs": candidate_references(facts),
         "declared_experience": runtime_settings.declared_experience,
         "declared_experience_source": "settings.declared_experience",
-        "system_prompt": load_prompt("job_fit/system.j2"),
+        "system_prompt": load_prompt(
+            "job_fit/anthropic_system.j2" if provider == "anthropic" else "job_fit/system.j2"
+        ),
         "user_template": load_prompt("job_fit/user.j2"),
         "schema": to_strict_schema(JobFitDecisionEvaluation),
         "model": model,
@@ -274,6 +276,18 @@ def context_is_current(context: dict, profile: Profile) -> bool:
         max_completion_tokens=context["max_completion_tokens"],
         effort=context.get("effort"),
     )
+    # The former shared prompt remains an explicit supported representation for
+    # signed Anthropic runs already submitted. Never rewrite their frozen text.
+    if context.get("provider") == "anthropic" and context.get("system_prompt") == load_prompt(
+        "job_fit/system.j2"
+    ):
+        current["system_prompt"] = context["system_prompt"]
+        current["prompt_fingerprint"] = fingerprint(
+            {
+                "system": current["system_prompt"],
+                "user_template": current["user_template"],
+            }
+        )
     # Transport settings may change while a Batch is running. The signed run
     # keeps its original model, parameters and provider; only facts, prompts,
     # schemas and policy must still match the current application contract.

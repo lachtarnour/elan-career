@@ -38,7 +38,7 @@ def _fit_route(provider, model, reasoning, max_output_tokens=12000):
     }
 
 
-def test_provider_change_preserves_fit_prompts_schema_and_candidate_facts(monkeypatch, tmp_path):
+def test_provider_change_preserves_fit_inputs_contract_and_policy(monkeypatch, tmp_path):
     path = configure_calls(
         monkeypatch, tmp_path, job_fit_assessment=_fit_route("openai", "gpt-5.4-mini", "medium")
     )
@@ -50,7 +50,9 @@ def test_provider_change_preserves_fit_prompts_schema_and_candidate_facts(monkey
     assert build_fit_user(first, offer(), extraction_provenance=source) == build_fit_user(
         second, offer(), extraction_provenance=source
     )
-    for key in ("system_prompt", "user_template", "schema", "policy", "candidate_facts"):
+    assert "fit_annotations.technical_findings" in second["system_prompt"]
+    assert first["system_prompt"] != second["system_prompt"]
+    for key in ("user_template", "schema", "policy", "candidate_facts"):
         assert first[key] == second[key]
     assert first["context_fingerprint"] != second["context_fingerprint"]
 

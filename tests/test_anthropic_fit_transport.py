@@ -17,8 +17,10 @@ from smartapply.database.models import LLMCache
 from smartapply.llm.anthropic_batch import AnthropicBatchTransport, parse_anthropic_results
 from smartapply.llm.anthropic_fit_transport import (
     FORMAT,
+    GROUPED_KEY,
     MARKER,
     encode_fit_transport,
+    encode_legacy_fit_transport,
     fit_transport_schema,
 )
 from smartapply.llm.anthropic_provider import AnthropicProvider
@@ -201,8 +203,13 @@ def test_native_schema_has_no_unions_optional_properties_or_unused_definitions()
 
     walk(schema)
     assert list(schema["properties"])[0] == "decision"
-    assert schema["properties"][MARKER]["const"] == FORMAT
-    assert len(schema["$defs"]) == 8
+    assert set(schema["properties"]) == {
+        "decision",
+        GROUPED_KEY,
+        "admissibility_records",
+        "reliability_records",
+    }
+    assert "$defs" not in schema and "$ref" not in str(schema)
     assert params["system"][0]["text"] == request["messages"][0]["content"]
     assert params["messages"][0]["content"] == request["messages"][1]["content"]
     assert params["output_config"]["effort"] == "high"
@@ -425,6 +432,131 @@ def test_duplicate_annotation_keys_are_not_silently_selected():
     wire = encode_fit_transport(canonical())
     raw = json.dumps(wire)[:-1] + ',"reliability_records":[]}'
     parsed = read_fit_response(raw)
-    assert parsed.original_text == raw and MARKER in parsed.raw
+    assert parsed.original_text == raw and GROUPED_KEY in parsed.raw
     assert any("duplicate annotation" in item for item in parsed.observations)
     assert parsed.decisions == tuple(canonical()["decision"].values())
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {GROUPED_KEY: {"technical_findings": [{"axis": "unknown", "text": "Must remain visible"}]}},
+        {GROUPED_KEY: {"technical_findings": "unreadable"}},
+        {
+            "admissibility_records": [
+                {"dimension": "mandatory_conditions", "status": "unknown", "findings": []}
+            ]
+        },
+        {
+            "admissibility_records": [
+                {"dimension": "mandatory_conditions", "status": "unknown", "findings": []}
+            ]
+            * 2
+        },
+        {"admissibility_records": [{"dimension": "wrong", "status": "unknown", "findings": []}]},
+        {"admissibility_records": "unreadable"},
+    ],
+)
+def test_grouping_never_drops_invalid_tags_or_fabricates_the_missing_dimension(changes):
+    wire = encode_fit_transport(canonical())
+    wire.update(copy.deepcopy(changes))
+    raw = json.dumps(wire)
+    parsed = read_fit_response(raw)
+    assert parsed.original_text == raw and parsed.observations
+    assert calculate_fit_decisions(parsed.decisions)[0] == 0.68
+    for key, value in changes.items():
+        assert parsed.raw[key] == value
+    if "admissibility_records" in changes:
+        assert "admissibility" not in parsed.raw
+
+
+def test_interleaved_findings_keep_order_within_each_business_axis():
+    wire = encode_fit_transport(canonical())
+    records = wire[GROUPED_KEY]["technical_findings"]
+    wire[GROUPED_KEY]["technical_findings"] = [
+        records[index] for index in (6, 0, 12, 7, 1, 13, 8, 2, 14, 9, 3, 15, 10, 4, 16, 11, 5, 17)
+    ]
+    parsed = read_fit_response(json.dumps(wire))
+    assert parsed.raw == canonical()
+
+
+def test_both_admissibility_record_orders_preserve_status_and_evidence():
+    wire = encode_fit_transport(canonical())
+    wire["admissibility_records"].reverse()
+    assert read_fit_response(json.dumps(wire)).raw == canonical()
+
+
+def test_previous_flat_transport_is_readable_without_resubmission():
+    raw = json.dumps(encode_legacy_fit_transport(canonical()))
+    parsed = read_fit_response(raw)
+    assert parsed.raw == canonical() and parsed.original_text == raw
+    assert parsed.observations == []
+
+
+def test_empty_grouped_findings_are_explicit_empty_containers_not_invented_judgements():
+    wire = encode_fit_transport(canonical())
+    wire[GROUPED_KEY]["technical_findings"] = []
+    parsed = read_fit_response(json.dumps(wire))
+    assert parsed.raw["dimensions"] == {
+        axis: {"findings": []} for axis in ("missions", "essentials", "responsibilities")
+    }
+    assert parsed.decisions == tuple(canonical()["decision"].values())
+
+
+def test_missing_record_list_does_not_invent_an_absent_block():
+    wire = encode_fit_transport(canonical())
+    del wire["admissibility_records"]
+    parsed = read_fit_response(json.dumps(wire))
+    assert "admissibility" not in parsed.raw and schema_observations(parsed)
+
+
+def test_prompt_is_compact_only_for_anthropic_and_signed_legacy_context_is_supported(
+    monkeypatch, tmp_path
+):
+    from smartapply.llm.fit_context import context_is_current, fingerprint
+    from smartapply.llm.prompts.job_fit import build_system_prompt
+
+    configure_calls(
+        monkeypatch,
+        tmp_path,
+        job_fit_assessment={
+            "provider": "anthropic",
+            "model": "claude-haiku-5-5",
+            "reasoning": "high",
+            "max_output_tokens": 32768,
+        },
+    )
+    profile = get_profile()
+    ctx = build_fit_context(profile, "claude-haiku-5-5", provider="anthropic")
+    assert ctx["system_prompt"] == build_system_prompt(provider="anthropic")
+    assert ctx["system_prompt"] != build_system_prompt(provider="openai")
+    assert len(ctx["system_prompt"].split()) < len(build_system_prompt().split())
+    legacy = copy.deepcopy(ctx)
+    legacy["system_prompt"] = build_system_prompt()
+    legacy["prompt_fingerprint"] = fingerprint(
+        {"system": legacy["system_prompt"], "user_template": legacy["user_template"]}
+    )
+    legacy["context_fingerprint"] = fingerprint(
+        {key: value for key, value in legacy.items() if key != "context_fingerprint"}
+    )
+    frozen = copy.deepcopy(legacy)
+    assert context_is_current(legacy, profile)
+    assert legacy == frozen
+    legacy["system_prompt"] += " Unknown business modification."
+    legacy["prompt_fingerprint"] = fingerprint(
+        {"system": legacy["system_prompt"], "user_template": legacy["user_template"]}
+    )
+    legacy["context_fingerprint"] = fingerprint(
+        {key: value for key, value in legacy.items() if key != "context_fingerprint"}
+    )
+    assert not context_is_current(legacy, profile)
+
+
+def test_partially_decoded_invalid_annotations_are_idempotent():
+    wire = encode_fit_transport(canonical())
+    wire[GROUPED_KEY]["unexpected_record"] = {"text": "Keep this reservation"}
+    parsed = read_fit_response(json.dumps(wire))
+    second = read_fit_response(parsed)
+    assert second.raw == parsed.raw
+    assert second.observations == parsed.observations
+    assert second.decisions == parsed.decisions

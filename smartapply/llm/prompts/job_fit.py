@@ -18,8 +18,10 @@ from smartapply.llm_policy import resolve_route
 from smartapply.profile import Profile
 
 
-def build_system_prompt() -> str:
-    return load_prompt("job_fit/system.j2")
+def build_system_prompt(*, provider: str | None = None) -> str:
+    return load_prompt(
+        "job_fit/anthropic_system.j2" if provider == "anthropic" else "job_fit/system.j2"
+    )
 
 
 def build_user_prompt(
@@ -34,9 +36,12 @@ def build_user_prompt(
     route = resolve_route(settings, "job_fit_assessment")
     return build_fit_user(
         build_fit_context(
-            profile, route.model, provider=route.provider,
+            profile,
+            route.model,
+            provider=route.provider,
             max_completion_tokens=route.max_output_tokens,
-            settings=settings, effort=route.reasoning,
+            settings=settings,
+            effort=route.reasoning,
         ),
         offer_analysis,
         extraction_provenance=extraction_provenance,

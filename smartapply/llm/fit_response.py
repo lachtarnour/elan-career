@@ -80,12 +80,12 @@ def read_fit_response(value: Any, *, schema=JobFitDecisionEvaluation) -> FitDeci
     if schema is not JobFitDecisionEvaluation:
         raise LLMValidationError("Unsupported fit response schema")
     response = read_fit_decisions(value)
-    if "elan_fit_transport" not in response.raw:
+    if not {"elan_fit_transport", "fit_annotations"}.intersection(response.raw):
         return response
     # Read decisions first. No annotation adapter failure may veto them.
-    from smartapply.llm.anthropic_fit_transport import MARKER, decode_fit_transport
+    from smartapply.llm.anthropic_fit_transport import GROUPED_KEY, MARKER, decode_fit_transport
 
-    if MARKER in response.raw and any(
+    if {MARKER, GROUPED_KEY}.intersection(response.raw) and any(
         warning.startswith("Truncated JSON response") for warning in response.observations
     ):
         return replace(

@@ -112,10 +112,18 @@ def test_fit_wire_schema_keeps_fixed_values_and_constants():
         purpose="fit",
     )
     wire = build_message_params(body)["output_config"]["format"]["schema"]
-    for name, definition in body["response_format"]["json_schema"]["schema"]["$defs"].items():
-        if "enum" in definition:
-            assert wire["$defs"][name]["enum"] == definition["enum"]
-    interpretation = wire["$defs"]["FitOfferInterpretation"]["properties"]
+    assert set(wire["properties"]) == {
+        "decision", "fit_annotations", "admissibility_records", "reliability_records",
+    }
+    canonical = body["response_format"]["json_schema"]["schema"]
+    canonical_decisions = canonical["$defs"]["FitDecisions"]["properties"]
+    decisions = wire["properties"]["decision"]["properties"]
+    for axis in ("missions", "essentials", "responsibilities"):
+        assert decisions[axis]["enum"] == canonical_decisions[axis]["enum"]
+    annotations = wire["properties"]["fit_annotations"]["properties"]
+    findings = annotations["technical_findings"]["items"]["properties"]
+    assert findings["axis"]["enum"] == list(decisions)
+    interpretation = annotations["offer_interpretations"]["items"]["properties"]
     assert interpretation["source_ref"]["const"] == "offer_source:body"
     assert interpretation["origin"]["const"] == "offer_information"
 
