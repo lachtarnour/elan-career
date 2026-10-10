@@ -248,11 +248,23 @@ def should_filter_serpapi_to_fulltime(accepted_values: list[str]) -> bool:
     return bool(tags & _SERPAPI_FULLTIME_COMPATIBLE_TAGS) and tags <= _STABLE_FULL_TIME_TAGS
 
 
-def normalize_source_contract_type(value: str | None) -> str | None:
+def normalize_source_contract_type(
+    value: str | None,
+    *,
+    source: str | None = None,
+) -> str | None:
     """Return a stable display label for common source contract values."""
     if not value:
         return None
     text_words = _contract_words(value)
+    # WelcomeKit's contract enums use French labels: FULL_TIME is CDI and
+    # TEMPORARY is CDD / Temporaire. Keep these meanings specific to WTTJ.
+    # https://developers.welcomekit.co/jobs-api/jobs/get-jobs-dependencies
+    if source == "welcometothejungle":
+        if text_words == "full time":
+            return "CDI"
+        if text_words == "temporary":
+            return "CDD"
     tags = contract_type_tags(value)
 
     if TAG_INTERNSHIP in tags:
