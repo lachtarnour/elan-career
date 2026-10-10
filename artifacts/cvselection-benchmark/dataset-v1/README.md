@@ -6,7 +6,7 @@ analyses pour l'échantillonnage**. Elles ne sont pas présentées comme résult
 des nouveaux appels.
 
 `build_dataset.py` appelle `Pipeline.analyze_jobs` sur une **copie SQLite** avec
-`force_reanalyze=True`, une offre à la fois. Le cache LLM local, les points de
+`force_reanalyze=True`, jusqu'à quatre offres en parallèle. Le cache LLM local, les points de
 reprise d'analyse et les traces Batch de cette copie sont vidés avant la première
 exécution. Chaque réponse native, requête, erreur, ligne d'usage et analyse
 structurée est enregistrée sans correction. Un cas réussi reçoit les prompts
@@ -29,6 +29,10 @@ PYTHONPATH="$PWD" .venv/bin/python artifacts/cvselection-benchmark/dataset-v1/bu
 
 Le mode `run` reprend les lignes `pending`. Une erreur réseau initiale est
 conservée dans `previous_attempts` lors d'une reprise explicite avec
-`run 1 retry_network`. Les coûts sont les estimations calculées par Élan à
+`run 1 retry_network`. Le préfiltre `fail_open` de cette première tentative
+avait été conservé par Élan : la première analyse réussie sans nouveau
+préfiltre a également été archivée dans `previous_attempts`, puis le cas a été
+relancé avec `run 1 retry_incomplete_screen` après suppression du point de
+reprise dans la copie isolée. Les coûts sont les estimations calculées par Élan à
 partir des compteurs du fournisseur ; les requêtes interrompues sans compteur
 restent à coût inconnu.

@@ -14,9 +14,11 @@ import sqlite3
 import subprocess
 import sys
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import local
 
 from sqlalchemy import select as sql_select
 
@@ -42,6 +44,14 @@ QUOTAS = {name: 5 for name in (
     "data_scientist", "ml_engineer", "ai_engineer", "nlp_llm",
     "computer_vision", "data_engineer", "data_analyst", "other",
 )}
+PRODUCTION_FILES = (
+    "smartapply/pipeline/process/analysis.py",
+    "smartapply/pipeline/process/scope_screening.py",
+    "smartapply/llm/fit_context.py",
+    "smartapply/llm/fit_request.py",
+    "smartapply/llm/prompts/cv_adaptation.py",
+    "smartapply/llm/schemas.py",
+)
 PATTERNS = (
     ("computer_vision", r"computer vision|vision par ordinateur|vision|image|imagerie|3d|robot"),
     ("nlp_llm", r"nlp|llm|language model|langage|generative ai|genai|générative|rag"),
@@ -114,9 +124,18 @@ def update_manifest_results(rows: list[dict], manifest: dict, *, finished: bool 
     manifest["cost_usd_estimated"] = round(sum(
         float(u["cost_usd"] or 0) for r in rows for u in r["usage"]
     ), 8)
+    manifest["usage_totals"] = {
+        field: sum(int(u[field] or 0) for row in rows for u in row["usage"])
+        for field in ("prompt_tokens", "completion_tokens", "cached_prompt_tokens", "cache_write_prompt_tokens")
+    }
+    manifest["native_response_count"] = sum(
+        "native_response" in call for row in rows for call in row["calls"]
+    )
+    manifest["historical_attempt_count"] = sum(len(row.get("previous_attempts", [])) for row in rows)
     manifest["dataset_sha256"] = digest(DATASET.read_bytes())
     if finished:
         manifest["finished_at"] = datetime.now(timezone.utc).isoformat()
+        manifest["run_state"] = "complete"
     write_manifest(manifest)
 
 
@@ -203,6 +222,8 @@ def select() -> None:
         "model_config": get_llm_settings().calls,
         "model_config_sha256": digest(config_file.read_bytes()),
         "prompt_file_hashes": {str(p): digest(p.read_bytes()) for p in prompt_files},
+        "production_file_hashes": {name: digest(Path(name).read_bytes()) for name in PRODUCTION_FILES},
+        "runner_sha256": digest(Path(__file__).read_bytes()),
         "git_head": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
         "python": sys.version.split()[0],
         "analysis_workflow": "Pipeline.analyze_jobs(force_reanalyze=True, exclude_applications=True), one offer at a time",
@@ -236,14 +257,27 @@ def report(rows: list[dict], manifest: dict) -> None:
     strata = {field: Counter(row["sample_stratum"][field] for row in rows)
               for field in ("role", "language", "seniority")}
     lines = ["# Diversité du dataset CVSelection v1", "",
-             f"Graine : `{SEED}`. Offres distinctes : **{len(rows)}**.", ""]
+             f"Graine : `{SEED}`. Offres distinctes : **{len(rows)}**.", "",
+             "Les strates ci-dessous proviennent des analyses historiques, utilisées uniquement pour le tirage aléatoire.", ""]
+    labels = {"role": "Métier", "language": "Langue", "seniority": "Séniorité"}
     for field, counts in strata.items():
-        lines += [f"## {field}", "", *[f"- {name}: {count}" for name, count in sorted(counts.items())], ""]
+        lines += [f"## {labels[field]} de la strate", "", *[f"- {name}: {count}" for name, count in sorted(counts.items())], ""]
     source_counts = Counter(row["offer"]["source"] for row in rows)
     lines += ["## Source des annonces", "", *[f"- {name}: {count}" for name, count in sorted(source_counts.items())], ""]
+    fresh = [row["analysis"] for row in rows if row["analysis_status"] == "success"]
+    if fresh:
+        new_languages = Counter(analysis.get("offer_language", "unknown") for analysis in fresh)
+        new_seniorities = Counter(analysis.get("seniority", "unknown") for analysis in fresh)
+        lines += ["## Métadonnées des nouvelles analyses", "", "Langues :",
+                  *[f"- {name}: {count}" for name, count in sorted(new_languages.items())], "",
+                  "Séniorité :",
+                  *[f"- {name or 'non renseigné'}: {count}" for name, count in sorted(new_seniorities.items())], ""]
     exploitable = statuses["success"]
     lines += ["## Nouvelle analyse", "", *[f"- {name}: {count}" for name, count in sorted(statuses.items())],
               f"- Cas exploitables pour CVSelection : **{exploitable}/{len(rows)}**.", "",
+              f"- Réponses natives de l'analyse finale : {manifest.get('native_response_count', 0)}.",
+              f"- Tokens d'entrée comptabilisés : {manifest.get('usage_totals', {}).get('prompt_tokens', 0)} ; tokens de sortie : {manifest.get('usage_totals', {}).get('completion_tokens', 0)}.",
+              f"- Coût estimé enregistré : {manifest.get('cost_usd_estimated', 0):.4f} USD, reprises incluses.", "",
               "Les strates utilisent les métadonnées d'analyse historiques uniquement pour l'échantillonnage ; les résultats du benchmark proviennent exclusivement des nouveaux appels.", ""]
     REPORT.write_text("\n".join(lines))
 
@@ -269,12 +303,89 @@ def verify_inputs(rows: list[dict], manifest: dict) -> None:
     for name, expected in manifest["prompt_file_hashes"].items():
         if digest(Path(name).read_bytes()) != expected:
             raise SystemExit(f"Prompt changed: {name}")
+    for name, expected in manifest["production_file_hashes"].items():
+        if digest(Path(name).read_bytes()) != expected:
+            raise SystemExit(f"Production file changed: {name}")
+
+
+def verify_dataset(rows: list[dict], manifest: dict) -> None:
+    verify_inputs(rows, manifest)
+    if digest(DATASET.read_bytes()) != manifest["dataset_sha256"]:
+        raise SystemExit("Dataset hash differs from manifest")
+    if digest(Path(__file__).read_bytes()) != manifest["runner_sha256"]:
+        raise SystemExit("Runner hash differs from manifest")
+    if manifest["analysis_status_counts"] != dict(Counter(row["analysis_status"] for row in rows)):
+        raise SystemExit("Analysis status counts differ from manifest")
+    purposes = ["job_scope_screening", "job_offer_extraction", "job_fit_assessment"]
+    for row in rows:
+        if row["analysis_status"] != "success":
+            continue
+        if [call["purpose"] for call in row["calls"]] != purposes:
+            raise SystemExit(f"Incomplete final workflow: {row['job_id']}")
+        if any("native_request" not in call or "native_response" not in call for call in row["calls"]):
+            raise SystemExit(f"Missing native evidence: {row['job_id']}")
+        for call in row["calls"]:
+            route = manifest["model_config"][call["purpose"]]
+            body = call["request_body"]
+            if body["model"] != route["model"] or body["max_completion_tokens"] != route["max_output_tokens"]:
+                raise SystemExit(f"Model or token budget differs from route: {row['job_id']}")
+            if body.get("output_config", {}).get("effort") != route["reasoning"]:
+                raise SystemExit(f"Reasoning effort differs from route: {row['job_id']}")
+        if any(usage["cached"] for usage in row["usage"]):
+            raise SystemExit(f"Local cache reuse found: {row['job_id']}")
+        JobAnalysisSchema.model_validate(row["analysis"])
+        cv_input = row["cvselection_input"]
+        if not cv_input or digest(cv_input["system_prompt"].encode()) != cv_input["system_sha256"]:
+            raise SystemExit(f"Missing CVSelection system prompt: {row['job_id']}")
+        if digest(cv_input["user_prompt"].encode()) != cv_input["user_sha256"]:
+            raise SystemExit(f"Missing CVSelection user prompt: {row['job_id']}")
+    if manifest["exploitable_count"] != sum(row["analysis_status"] == "success" for row in rows):
+        raise SystemExit("Exploitable count differs from manifest")
+    if manifest["native_response_count"] != sum(
+        "native_response" in call for row in rows for call in row["calls"]
+    ):
+        raise SystemExit("Native response count differs from manifest")
+    for field, expected in manifest["usage_totals"].items():
+        if expected != sum(int(usage[field] or 0) for row in rows for usage in row["usage"]):
+            raise SystemExit(f"Usage total differs from manifest: {field}")
+    total_cost = round(sum(float(usage["cost_usd"] or 0) for row in rows for usage in row["usage"]), 8)
+    if total_cost != manifest["cost_usd_estimated"]:
+        raise SystemExit("Estimated cost differs from manifest")
 
 
 def run() -> None:
     rows = read_rows()
     manifest = json.loads(MANIFEST.read_text())
     verify_inputs(rows, manifest)
+    if len(sys.argv) > 3 and sys.argv[3] == "retry_incomplete_screen":
+        incomplete = [
+            row for row in rows
+            if row["analysis_status"] == "success"
+            and row["calls"]
+            and not any(call["purpose"] == "job_scope_screening" for call in row["calls"])
+        ]
+        if len(incomplete) != 1:
+            raise SystemExit("Expected exactly one incomplete screening trace")
+        row = incomplete[0]
+        row.setdefault("previous_attempts", []).append({
+            "analysis_status": row["analysis_status"], "calls": row["calls"],
+            "usage": row["usage"], "errors": row["errors"],
+            "analysis": row["analysis"],
+            "reason": "screening fail-open checkpoint from the earlier DNS failure",
+        })
+        row.update(analysis_status="pending", analysis=None, cvselection_input=None,
+                   calls=[], usage=[], errors=[])
+        db_url = get_settings().database_url
+        if db_url != "sqlite:////private/tmp/cvselection-dataset-v1/smartapply.db":
+            raise SystemExit(f"Unsafe database path: {db_url}")
+        connection = sqlite3.connect("/private/tmp/cvselection-dataset-v1/smartapply.db")
+        connection.execute("delete from llm_cache")
+        connection.execute("delete from scope_checkpoints where job_id=?", (row["job_id"],))
+        connection.execute("delete from analysis_checkpoints where job_id=?", (row["job_id"],))
+        connection.commit()
+        connection.close()
+        write_rows(rows)
+        update_manifest_results(rows, manifest)
     if len(sys.argv) > 3 and sys.argv[3] == "retry_network":
         for row in rows:
             if row["analysis_status"] == "failed" and row["calls"] and all(
@@ -299,17 +410,17 @@ def run() -> None:
     limit = int(sys.argv[2]) if len(sys.argv) > 2 else len(rows)
     pipeline = Pipeline()
     profile = get_profile()
-    current: dict = {}
+    current = local()
     original_generate = AnthropicProvider._generate
     original_call = AnthropicProvider._call_anthropic
 
     def recorded_call(self, **kwargs):
         try:
             message = original_call(self, **kwargs)
-            current["trace"][-1]["native_response"] = message.model_dump(mode="json")
+            current.trace[-1]["native_response"] = message.model_dump(mode="json")
             return message
         except Exception as exc:
-            current["trace"][-1]["transport_error"] = repr(exc)
+            current.trace[-1]["transport_error"] = repr(exc)
             raise
 
     def recorded_generate(self, body):
@@ -318,7 +429,7 @@ def run() -> None:
             "native_request": build_message_params(body),
             "purpose": body["prompt_cache_key"].split(":")[1],
         }
-        current["trace"].append(trace)
+        current.trace.append(trace)
         try:
             completion = original_generate(self, body)
             trace["parsed_transport"] = {
@@ -336,18 +447,13 @@ def run() -> None:
 
     AnthropicProvider._call_anthropic = recorded_call
     AnthropicProvider._generate = recorded_generate
-    attempted = 0
-    for index, row in enumerate(rows):
-        if row["analysis_status"] != "pending":
-            continue
-        if attempted >= limit:
-            break
-        attempted += 1
-        current.clear()
-        current["trace"] = []
+    pending = [row for row in rows if row["analysis_status"] == "pending"][:limit]
+
+    def analyze_row(row: dict) -> dict:
+        current.trace = []
         try:
             outcome = pipeline.analyze_jobs([row["job_id"]], force_reanalyze=True, exclude_applications=True)
-            row["calls"] = current["trace"]
+            row["calls"] = current.trace
             row["errors"] = outcome.errors
             row["analysis_status"] = "success" if outcome.analyzed == 1 else ("screened_out" if outcome.screened_out else "failed")
             with session_scope() as session:
@@ -380,18 +486,25 @@ def run() -> None:
         except Exception as exc:
             row["analysis_status"] = "failed"
             row["errors"].append({"type": type(exc).__name__, "message": str(exc)})
-            row["calls"] = current["trace"]
-        write_rows(rows)
-        update_manifest_results(rows, manifest)
-        report(rows, manifest)
-        print(f"{index + 1}/40 job={row['job_id']} {row['analysis_status']} calls={len(row['calls'])}", flush=True)
+            row["calls"] = current.trace
+        return row
+
+    workers = min(4, len(pending)) if pending else 1
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(analyze_row, row): row["job_id"] for row in pending}
+        for completed, future in enumerate(as_completed(futures), start=1):
+            row = future.result()
+            write_rows(rows)
+            update_manifest_results(rows, manifest)
+            report(rows, manifest)
+            print(f"{completed}/{len(pending)} job={row['job_id']} {row['analysis_status']} calls={len(row['calls'])}", flush=True)
     update_manifest_results(rows, manifest, finished=all(r["analysis_status"] != "pending" for r in rows))
     report(rows, manifest)
 
 
 if __name__ == "__main__":
     if sys.argv[1] == "verify":
-        verify_inputs(read_rows(), json.loads(MANIFEST.read_text()))
-        print("40 offers and input hashes verified")
+        verify_dataset(read_rows(), json.loads(MANIFEST.read_text()))
+        print("40 offers, new analyses, native responses and hashes verified")
     else:
         {"select": select, "run": run}[sys.argv[1]]()

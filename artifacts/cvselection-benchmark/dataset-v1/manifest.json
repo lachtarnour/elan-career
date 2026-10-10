@@ -175,14 +175,13 @@
   "cache_policy": "Clear isolated DB LLM cache and analysis/scope/Batch checkpoints before run; verify no returned cache hits.",
   "created_at": "2026-10-10T16:24:38.207633+00:00",
   "usage_baseline_id": 12912,
-  "finished_at": "2026-10-10T16:25:05.016759+00:00",
+  "finished_at": "2026-10-10T17:01:13.859090+00:00",
   "analysis_status_counts": {
-    "failed": 1,
-    "pending": 39
+    "success": 40
   },
-  "exploitable_count": 0,
-  "cost_usd_estimated": 0,
-  "dataset_sha256": "53fe91f621c43027bbfe3366008694fc7d287311d1d26a7a32497fbd162c5754",
+  "exploitable_count": 40,
+  "cost_usd_estimated": 0.6866321,
+  "dataset_sha256": "264222c48d1d0f65de08f7e5d3f771b146a1a1a0981ec8b85d4f9b0b4d84aee1",
   "analyzer_input_hashes": {
     "11845": "90a313f2a442b3dd3dd4ff1d41a501efe007f3addc5e8084d636d90160634043",
     "9251": "25e3d2085a84ef82a669b83c3b8fccd231f07dbcf8fb495dc1990f0e622c63b2",
@@ -225,5 +224,22 @@
     "11825": "be42f33c6a5964f1763010a0480fc9dacd8ec2c3d365b98fd0860b2688bf79eb",
     "9567": "91748e0252d874bf432171949a2eddf578ee0a698c5244c43da7edaeb8196f92"
   },
-  "run_state": "awaiting_explicit_external_transfer_authorization"
+  "run_state": "complete",
+  "production_file_hashes": {
+    "smartapply/pipeline/process/analysis.py": "7168407ae0a5e042e060c2fcd2e2126f66185910571b7888692442192394a283",
+    "smartapply/pipeline/process/scope_screening.py": "2c612b42347877750c8751be6eea554a2ed981c7606f83da6abd294e2c580c24",
+    "smartapply/llm/fit_context.py": "3fbb4cb409a9c13721143b5fc5a1b60a4ffd26b0c68b67fa774a3d2f46350e2e",
+    "smartapply/llm/fit_request.py": "0c2756d41d021829755b1ca7e29714c1abb6ce0f3f34c581af8ad65083de9092",
+    "smartapply/llm/prompts/cv_adaptation.py": "bc80d32bb6640837c12dc1f83a8d128270078ded48aa6d219c9e8877f7872763",
+    "smartapply/llm/schemas.py": "015932dce6f3b58eed6d66195272d0786f473e312658c8f6a1f47a92476c8473"
+  },
+  "runner_sha256": "d97e45fc268295ea8b4a16ccf855ef107ce28fb36dd6ae01506338965aa4b9bb",
+  "usage_totals": {
+    "prompt_tokens": 1645592,
+    "completion_tokens": 1155143,
+    "cached_prompt_tokens": 620983,
+    "cache_write_prompt_tokens": 15595
+  },
+  "native_response_count": 120,
+  "historical_attempt_count": 2
 }
