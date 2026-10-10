@@ -84,6 +84,7 @@ CALL_TYPES = (
     CallType("cv_adaptation", "Sélection des éléments du CV"),
     CallType("application_texts", "Résumé du CV et lettre"),
     CallType("document_review", "Relecture des documents"),
+    CallType("document_correction", "Correction des documents"),
 )
 CALL_BY_PURPOSE = {call.purpose: call for call in CALL_TYPES}
 CALL_BY_PURPOSE.update({
@@ -91,13 +92,13 @@ CALL_BY_PURPOSE.update({
     "cv_selection_correction": CallType("cv_selection_correction", "Correction de la sélection CV"),
 })
 INHERITED_CALLS = {
-    "cv_selection_correction": "cv_adaptation",
-    "motivation_letter_repair": "application_texts",
+    "cv_selection_correction": "document_correction",
+    "motivation_letter_repair": "document_correction",
 }
 
 
 def configuration_purpose(purpose: str) -> str:
-    """Corrections keep their audit purpose and inherit their original call's route."""
+    """Corrections keep their audit purpose and share the correction route."""
     return INHERITED_CALLS.get(purpose, purpose)
 
 

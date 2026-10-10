@@ -118,7 +118,7 @@ def test_second_call_sees_frozen_cv_and_only_adds_summary_without_adding_skills(
     assert call["model"] == provider.smart_model
     assert call["refresh_cache"] is True
     assert call["job_id"] == 42
-    source_position = call["user"].index('"source_index"')
+    source_position = call["user"].index('"candidate_identity"')
     context_start = call["user"].rfind("{", 0, source_position)
     sources, _ = json.JSONDecoder().raw_decode(call["user"][context_start:])
     assert sources["final_cv"]["data"] == cv.model_dump(

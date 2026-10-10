@@ -1053,7 +1053,7 @@ def test_application_selects_cv_then_generates_summary_and_letter_then_persists_
         for call in calls[1:]:
             # Locate the structured source context independently of the prompt's
             # introductory prose or the review's preceding editable-field JSON.
-            source_position = call["user"].index('"source_index"')
+            source_position = call["user"].index('"candidate_identity"')
             context_start = call["user"].rfind("{", 0, source_position)
             context, _ = json.JSONDecoder().raw_decode(call["user"][context_start:])
             expected_cv = (
@@ -1105,6 +1105,18 @@ def test_advisory_review_does_not_block_or_rewrite_application(category: str) ->
             ]
         ),
     )
+    if category == "structure":
+        MockLLMProvider.register(
+            "document_correction",
+            DocumentTextReview(issues=[{
+                "field": "motivation_letter_body",
+                "passage": "Je serai ravi d'échanger sur la suite.",
+                "reason": reason,
+                "source_ids": ["style:letter"],
+                "category": category,
+                "replacement": None,
+            }]),
+        )
 
     from smartapply.database import session_scope
     from smartapply.database.models import Application, JobStatus
@@ -1132,11 +1144,14 @@ def test_advisory_review_does_not_block_or_rewrite_application(category: str) ->
     assert report.status == JobStatus.READY_FOR_FORM_SUBMISSION
     assert not report.validation_errors
     assert any(reason in warning for warning in report.validation_warnings)
-    assert [call["purpose"] for call in calls] == [
+    expected_purposes = [
         "cv_adaptation",
         "application_texts",
         "document_review",
     ]
+    if category == "structure":
+        expected_purposes.append("document_correction")
+    assert [call["purpose"] for call in calls] == expected_purposes
     with session_scope() as session:
         application = session.get(Application, report.application_id)
         assert application.status == JobStatus.READY_FOR_FORM_SUBMISSION
@@ -1181,6 +1196,18 @@ def test_confirmed_local_correction_survives_advisory_only_confirmation() -> Non
                         "reason": "The first-person singular verb must be souhaite.",
                         "source_ids": ["style:letter"],
                         "category": "language",
+                        "replacement": None,
+                    }
+                ]
+            ),
+            DocumentTextReview(
+                issues=[
+                    {
+                        "field": "motivation_letter_body",
+                        "passage": "Je souhaites échanger",
+                        "reason": "The first-person singular verb must be souhaite.",
+                        "source_ids": ["style:letter"],
+                        "category": "language",
                         "replacement": "Je souhaite échanger",
                     }
                 ]
@@ -1203,7 +1230,7 @@ def test_confirmed_local_correction_survives_advisory_only_confirmation() -> Non
     def respond(**kwargs):
         nonlocal generated_letter
         calls.append(kwargs)
-        if kwargs["purpose"] == "document_review":
+        if kwargs["purpose"] in {"document_review", "document_correction"}:
             return next(reviews)
         response = original_complete_json(**kwargs)
         if kwargs["purpose"] == "application_texts":
@@ -1232,9 +1259,11 @@ def test_confirmed_local_correction_survives_advisory_only_confirmation() -> Non
         "cv_adaptation",
         "application_texts",
         "document_review",
+        "document_correction",
         "document_review",
     ]
     assert [call["model"] for call in calls] == [
+        pipeline.llm.smart_model,
         pipeline.llm.smart_model,
         pipeline.llm.smart_model,
         pipeline.llm.smart_model,
@@ -1250,8 +1279,9 @@ def test_confirmed_local_correction_survives_advisory_only_confirmation() -> Non
         assert letter.content == generated_letter.body.replace(
             "Je souhaites échanger", "Je souhaite échanger"
         )
-        assert len(report.document_review) == 2
+        assert len(report.document_review) == 3
         assert [attempt["decision"] for attempt in report.document_review] == [
+            "correction_requested",
             "revision_proposed",
             "accepted",
         ]
@@ -1294,6 +1324,18 @@ def test_confirmed_cv_title_correction_is_persisted_and_rendered_without_reassem
                         "reason": "The supplied candidate evidence does not support this seniority.",
                         "source_ids": ["candidate:provided_evidence"],
                         "category": "factual",
+                        "replacement": None,
+                    }
+                ]
+            ),
+            DocumentTextReview(
+                issues=[
+                    {
+                        "field": "cv_title",
+                        "passage": "Principal ",
+                        "reason": "The supplied candidate evidence does not support this seniority.",
+                        "source_ids": ["candidate:provided_evidence"],
+                        "category": "factual",
                         "replacement": "",
                     }
                 ]
@@ -1305,7 +1347,7 @@ def test_confirmed_cv_title_correction_is_persisted_and_rendered_without_reassem
     def respond(**kwargs):
         nonlocal generated_letter
         calls.append(kwargs)
-        if kwargs["purpose"] == "document_review":
+        if kwargs["purpose"] in {"document_review", "document_correction"}:
             return next(reviews)
         response = original_complete_json(**kwargs)
         if kwargs["purpose"] == "cv_adaptation":
@@ -1326,6 +1368,7 @@ def test_confirmed_cv_title_correction_is_persisted_and_rendered_without_reassem
         "cv_adaptation",
         "application_texts",
         "document_review",
+        "document_correction",
         "document_review",
     ]
     assert [call["model"] for call in calls] == [
@@ -1333,14 +1376,16 @@ def test_confirmed_cv_title_correction_is_persisted_and_rendered_without_reassem
         pipeline.llm.smart_model,
         pipeline.llm.smart_model,
         pipeline.llm.smart_model,
+        pipeline.llm.smart_model,
     ]
     assert [attempt["decision"] for attempt in report.document_review] == [
+        "correction_requested",
         "revision_proposed",
         "accepted",
     ]
     source_contexts = []
     for call in calls[1:]:
-        source_position = call["user"].index('"source_index"')
+        source_position = call["user"].index('"candidate_identity"')
         context_start = call["user"].rfind("{", 0, source_position)
         context, _ = json.JSONDecoder().raw_decode(call["user"][context_start:])
         source_contexts.append(context)
@@ -1354,7 +1399,8 @@ def test_confirmed_cv_title_correction_is_persisted_and_rendered_without_reassem
     expected_cv = {**original_cv, "cv_title": corrected_title}
     # The confirmation sees the corrected title and exactly the same summary,
     # selected Skills, projects, static experiences, identifiers and order.
-    assert source_contexts[2]["final_cv"]["data"] == expected_cv
+    assert source_contexts[2]["final_cv"]["data"] == original_cv
+    assert source_contexts[3]["final_cv"]["data"] == expected_cv
 
     with session_scope() as session:
         application = session.get(Application, report.application_id)

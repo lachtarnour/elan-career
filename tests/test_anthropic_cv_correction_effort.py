@@ -1,4 +1,4 @@
-"""CV selection corrections reuse all original request settings without adding calls."""
+"""CV selection corrections use their own route without adding unnecessary calls."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from tests.test_project_selection import draft
 
 @pytest.mark.parametrize("provider_name", ["anthropic", "openai"])
 @pytest.mark.parametrize("defect", [None, "project", "certificate"])
-def test_cv_selection_correction_keeps_the_original_provider_model_effort_and_limit(
+def test_cv_selection_correction_uses_medium_independently_of_selection(
     isolated_db, monkeypatch, tmp_path, provider_name, defect
 ):
     profile = get_profile().model_copy(deep=True)
@@ -44,8 +44,12 @@ def test_cv_selection_correction_keeps_the_original_provider_model_effort_and_li
     model = "claude-sonnet-5-5" if provider_name == "anthropic" else "gpt-5.4"
     configure_calls(monkeypatch, tmp_path,
         cv_adaptation={
-            "provider": provider_name, "model": model, "reasoning": "medium",
+            "provider": provider_name, "model": model, "reasoning": "low",
             "max_output_tokens": 12345,
+        },
+        document_correction={
+            "provider": provider_name, "model": model, "reasoning": "medium",
+            "max_output_tokens": 16000,
         },
     )
     provider = (
@@ -86,18 +90,18 @@ def test_cv_selection_correction_keeps_the_original_provider_model_effort_and_li
     if provider_name == "anthropic":
         assert all(params["model"] == "claude-sonnet-5-5" for params in calls)
         assert [params["output_config"]["effort"] for params in calls] == (
-            ["medium"] * len(calls)
+            ["low", "medium"][:len(calls)]
         )
-        assert all(params["max_tokens"] == 12345 for params in calls)
+        assert [params["max_tokens"] for params in calls] == [12345, 16000][:len(calls)]
         assert all("temperature" not in params for params in calls)
         users = [params["messages"][0]["content"] for params in calls]
     else:
         assert all("output_config" not in params for params in calls)
         assert all("temperature" not in params for params in calls)
-        assert [params["reasoning_effort"] for params in calls] == (
-            ["medium"] * len(calls)
-        )
-        assert all(params["max_completion_tokens"] == 12345 for params in calls)
+        assert [params["reasoning_effort"] for params in calls] == ["low", "medium"][:len(calls)]
+        assert [params["max_completion_tokens"] for params in calls] == [
+            12345, 16000,
+        ][:len(calls)]
         users = [params["messages"][1]["content"] for params in calls]
     if defect is not None:
         assert users[1].startswith(users[0])

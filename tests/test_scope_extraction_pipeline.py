@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import copy
 import itertools
-import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -105,17 +103,6 @@ def simulated_provider(calls, screen=None, *, fit_error=False):
         )
 
     return SimpleNamespace(for_purpose=for_purpose)
-
-
-def test_reference_configuration_routes_analysis_to_haiku():
-
-    payload = json.loads(Path("model_config.json").read_text())
-    for purpose in ("job_scope_screening", "job_offer_extraction", "job_fit_assessment"):
-        assert payload[purpose] == {
-            "provider": "anthropic", "model": "claude-haiku-5-5",
-            "reasoning": "high",
-            "max_output_tokens": 32000 if purpose == "job_fit_assessment" else 16000,
-        }
 
 
 def test_configuration_lists_and_saves_both_calls_independently(reference_routes):

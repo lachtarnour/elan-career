@@ -15,8 +15,8 @@ from smartapply.cv.role_contracts import apply_contract
 from smartapply.cv.validator import CvValidator
 from smartapply.llm import CVPersonalization, CVSelection, JobAnalysis, LLMError, MockLLMProvider
 from smartapply.llm.openai_provider import _to_strict_schema
-from smartapply.model_config import read_model_config
 from smartapply.profile import Project, get_profile
+from tests.llm_config_helpers import isolated_catalogue
 
 
 @pytest.fixture
@@ -283,13 +283,16 @@ def test_invalid_selection_retries_structure_before_summary_and_keeps_final_orde
     ("provider_name", "model"),
     [("openai", "gpt-5.4"), ("anthropic", "claude-sonnet-5-5")],
 )
-def test_cv_initial_and_correction_efforts_use_the_same_configuration_snapshot(
+def test_cv_initial_and_correction_keep_distinct_efforts_in_one_snapshot(
     inputs, monkeypatch, tmp_path, provider_name, model
 ):
     profile, analysis = inputs
-    calls = read_model_config()
+    calls = isolated_catalogue()
     calls["cv_adaptation"].update(
         provider=provider_name, model=model, reasoning="low", max_output_tokens=12345
+    )
+    calls["document_correction"].update(
+        provider=provider_name, model=model, reasoning="medium", max_output_tokens=16000
     )
     path = tmp_path / "model_config.json"
     path.write_text(json.dumps(calls), encoding="utf-8")
@@ -309,6 +312,7 @@ def test_cv_initial_and_correction_efforts_use_the_same_configuration_snapshot(
         if not provider.calls:
             changed = json.loads(path.read_text(encoding="utf-8"))
             changed["cv_adaptation"].update(reasoning="high", max_output_tokens=4096)
+            changed["document_correction"].update(reasoning="high", max_output_tokens=4096)
             path.write_text(json.dumps(changed), encoding="utf-8")
         return original_complete(**kwargs)
 
@@ -317,9 +321,9 @@ def test_cv_initial_and_correction_efforts_use_the_same_configuration_snapshot(
         analysis, job_title="Data Scientist", job_company="Example"
     )
     assert cv.selected_project_ids == ["main2", "special1", "main1"]
-    assert [call["effort"] for call in provider.calls] == ["low", "low"]
+    assert [call["effort"] for call in provider.calls] == ["low", "medium"]
     assert [call["model"] for call in provider.calls] == [model, model]
-    assert [call["max_completion_tokens"] for call in provider.calls] == [12345, 12345]
+    assert [call["max_completion_tokens"] for call in provider.calls] == [12345, 16000]
     assert [call["purpose"] for call in provider.calls] == ["cv_adaptation", "cv_selection_correction"]
 
 

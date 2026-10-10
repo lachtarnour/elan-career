@@ -246,7 +246,7 @@ Item {
                             Text {
                                 visible: root.callGroup === "documents"
                                 Layout.fillWidth: true
-                                text: "Les corrections éventuelles conservent les mêmes paramètres que l’appel initial."
+                                text: "La relecture utilise son propre réglage ; les corrections ciblées utilisent celui de Correction des documents."
                                 color: Theme.inkMuted; font.pixelSize: 12; wrapMode: Text.WordWrap
                             }
                             ColumnLayout {

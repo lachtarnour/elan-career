@@ -293,9 +293,19 @@ def test_both_real_providers_publish_the_same_nlp_application(isolated_db, monke
             ]
             assert all(call["temperature"] is None for call in calls[provider_name])
     assert snapshots["openai"] == snapshots["anthropic"]
-    assert [_prompt_contract(call) for call in calls["openai"]] == [
-        _prompt_contract(call) for call in calls["anthropic"]
-    ]
+    openai_contracts = [_prompt_contract(call) for call in calls["openai"]]
+    anthropic_contracts = [_prompt_contract(call) for call in calls["anthropic"]]
+    for openai_call, anthropic_call in zip(openai_contracts, anthropic_contracts, strict=True):
+        if openai_call["purpose"] != "job_fit_assessment":
+            assert openai_call == anthropic_call
+            continue
+        from smartapply.llm.prompts.job_fit import build_system_prompt
+
+        assert {key: value for key, value in openai_call.items() if key != "system"} == {
+            key: value for key, value in anthropic_call.items() if key != "system"
+        }
+        assert openai_call["system"] == build_system_prompt(provider="openai")
+        assert anthropic_call["system"] == build_system_prompt(provider="anthropic")
 
 
 def test_letter_repair_contract_keeps_the_same_prompts_and_outputs(isolated_db, monkeypatch):
@@ -341,11 +351,11 @@ def test_letter_repair_contract_keeps_the_same_prompts_and_outputs(isolated_db, 
             system=system,
             user=user,
             schema=schema,
-            model=provider.smart_model,
+            model=model,
             purpose=stage,
         ).model_dump()
         assert len(calls[provider_name]) == 1
-        assert calls[provider_name][0]["model"] == provider.smart_model
+        assert calls[provider_name][0]["model"] == model
         assert calls[provider_name][0]["effort"] == "high"
         assert calls[provider_name][0]["temperature"] is None
     assert outputs["openai"] == outputs["anthropic"]

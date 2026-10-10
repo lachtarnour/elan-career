@@ -32,9 +32,20 @@ from smartapply.profile import load_profile
 
 
 class _SequentialProvider(MockLLMProvider):
-    def __init__(self, responses):
+    def __init__(self, responses, *, expand_findings=True):
         super().__init__({})
         self.responses = list(responses)
+        # Existing cases describe a proposed patch plus its confirmation. Add
+        # the independent diagnostic preceding that patch in the new pipeline.
+        if expand_findings:
+            for index, response in enumerate(self.responses):
+                if isinstance(response, DocumentTextReview):
+                    if any(issue.category != "style" for issue in response.issues):
+                        findings = response.model_copy(deep=True)
+                        for issue in findings.issues:
+                            issue.replacement = None
+                        self.responses.insert(index, findings)
+                    break
         self.calls = []
 
     def complete_json(self, **kwargs):
@@ -131,9 +142,9 @@ def _review(*, issues=()):
     return DocumentTextReview(issues=list(issues))
 
 
-def _run(documents, responses, *, reference_date=None, initial_warnings=()):
+def _run(documents, responses, *, reference_date=None, initial_warnings=(), expand_findings=True):
     profile, cv, letter, analysis = documents
-    provider = _SequentialProvider(responses)
+    provider = _SequentialProvider(responses, expand_findings=expand_findings)
     harness = _ReviewHarness(profile, provider)
     report = ApplyReport(job_id=42, application_id=None)
     report.validation_warnings.extend(initial_warnings)
@@ -197,6 +208,58 @@ def test_clean_review_preserves_all_documents_and_profile_exactly(documents):
     assert report.document_review[0]["decision"] == "accepted"
 
 
+def test_review_and_correction_use_distinct_configured_efforts(documents, monkeypatch, tmp_path):
+    from tests.llm_config_helpers import configure_calls
+
+    configure_calls(
+        monkeypatch, tmp_path,
+        document_review={"provider": "openai", "model": "gpt-5.4", "reasoning": "low"},
+        document_correction={"provider": "openai", "model": "gpt-5.4", "reasoning": "medium"},
+    )
+    correction = _review(issues=[
+        _issue("professional_summary", "Python", replacement="Python and SQL")
+    ])
+    (cv, _), report, provider = _run(documents, [correction, _review()])
+
+    assert cv.professional_summary.endswith("Python and SQL data workflows.")
+    assert report.validation_errors == []
+    assert [call["purpose"] for call in provider.calls] == [
+        "document_review", "document_correction", "document_review",
+    ]
+    assert [call["effort"] for call in provider.calls] == ["low", "medium", "low"]
+    assert "CORRECTIONS DISABLED" in provider.calls[0]["user"]
+    assert "FINDINGS TO CORRECT" in provider.calls[1]["user"]
+    assert "CORRECTIONS DISABLED" in provider.calls[2]["user"]
+
+
+def test_initial_review_cannot_patch_before_correction_call(documents):
+    correction = _review(issues=[
+        _issue("professional_summary", "Python", replacement="Python and SQL")
+    ])
+    (cv, letter), report, provider = _run(
+        documents, [correction], expand_findings=False
+    )
+
+    assert cv == documents[1] and letter == documents[2]
+    assert len(provider.calls) == 1
+    assert any("text_review_correction_disabled" in error for error in report.validation_errors)
+
+
+def test_correction_cannot_change_review_findings(documents):
+    finding = _issue("professional_summary", "Python")
+    changed = _issue("professional_summary", "data workflows", replacement="data systems")
+    (cv, letter), report, provider = _run(
+        documents, [_review(issues=[finding]), _review(issues=[changed])],
+        expand_findings=False,
+    )
+
+    assert cv == documents[1] and letter == documents[2]
+    assert [call["purpose"] for call in provider.calls] == [
+        "document_review", "document_correction",
+    ]
+    assert any("text_review_correction_findings_changed" in error for error in report.validation_errors)
+
+
 def test_accepted_text_corrections_preserve_skills_projects_experiences_and_order(documents):
     profile, cv, letter, _ = documents
     before = profile.model_dump()
@@ -230,10 +293,10 @@ def test_accepted_text_corrections_preserve_skills_projects_experiences_and_orde
     assert letter.body == _body()
     assert profile.model_dump() == before
     assert report.validation_errors == []
-    assert len(provider.calls) == 2
-    assert summary in provider.calls[1]["user"]
+    assert len(provider.calls) == 3
+    assert summary in provider.calls[2]["user"]
     assert (
-        body in provider.calls[1]["user"] or "reproducible evaluation" in provider.calls[1]["user"]
+        body in provider.calls[2]["user"] or "reproducible evaluation" in provider.calls[2]["user"]
     )
 
 
@@ -265,10 +328,10 @@ def test_title_correction_requires_confirmation_and_preserves_every_other_field(
         (profile, original, letter, analysis), [correction, second]
     )
 
-    assert len(provider.calls) == 2
+    assert len(provider.calls) == 3
     assert '"cv_title": "Principal Data Scientist"' in provider.calls[0]["user"]
-    assert '"cv_title": "Data Scientist"' in provider.calls[1]["user"]
-    assert "Principal Data Scientist" not in provider.calls[1]["user"]
+    assert '"cv_title": "Data Scientist"' in provider.calls[2]["user"]
+    assert "Principal Data Scientist" not in provider.calls[2]["user"]
     assert reviewed_letter == letter
     assert original.cv_title == "Principal Data Scientist"
     if confirmation == "accepted":
@@ -311,10 +374,10 @@ def test_provider_failure_keeps_originals_and_prevents_ready_status(documents, f
     assert any("text_review:factual:" in error for error in report.validation_errors) is (
         failure_stage == "recheck"
     )
-    assert len(provider.calls) == (1 if failure_stage == "initial" else 2)
+    assert len(provider.calls) == (1 if failure_stage == "initial" else 3)
 
 
-def test_unresolved_recheck_rolls_back_corrections_without_third_call(documents):
+def test_unresolved_confirmation_rolls_back_without_another_correction(documents):
     _, cv, letter, _ = documents
     proposed = "Data Scientist working with Python and SQL."
     correction = _review(
@@ -327,7 +390,7 @@ def test_unresolved_recheck_rolls_back_corrections_without_third_call(documents)
     assert reviewed_cv.model_dump() == cv.model_dump()
     assert reviewed_letter.model_dump() == letter.model_dump()
     assert report.validation_errors
-    assert len(provider.calls) == 2
+    assert len(provider.calls) == 3
 
 
 @pytest.mark.parametrize(
@@ -390,7 +453,7 @@ def test_unsupported_claim_can_use_aggregate_scope_without_a_nearby_source(docum
         "candidate:provided_evidence"
     ]
     assert report.document_review[-1]["decision"] == "accepted"
-    assert len(provider.calls) == 2
+    assert len(provider.calls) == 3
 
 
 @pytest.mark.parametrize(
@@ -412,7 +475,7 @@ def test_empty_correction_is_rejected_without_erasing_document_text(documents, f
     assert reviewed_cv.model_dump() == cv.model_dump()
     assert reviewed_letter.model_dump() == letter.model_dump()
     assert report.validation_errors
-    assert len(provider.calls) == 1
+    assert len(provider.calls) == 2
 
 
 def test_issue_without_correction_is_retained_as_blocking_error(documents):
@@ -424,7 +487,7 @@ def test_issue_without_correction_is_retained_as_blocking_error(documents):
     assert reviewed_cv.model_dump() == cv.model_dump()
     assert reviewed_letter.model_dump() == letter.model_dump()
     assert report.validation_errors
-    assert len(provider.calls) == 1
+    assert len(provider.calls) == 2
 
 
 def test_recheck_cannot_start_another_correction_cycle(documents):
@@ -444,7 +507,7 @@ def test_recheck_cannot_start_another_correction_cycle(documents):
     assert reviewed_cv.model_dump() == cv.model_dump()
     assert reviewed_letter.model_dump() == letter.model_dump()
     assert report.validation_errors
-    assert len(provider.calls) == 2
+    assert len(provider.calls) == 3
 
 
 def test_letter_correction_cannot_introduce_an_unselected_project(documents):
@@ -465,7 +528,7 @@ def test_letter_correction_cannot_introduce_an_unselected_project(documents):
     assert reviewed_cv.model_dump() == cv.model_dump()
     assert reviewed_letter.model_dump() == letter.model_dump()
     assert report.validation_errors
-    assert len(provider.calls) == 1
+    assert len(provider.calls) == 2
 
 
 @pytest.mark.parametrize("field", ["professional_summary", "motivation_letter_body"])
@@ -483,7 +546,7 @@ def test_correction_outside_objective_limits_rolls_back_before_confirmation(docu
 
     expected = "summary_too_long:" if field == "professional_summary" else "letter_too_short:"
     assert any(expected in error for error in report.validation_errors)
-    assert len(provider.calls) == 1
+    assert len(provider.calls) == 2
     assert reviewed_cv == cv and reviewed_letter == letter
 
 
@@ -629,7 +692,7 @@ def test_ambiguous_or_overlapping_patches_never_modify_documents(documents, mode
 
     assert revised_cv == cv and revised_letter == letter
     assert any(mode in error for error in report.validation_errors)
-    assert len(provider.calls) == 1
+    assert len(provider.calls) == 2
 
 
 def test_local_deletion_is_allowed_without_erasing_the_field(documents):
@@ -658,7 +721,7 @@ def test_noop_factual_edit_is_unresolved_without_spending_a_confirmation_call(do
 
     assert revised_cv == cv and revised_letter == letter
     assert "text_review_unresolved: relecture nécessaire" in report.validation_errors
-    assert len(provider.calls) == 1
+    assert len(provider.calls) == 2
 
 
 def test_unrelated_patch_cannot_resolve_a_blocking_finding_without_a_correction(documents):
@@ -679,7 +742,7 @@ def test_unrelated_patch_cannot_resolve_a_blocking_finding_without_a_correction(
 
     assert revised_cv == cv and revised_letter == letter
     assert any("text_review:factual:" in error for error in report.validation_errors)
-    assert len(provider.calls) == 1
+    assert len(provider.calls) == 2
 
 
 @pytest.mark.parametrize("replacement", ["reproducible evaluation", "Привет", "", "x" * 1000])
@@ -754,7 +817,7 @@ def test_factual_repair_crossing_word_limit_rolls_back_without_confirmation(docu
     assert revised_letter == original
     assert _word_count(revised_letter.body) == 240
     assert any("letter_too_long:241" in error for error in report.validation_errors)
-    assert len(provider.calls) == 1
+    assert len(provider.calls) == 2
 
 
 @pytest.mark.parametrize("field", ["cv_title", "professional_summary", "subject", "body"])
@@ -779,7 +842,7 @@ def test_reference_date_and_smart_model_are_fixed_across_both_reviews(documents)
     _, report, provider = _run(documents, [correction, _review()], reference_date=date(2031, 7, 14))
 
     assert all('"date": "2031-07-14"' in call["user"] for call in provider.calls)
-    assert len(provider.calls) == 2
+    assert len(provider.calls) == 3
     assert all(call["model"] == provider.smart_model for call in provider.calls)
     assert all(trace["model"] == provider.smart_model for trace in report.document_review)
     assert all(trace["reference_date"] == "2031-07-14" for trace in report.document_review)
@@ -901,7 +964,7 @@ def test_mixed_review_applies_only_non_style_corrections_and_keeps_style_diagnos
         for warning in report.validation_warnings
     )
     assert "a completely different account" not in provider.calls[1]["user"]
-    assert len(provider.calls) == 2
+    assert len(provider.calls) == 3
 
 
 def test_ignored_style_patch_does_not_overlap_an_authorized_patch(documents):
@@ -930,7 +993,7 @@ def test_ignored_style_patch_does_not_overlap_an_authorized_patch(documents):
         "text_review:style:professional_summary:" in warning
         for warning in report.validation_warnings
     )
-    assert len(provider.calls) == 2
+    assert len(provider.calls) == 3
 
 
 @pytest.mark.parametrize(
@@ -1036,7 +1099,7 @@ def test_structure_repair_can_resolve_an_initial_objective_violation(documents):
     assert revised_cv == cv and revised_letter == letter
     assert original.body.endswith(" extra" * 100)
     assert not report.validation_errors
-    assert len(provider.calls) == 2
+    assert len(provider.calls) == 3
 
 
 def test_invalid_confirmation_retains_only_previously_valid_factual_findings(documents):
@@ -1061,7 +1124,7 @@ def test_invalid_confirmation_retains_only_previously_valid_factual_findings(doc
     assert not any("text_review:factual:cv_title:" in error for error in report.validation_errors)
     assert report.document_review[-1]["status"] == "incomplete"
     assert report.document_review[-1]["decision"] == "incomplete"
-    assert len(provider.calls) == 2
+    assert len(provider.calls) == 3
 
 
 def test_initial_invalid_structure_citation_is_incomplete_not_a_factual_finding(documents):
@@ -1127,4 +1190,4 @@ def test_proposed_patch_cannot_change_frozen_nested_cv_fields(documents, field):
     assert revised_cv.model_dump() == original_snapshot
     assert revised_letter == letter
     assert any("text_review_frozen_cv_changed" in error for error in report.validation_errors)
-    assert len(provider.calls) == 1
+    assert len(provider.calls) == 2

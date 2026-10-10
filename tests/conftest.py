@@ -31,7 +31,7 @@ os.environ.update(
 )
 _mock_call_purposes = (
     "JOB_SCOPE_SCREENING", "JOB_OFFER_EXTRACTION", "JOB_FIT_ASSESSMENT",
-    "CV_ADAPTATION", "APPLICATION_TEXTS", "DOCUMENT_REVIEW",
+    "CV_ADAPTATION", "APPLICATION_TEXTS", "DOCUMENT_REVIEW", "DOCUMENT_CORRECTION",
     "MOTIVATION_LETTER_REPAIR", "CV_SELECTION_CORRECTION",
 )
 (_runtime_path / ".env").write_text("", encoding="utf-8")

@@ -410,8 +410,9 @@ editorial hints, not factual errors or automatic rewrites; unknown paraphrases
 and ambiguous contexts remain the reviewer's responsibility. Static source
 descriptions and Skills are not scanned or edited by this check.
 
-The reviewer may propose exact passage replacements in the CV title, summary, subject or
-letter body; the controller applies these local patches without semantic regex
+The reviewer identifies defects without proposing replacements. A separate
+correction call proposes exact passage replacements in the CV title, summary,
+subject or letter body, limited to the original findings; the controller applies these local patches without semantic regex
 rewrites or full-document regeneration. Experiences, Skills and
 selected projects are read-only. One additional review checks a proposed revision
 without permission to revise again. An unresolved blocking defect, invalid patch
@@ -436,8 +437,11 @@ declarations. Review instructions are general source and language rules; they do
 not contain offer-specific examples, vocabulary blacklists or exceptions derived
 from an evaluation sample.
 
-The normal path has three LLM calls; a confirmed correction has four (excluding
-provider-level transport retries), with at most two calls to the cheap reviewer.
+The normal document path has three LLM calls; a confirmed correction has five
+(excluding provider-level transport retries): selection, writing, review,
+correction and confirmation. Selection and writing use GPT-5.4 none by default;
+review uses low, and correction uses medium. A clean review never starts a
+correction call.
 There is no extra planner call or automatic escalation to another review model.
 Actual cost depends on the configured models, token usage and cache hits; routing
 the review to a cheaper model does not guarantee equal quality or a fixed saving.

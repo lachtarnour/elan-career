@@ -293,7 +293,7 @@ class ApplicationTextWriter:
         job_id: int | None,
         refresh_cache: bool = False,
     ) -> TextReviewResult:
-        """One review, at most one proposed revision and one fresh confirmation.
+        """One review, at most one separate correction and one fresh confirmation.
 
         Unconfirmed revisions never replace the original documents. Failure or
         remaining semantic issues are explicit errors, not silent approvals.
@@ -326,8 +326,10 @@ class ApplicationTextWriter:
             )
             trace = {
                 "schema_version": 2,
-                "attempt": attempt + 1,
+                "attempt": len(result.attempts) + 1,
                 "model": route.model,
+                "purpose": "document_review",
+                "reasoning": route.reasoning,
                 "reference_date": self.reference_date.isoformat(),
             }
             prompt = document_review.build_user_prompt(
@@ -340,7 +342,7 @@ class ApplicationTextWriter:
                 job_description=job_description,
                 language=language,
                 validation_issues=self._validation_issues(candidate_cv, candidate_letter, analysis),
-                allow_corrections=attempt == 0,
+                allow_corrections=False,
                 reference_date=self.reference_date,
             )
             try:
@@ -372,13 +374,79 @@ class ApplicationTextWriter:
             trace.update(status="completed", review=review.model_dump(), decision="rejected")
             result.attempts.append(trace)
             contract_errors = self._review_contract_errors(
-                review, candidate_cv, candidate_letter, allow_corrections=attempt == 0
+                review, candidate_cv, candidate_letter, allow_corrections=False
             )
             if contract_errors:
                 # Keep the raw response in the trace, but do not promote its
                 # unvalidated accusations to factual errors about the candidate.
                 reject_revision(contract_errors, incomplete=True)
                 return result
+
+            if attempt == 0 and any(issue.category != "style" for issue in review.issues):
+                first_review = review
+                trace["decision"] = "correction_requested"
+                correction_route = resolve_route(
+                    getattr(self.llm, "_settings", None) or get_llm_settings(),
+                    "document_correction",
+                )
+                correction_trace = {
+                    "schema_version": 2,
+                    "attempt": len(result.attempts) + 1,
+                    "model": correction_route.model,
+                    "purpose": "document_correction",
+                    "reasoning": correction_route.reasoning,
+                    "reference_date": self.reference_date.isoformat(),
+                }
+                correction_prompt = document_review.build_user_prompt(
+                    profile=self.profile,
+                    analysis=analysis,
+                    adapted_cv=cv,
+                    letter=letter,
+                    job_title=job_title,
+                    job_company=job_company,
+                    job_description=job_description,
+                    language=language,
+                    validation_issues=self._validation_issues(cv, letter, analysis),
+                    allow_corrections=True,
+                    reference_date=self.reference_date,
+                    correction_findings=[issue.model_dump() for issue in review.issues],
+                )
+                try:
+                    provider = provider_for(self.llm, "document_correction")
+                    review = provider.complete_json(
+                        system=document_review.build_system_prompt(),
+                        user=correction_prompt,
+                        schema=DocumentTextReview,
+                        model=correction_route.model,
+                        temperature=0.0,
+                        purpose="document_correction",
+                        job_id=job_id,
+                        use_cache=False,
+                        refresh_cache=refresh_cache,
+                        effort=correction_route.reasoning,
+                        max_completion_tokens=correction_route.max_output_tokens,
+                    )
+                except LLMError:
+                    result.attempts.append(
+                        {**correction_trace, "status": "unavailable", "decision": "unavailable"}
+                    )
+                    reject_revision(
+                        ["text_review_unavailable: correction non terminée"], incomplete=True
+                    )
+                    return result
+                trace = correction_trace
+                trace.update(status="completed", review=review.model_dump(), decision="rejected")
+                result.attempts.append(trace)
+                contract_errors = self._review_contract_errors(
+                    review, cv, letter, allow_corrections=True
+                )
+                if [issue.model_dump(exclude={"replacement"}) for issue in review.issues] != [
+                    issue.model_dump(exclude={"replacement"}) for issue in first_review.issues
+                ]:
+                    contract_errors.append("text_review_correction_findings_changed")
+                if contract_errors:
+                    reject_revision(contract_errors, incomplete=True)
+                    return result
 
             blocking = self._blocking_issues(review)
             advisory = [issue for issue in review.issues if issue not in blocking]

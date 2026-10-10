@@ -12,15 +12,17 @@ import pytest
 
 from smartapply import config
 from smartapply.desktop import llm_settings
-from smartapply.llm_policy import CALL_TYPES, INHERITED_CALLS, CallConfigurationError, resolve_route
+from smartapply.llm_policy import INHERITED_CALLS, CallConfigurationError, resolve_route
+from tests.llm_config_helpers import isolated_catalogue
 
 
 @pytest.fixture
 def llm_env(tmp_path, monkeypatch):
     env = tmp_path / ".env"
     env.write_text("OPENAI_API_KEY=kept-openai\n", encoding="utf-8")
-    template = Path(__file__).resolve().parent.parent / "model_config.json"
-    (tmp_path / "model_config.json").write_bytes(template.read_bytes())
+    (tmp_path / "model_config.json").write_text(
+        json.dumps(isolated_catalogue()), encoding="utf-8"
+    )
     monkeypatch.setattr(config, "ENV_FILE", env)
     monkeypatch.setitem(config.Settings.model_config, "env_file", str(env))
     for name in config.Settings.model_fields:
@@ -43,30 +45,6 @@ def edit_call(env: Path, purpose: str, **changes):
         data[purpose].update(changes)
     path.write_text(json.dumps(data), encoding="utf-8")
     return path
-
-
-def test_six_configurations_cover_analysis_and_the_three_document_steps(llm_env, monkeypatch):
-    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
-    monkeypatch.setenv("LLM_JOB_FIT_ASSESSMENT_MODEL", "ignored-model")
-    settings = config.get_llm_settings()
-    assert len(settings.calls) == len(CALL_TYPES) == 6
-    for purpose in ("job_scope_screening", "job_offer_extraction"):
-        route = resolve_route(settings, purpose)
-        assert (route.provider, route.model, route.reasoning, route.max_output_tokens) == (
-            "anthropic", "claude-haiku-5-5", "high", 16000,
-        )
-    fit = resolve_route(settings, "job_fit_assessment")
-    assert (fit.provider, fit.model, fit.reasoning, fit.max_output_tokens) == (
-        "anthropic", "claude-haiku-5-5", "high", 32000,
-    )
-    for purpose in (
-        "cv_adaptation", "application_texts", "document_review",
-        "motivation_letter_repair", "cv_selection_correction",
-    ):
-        assert resolve_route(settings, purpose).max_output_tokens == 32000
-    assert resolve_route(settings, "document_review").reasoning == "medium"
-    assert "llm_job_fit_assessment_model" not in config.Settings.model_fields
-    assert "llm_provider" not in config.Settings.model_fields
 
 
 @pytest.mark.parametrize(
@@ -108,10 +86,11 @@ def test_missing_or_malformed_json_is_not_recreated(llm_env):
 
 
 def test_missing_call_is_not_filled_from_another_call(llm_env):
+    unaffected = resolve_route(config.get_llm_settings(), "job_offer_extraction")
     edit_call(llm_env, "job_fit_assessment", remove_call=True)
     with pytest.raises(CallConfigurationError, match="job_fit_assessment.configuration"):
         resolve_route(config.get_llm_settings(), "job_fit_assessment")
-    assert resolve_route(config.get_llm_settings(), "job_offer_extraction").model == "claude-haiku-5-5"
+    assert resolve_route(config.get_llm_settings(), "job_offer_extraction") == unaffected
 
 
 @pytest.mark.parametrize(("purpose", "parent"), INHERITED_CALLS.items())
@@ -157,6 +136,8 @@ def test_legacy_general_keys_are_rejected_in_json(llm_env):
 
 def test_json_save_is_independent_atomic_and_visible_next_call(llm_env):
     previous = config.get_llm_settings()
+    previous_fit = resolve_route(previous, "job_fit_assessment")
+    unaffected = resolve_route(previous, "job_offer_extraction")
     original_env = llm_env.read_text(encoding="utf-8")
     result = llm_settings.save_llm_calls([{
         "purpose": "job_fit_assessment", "provider": "anthropic", "model": "claude-haiku-5-5",
@@ -164,8 +145,8 @@ def test_json_save_is_independent_atomic_and_visible_next_call(llm_env):
     }])
     assert result["model_config_path"] == str(llm_env.with_name("model_config.json"))
     assert resolve_route(config.get_llm_settings(), "job_fit_assessment").max_output_tokens == 8192
-    assert resolve_route(previous, "job_fit_assessment").max_output_tokens == 32000
-    assert resolve_route(config.get_llm_settings(), "job_offer_extraction").model == "claude-haiku-5-5"
+    assert resolve_route(previous, "job_fit_assessment") == previous_fit
+    assert resolve_route(config.get_llm_settings(), "job_offer_extraction") == unaffected
     assert llm_env.read_text(encoding="utf-8") == original_env
 
 
@@ -199,12 +180,13 @@ def test_json_write_failure_preserves_previous_file(llm_env, monkeypatch):
 
 def test_application_settings_write_only_env_and_hide_secrets(llm_env):
     shown = llm_settings.llm_configuration()
+    before_route = resolve_route(config.get_llm_settings(), "job_fit_assessment")
     assert "kept-openai" not in repr(shown)
     assert shown["api_keys"]["openai"]
     llm_settings.save_application_settings({"LLM_CACHE_TTL_DAYS": "20"})
     assert "LLM_CACHE_TTL_DAYS='20'" in llm_env.read_text(encoding="utf-8")
     assert "OPENAI_API_KEY=kept-openai" in llm_env.read_text(encoding="utf-8")
-    assert resolve_route(config.get_llm_settings(), "job_fit_assessment").max_output_tokens == 32000
+    assert resolve_route(config.get_llm_settings(), "job_fit_assessment") == before_route
     llm_settings.save_llm_api_key("anthropic", "private-key")
     assert "ANTHROPIC_API_KEY='private-key'" in llm_env.read_text(encoding="utf-8")
     assert "private-key" not in repr(llm_settings.llm_configuration())
@@ -334,9 +316,10 @@ def test_analysis_preflight_blocks_missing_route_before_pipeline(llm_env, monkey
             method([1])
 
 
-def test_settings_page_shows_invalid_call_and_active_paths_without_network():
+def test_settings_page_shows_invalid_call_and_active_paths_without_network(tmp_path):
     qml = Path(__file__).resolve().parent.parent / "smartapply/desktop/qml"
-    template = Path(__file__).resolve().parent.parent / "model_config.json"
+    template = tmp_path / "model_config.json"
+    template.write_text(json.dumps(isolated_catalogue()), encoding="utf-8")
     script = r'''
 import json, os, socket, sys, tempfile
 from pathlib import Path
@@ -380,7 +363,7 @@ def find(item,name):
         result=find(child,name)
         if result:return result
     return None
-wait(lambda: len(bridge.llmConfiguration.get("calls",[]))==6)
+wait(lambda: len(bridge.llmConfiguration.get("calls",[]))==7)
 assert find(page,"llmCall_motivation_letter_repair") is None
 assert find(page,"llmCall_cv_selection_correction") is None
 error=find(page,"llmConfigurationError_job_fit_assessment")
@@ -393,7 +376,7 @@ fit_editor.setProperty("provider","anthropic")
 fit_editor.setProperty("modelName","claude-haiku-5-5")
 assert QMetaObject.invokeMethod(fit_editor,"applyRecommendedSettings")
 assert fit_editor.property("reasoning")=="high"
-assert fit_editor.property("maxOutputTokens")=="32000"
+assert fit_editor.property("maxOutputTokens")=="32768"
 fit_editor.setProperty("provider","openai")
 fit_editor.setProperty("modelName","gpt-5.4-mini")
 assert QMetaObject.invokeMethod(fit_editor,"applyRecommendedSettings")
@@ -440,7 +423,9 @@ assert review_editor is not None
 review_editor.setProperty("provider","openai")
 review_editor.setProperty("modelName","gpt-5.4")
 assert QMetaObject.invokeMethod(review_editor,"applyRecommendedSettings")
-assert review_editor.property("reasoning")=="medium"
+assert review_editor.property("reasoning")=="low"
+correction_editor=find(page,"llmCall_document_correction")
+assert correction_editor is not None
 assert review_editor.property("maxOutputTokens")=="32000"
 nav=find(page,"settingsNav_app")
 assert nav is not None

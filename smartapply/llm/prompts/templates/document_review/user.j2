@@ -1,12 +1,13 @@
 Review these current text fields against the identified sources below.
 
-CURRENT TEXT FIELDS
-{{ text_fields_json }}
+Only cv_title and professional_summary are editable within the CV; all other CV fields and source facts stay fixed. Review the title and summary together with the letter's candidate claims. A target-role subject is not a claim of already holding that role.
+The subject follows letter_style.subject and retains the target role and candidate name. Use motivation_context as offer-derived leads for why this company and role are appealing, checked against job_offer. Review the body's motivation-first purpose separately from factual grounding. Opening, motivation, word-count and paragraph rules apply only to the body, never to the subject. Candidate examples support that purpose when useful; their absence is not a defect.
 
 CURRENT CV SNAPSHOT, EDIT BOUNDARIES AND IDENTIFIED SOURCES
 {{ context_json }}
-Only cv_title and professional_summary are editable within the CV; all other CV fields and source facts stay fixed. Review the title and summary together with the letter's candidate claims. A target-role subject is not a claim of already holding that role.
-The subject follows letter_style.subject and retains the target role and candidate name. Use motivation_context as offer-derived leads for why this company and role are appealing, checked against job_offer. Review the body's motivation-first purpose separately from factual grounding. Opening, motivation, word-count and paragraph rules apply only to the body, never to the subject. Candidate examples support that purpose when useful; their absence is not a defect.
+
+CURRENT TEXT FIELDS
+{{ text_fields_json }}
 
 OBJECTIVE METRICS COMPUTED BY THE APPLICATION
 {{ metrics_json }}
@@ -18,6 +19,11 @@ Some observations are heuristic warnings. They do not independently prove a fact
 
 {% if allow_corrections %}
 CORRECTIONS ALLOWED: propose only targeted replacements of each issue's exact unique passage for factual, language or structure defects. Keep every patch local and independent. Style findings are advisory and must have replacement=null. Use null when no correction is proposed.
+{% if correction_findings_json is not none %}
+FINDINGS TO CORRECT
+{{ correction_findings_json }}
+Return exactly these findings in the same order. Preserve every field except replacement; only supply targeted replacements for these findings. Do not add, remove, reclassify or rephrase a finding. Use replacement=null if a finding cannot be safely corrected.
+{% endif %}
 {% else %}
 CORRECTIONS DISABLED: every issue's replacement must be null. Assess only the current text.
 {% endif %}

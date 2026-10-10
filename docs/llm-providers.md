@@ -11,23 +11,25 @@ Chaque entrée exige `provider`, `model`, `reasoning` et `max_output_tokens` :
 | --- | --- | --- | --- | ---: |
 | `job_scope_screening` | Anthropic | `claude-haiku-5-5` | `high` | 16000 |
 | `job_offer_extraction` | Anthropic | `claude-haiku-5-5` | `high` | 16000 |
-| `job_fit_assessment` | Anthropic | `claude-haiku-5-5` | `high` | 32000 |
-| `cv_adaptation` | OpenAI | `gpt-5.4` | `medium` | 32000 |
-| `application_texts` | OpenAI | `gpt-5.4` | `medium` | 32000 |
-| `document_review` | OpenAI | `gpt-5.4` | `medium` | 32000 |
+| `job_fit_assessment` | Anthropic | `claude-haiku-5-5` | `high` | 32768 |
+| `cv_adaptation` | OpenAI | `gpt-5.4` | `none` | 32000 |
+| `application_texts` | OpenAI | `gpt-5.4` | `none` | 32000 |
+| `document_review` | OpenAI | `gpt-5.4` | `low` | 32000 |
+| `document_correction` | OpenAI | `gpt-5.4` | `medium` | 32000 |
 
-La génération des documents expose trois configurations : sélection du CV,
-résumé du CV et lettre, puis relecture. Les corrections conservent exactement
-le fournisseur, le modèle, le raisonnement et la limite de l'appel initial :
-`cv_selection_correction` hérite de `cv_adaptation`, et
-`motivation_letter_repair` hérite de `application_texts`. Une seconde relecture
-réutilise `document_review`. Leurs noms restent distincts dans l'historique des
-appels, sans réglage indépendant. Les anciennes entrées JSON des corrections
-sont ignorées et retirées lors de la prochaine sauvegarde des modèles.
+La génération expose quatre configurations : sélection du CV, résumé et lettre,
+relecture, puis correction. La relecture identifie les défauts sans proposer de
+remplacement. Si une correction est nécessaire, un appel `document_correction`
+propose les modifications ciblées ; une seconde relecture `document_review`
+doit les confirmer avant publication. Au maximum trois appels interviennent
+dans ce contrôle. Sans défaut, seul le premier appel de relecture est nécessaire.
+`cv_selection_correction` et `motivation_letter_repair` partagent aussi la route
+`document_correction`, tout en gardant leurs noms dans l'historique. Les anciennes
+entrées JSON individuelles sont retirées lors de la sauvegarde des modèles.
 
 Dans la page de configuration, choisir `claude-haiku-5-5` pour l'un des trois
 appels d'analyse propose `high`, avec 16 000 tokens pour le préfiltre et
-l'extraction ou 32 000 tokens pour l'évaluation. Les autres combinaisons
+l'extraction ou 32 768 tokens pour l'évaluation. Les autres combinaisons
 initiales du tableau proposent aussi leurs valeurs correspondantes. Ces valeurs
 restent modifiables avant l'enregistrement.
 

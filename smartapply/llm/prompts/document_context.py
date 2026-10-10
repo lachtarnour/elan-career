@@ -115,66 +115,6 @@ def build_document_context(
         )
     style = profile.style_guide
     return {
-        "source_index": sorted(allowed_source_ids(profile, adapted_cv)),
-        "reference_date": {
-            "source_id": "context:reference_date",
-            "date": (reference_date if reference_date is not None else date.today()).isoformat(),
-            "scope": (
-                "Reference date for temporal claims. Compare dated source facts with this date; "
-                "do not assume a dated position or project is still current. An unspecified "
-                "end date alone does not prove current activity."
-            ),
-        },
-        "job_offer": {
-            "source_id": "offer:description",
-            "title": job_title,
-            "company": job_company,
-            "full_description": job_description,
-        },
-        "motivation_context": {
-            # An explicit view of the existing analysis, not new evidence or
-            # another LLM call. Do not repeat these fields in job_analysis.
-            "source_id": "offer:analysis",
-            "derived_from": "offer:description",
-            "company_context": analysis.company_context,
-            "offer_interest_points": list(analysis.offer_interest_points),
-            "scope": (
-                "Offer-derived leads for why this organization and role could appeal to the "
-                "candidate, not independent proof of company facts or the candidate's personal "
-                "history/preferences. Check them against the full offer before use. If empty "
-                "or contradicted, rely on concrete role details in the offer; do not invent "
-                "company values, products, reputation or culture."
-            ),
-        },
-        "recruiter_text_style": {
-            "source_id": "style:recruiter_text",
-            "editorial_rules": load_prompt("shared/recruiter_text_rules.j2"),
-            "scope": "Generated CV title, professional summary, letter subject and body.",
-        },
-        "final_cv": {
-            "source_id": "document:final_cv",
-            "read_only": True,
-            # Warnings can contain the drafting model's reasoning; the reviewer
-            # receives final text and source facts, never that self-assessment.
-            "data": adapted_cv.model_dump(
-                mode="json",
-                exclude={"warnings", "project_selection_reasons", "llm_selected_skills"},
-            ),
-        },
-        "candidate_evidence_scope": {
-            "source_id": "candidate:provided_evidence",
-            "member_source_ids": sorted(_candidate_source_ids(profile, adapted_cv)),
-            "scope": (
-                "Aggregate index of all candidate declarations and factual records actually "
-                "supplied in this request. Its members include identity, declared skills, "
-                "the exposed experience/project facts, education, certificates and languages. "
-                "This index is not an additional fact or independent proof. It excludes "
-                "generated document prose, offer/analysis content and style instructions. "
-                "Unselected projects and other unexposed profile records are outside this "
-                "scope. An absence finding means unsupported in the supplied evidence, "
-                "not false in the real world or absent from the entire candidate profile."
-            ),
-        },
         "candidate_identity": {
             "source_id": "profile:identity",
             "data": profile.identity.model_dump(mode="json"),
@@ -191,8 +131,6 @@ def build_document_context(
                 for category in profile.skills.categories
             ],
         },
-        "experience_evidence": experiences,
-        "selected_project_evidence": projects,
         "languages": [
             {"source_id": f"language:{index}", **item.model_dump(mode="json")}
             for index, item in enumerate(profile.languages)
@@ -205,18 +143,10 @@ def build_document_context(
             {"source_id": f"certificate:{item.id}", **item.model_dump(mode="json")}
             for item in profile.certificates
         ],
-        "job_analysis": {
-            "source_id": "offer:analysis",
-            "data": analysis.model_dump(
-                mode="json",
-                exclude={
-                    "match_reasons",
-                    "risks",
-                    "fit_score",
-                    "company_context",
-                    "offer_interest_points",
-                },
-            ),
+        "recruiter_text_style": {
+            "source_id": "style:recruiter_text",
+            "editorial_rules": load_prompt("shared/recruiter_text_rules.j2"),
+            "scope": "Generated CV title, professional summary, letter subject and body.",
         },
         "title_style": {
             "source_id": "style:title",
@@ -253,20 +183,9 @@ def build_document_context(
             "max_lines": style.max_summary_lines,
             "scope": "CV professional_summary only; never apply its voice rules to the letter.",
         },
+        "experience_evidence": experiences,
         "letter_style": {
             "source_id": "style:letter",
-            "language": language,
-            "subject": {
-                "scope": "motivation_letter_subject (subject in MotivationLetter) only.",
-                "target_role": job_title,
-                "candidate_name": profile.identity.full_name,
-                "instruction": (
-                    "A concise application subject identifying the target role and candidate "
-                    "name. An administrative prefix such as Candidature or Application is "
-                    "appropriate here. Naming the target role does not claim the candidate "
-                    "already holds it. Do not apply body opening or motivation rules here."
-                ),
-            },
             "body_scope": (
                 "The voice, opening, tone, audience, accessibility, paragraphs, word limits, "
                 "concision, purpose, career_examples and personalization below apply only "
@@ -329,6 +248,87 @@ def build_document_context(
             "scope": (
                 "Subject follows subject instructions; body follows body-only writing rules. "
                 "Both use the requested language and remain separate from CV style rules."
+            ),
+            "language": language,
+            "subject": {
+                "scope": "motivation_letter_subject (subject in MotivationLetter) only.",
+                "candidate_name": profile.identity.full_name,
+                "instruction": (
+                    "A concise application subject identifying the target role and candidate "
+                    "name. An administrative prefix such as Candidature or Application is "
+                    "appropriate here. Naming the target role does not claim the candidate "
+                    "already holds it. Do not apply body opening or motivation rules here."
+                ),
+                "target_role": job_title,
+            },
+        },
+        "source_index": sorted(allowed_source_ids(profile, adapted_cv)),
+        "candidate_evidence_scope": {
+            "source_id": "candidate:provided_evidence",
+            "member_source_ids": sorted(_candidate_source_ids(profile, adapted_cv)),
+            "scope": (
+                "Aggregate index of all candidate declarations and factual records actually "
+                "supplied in this request. Its members include identity, declared skills, "
+                "the exposed experience/project facts, education, certificates and languages. "
+                "This index is not an additional fact or independent proof. It excludes "
+                "generated document prose, offer/analysis content and style instructions. "
+                "Unselected projects and other unexposed profile records are outside this "
+                "scope. An absence finding means unsupported in the supplied evidence, "
+                "not false in the real world or absent from the entire candidate profile."
+            ),
+        },
+        "reference_date": {
+            "source_id": "context:reference_date",
+            "date": (reference_date if reference_date is not None else date.today()).isoformat(),
+            "scope": (
+                "Reference date for temporal claims. Compare dated source facts with this date; "
+                "do not assume a dated position or project is still current. An unspecified "
+                "end date alone does not prove current activity."
+            ),
+        },
+        "job_offer": {
+            "source_id": "offer:description",
+            "title": job_title,
+            "company": job_company,
+            "full_description": job_description,
+        },
+        "motivation_context": {
+            # An explicit view of the existing analysis, not new evidence or
+            # another LLM call. Do not repeat these fields in job_analysis.
+            "source_id": "offer:analysis",
+            "derived_from": "offer:description",
+            "company_context": analysis.company_context,
+            "offer_interest_points": list(analysis.offer_interest_points),
+            "scope": (
+                "Offer-derived leads for why this organization and role could appeal to the "
+                "candidate, not independent proof of company facts or the candidate's personal "
+                "history/preferences. Check them against the full offer before use. If empty "
+                "or contradicted, rely on concrete role details in the offer; do not invent "
+                "company values, products, reputation or culture."
+            ),
+        },
+        "job_analysis": {
+            "source_id": "offer:analysis",
+            "data": analysis.model_dump(
+                mode="json",
+                exclude={
+                    "match_reasons",
+                    "risks",
+                    "fit_score",
+                    "company_context",
+                    "offer_interest_points",
+                },
+            ),
+        },
+        "selected_project_evidence": projects,
+        "final_cv": {
+            "source_id": "document:final_cv",
+            "read_only": True,
+            # Warnings can contain the drafting model's reasoning; the reviewer
+            # receives final text and source facts, never that self-assessment.
+            "data": adapted_cv.model_dump(
+                mode="json",
+                exclude={"warnings", "project_selection_reasons", "llm_selected_skills"},
             ),
         },
     }

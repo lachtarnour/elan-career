@@ -29,6 +29,7 @@ def build_user_prompt(
     allow_corrections: bool,
     language: str = "fr",
     reference_date: date | None = None,
+    correction_findings: list[dict] | None = None,
 ) -> str:
     # Imported here because CV assembly also imports the prompt builders.
     # These are the validator's exact conventions, not another token estimate.
@@ -80,4 +81,8 @@ def build_user_prompt(
         metrics_json=json.dumps(metrics, ensure_ascii=False, indent=2),
         validation_issues_json=json.dumps(validation_issues, ensure_ascii=False),
         allow_corrections=allow_corrections,
+        correction_findings_json=(
+            json.dumps(correction_findings, ensure_ascii=False, indent=2)
+            if correction_findings is not None else None
+        ),
     )

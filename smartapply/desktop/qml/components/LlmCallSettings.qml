@@ -31,7 +31,8 @@ Rectangle {
         job_fit_assessment: "Compare les exigences de l’offre aux éléments de votre profil.",
         cv_adaptation: "Sélectionne les projets, compétences et certificats du CV.",
         application_texts: "Rédige le résumé du CV et la lettre de motivation.",
-        document_review: "Vérifie les affirmations et la cohérence des documents."
+        document_review: "Vérifie les affirmations et la cohérence des documents.",
+        document_correction: "Corrige les défauts identifiés avant une nouvelle relecture."
     })[configuration.purpose] || ""
     signal edited()
     signal expansionRequested()
@@ -77,14 +78,15 @@ Rectangle {
         if (["job_scope_screening", "job_offer_extraction", "job_fit_assessment"].indexOf(purpose) >= 0
                 && provider === "anthropic" && modelName === "claude-haiku-5-5") {
             reasoning = "high"
-            maxOutputTokens = purpose === "job_fit_assessment" ? "32000" : "16000"
+            maxOutputTokens = purpose === "job_fit_assessment" ? "32768" : "16000"
         } else if (purpose === "job_offer_extraction" && provider === "openai" && modelName === "gpt-5.4-mini") {
             reasoning = "medium"; maxOutputTokens = "16000"
         } else if (purpose === "job_fit_assessment" && provider === "openai" && modelName === "gpt-5.4-mini") {
             reasoning = "medium"; maxOutputTokens = "32000"
-        } else if (["cv_adaptation", "application_texts", "document_review"].indexOf(purpose) >= 0
+        } else if (["cv_adaptation", "application_texts", "document_review", "document_correction"].indexOf(purpose) >= 0
                 && provider === "openai" && modelName === "gpt-5.4") {
-            reasoning = "medium"
+            reasoning = purpose === "document_correction" ? "medium"
+                : purpose === "document_review" ? "low" : "none"
             maxOutputTokens = "32000"
         } else { reasoning = "" }
     }

@@ -115,7 +115,7 @@ def test_cancellation_precedes_a_provider_request(monkeypatch, tmp_path):
     change_call(path, "document_review", provider="")
     with pytest.raises(CallConfigurationError, match="document_review.provider"):
         provider_for(CancellableProvider(get_llm_provider(), lambda: True), "document_review")
-    change_call(path, "document_review", provider="mock")
+    change_call(path, "document_review", provider="mock", reasoning="auto")
     selected = provider_for(CancellableProvider(get_llm_provider(), lambda: True), "document_review")
     with pytest.raises(TaskCancelledError):
         selected.complete_json()
