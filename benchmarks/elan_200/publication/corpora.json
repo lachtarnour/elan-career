@@ -1,0 +1,20 @@
+{
+  "corpora": [
+    {
+      "corpus_id": "corpus_1",
+      "offers": 200,
+      "offers_jsonl_sha256": "a5bb10ae251a8e727ebf66992cf7501198bffdc6f2492869c4488db679e99d97",
+      "source_provenance": "Intact 200-offer corpus; its historical 100 rows were reconstructed from a later user database snapshot and its other 100 rows from a verified frozen benchmark2 SQLite database.",
+      "source_setup": "current_200_offer_benchmark"
+    },
+    {
+      "corpus_id": "corpus_2",
+      "offers": 100,
+      "offers_jsonl_sha256": "85074b3f499b2dd2215b2b00741f5f5a6d89a2f6356e9fd1bc63ec7a4f775dfe",
+      "source_provenance": "Exact rendered inputs recovered from two saved extraction Batch request files; the original frozen SQLite database and its other fields are missing.",
+      "source_setup": "lost_historical_extraction_100_recovered_from_native_batch_requests"
+    }
+  ],
+  "cross_setup_link": "100 exact extraction prompt matches; separate benchmark setups and IDs",
+  "schema_version": 1
+}
