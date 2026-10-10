@@ -25,9 +25,18 @@ Item {
     readonly property int selectWidth: 24
     readonly property int experienceWidth: showExperience ? Math.round(52 + 12 * tableScale) : 0
     readonly property int dateWidth: showDate ? Math.round(76 + 12 * tableScale) : 0
+    readonly property int llmScoreWidth: Math.round(42 + 6 * tableScale)
+    readonly property int operationDateWidth: Math.round(94 + 10 * tableScale)
+    readonly property int archiveDateWidth: Math.round(110 + 10 * tableScale)
+    readonly property int filterDispositionWidth: 2 * llmScoreWidth + gap
+    // Match the reserved right-hand block of the other offer filters.
+    readonly property int rightColumnsWidth: showDate ? Math.max(
+        dateWidth + gap + filterDispositionWidth,
+        llmScoreWidth + gap + Math.max(operationDateWidth, archiveDateWidth)) : 0
+    readonly property int dateSpacerWidth: Math.max(0, rightColumnsWidth - dateWidth - gap)
     readonly property int visibleGaps: 3 + (showExperience ? 1 : 0) + (showDate ? 1 : 0)
     readonly property real textColumnsWidth: Math.max(0, usableWidth - selectWidth
-        - experienceWidth - dateWidth - gap * visibleGaps)
+        - experienceWidth - rightColumnsWidth - gap * visibleGaps)
     readonly property int companyWidth: Math.round(textColumnsWidth * 0.26)
     readonly property int locationWidth: Math.round(textColumnsWidth * 0.30)
     readonly property int titleWidth: Math.max(65, Math.round(textColumnsWidth
@@ -63,14 +72,16 @@ Item {
     function dateLabel(value) {
         if (!value) return "—"
         var date = new Date(String(value))
-        return isNaN(date.getTime()) ? "—" : Qt.formatDate(date, "dd/MM/yy")
+        return isNaN(date.getTime()) ? "—" : Qt.formatDate(date, "dd/MM/yyyy")
     }
     function sourceLabel(value) {
-        var source = String(value || "").toLowerCase()
-        if (source.indexOf("welcometothejungle") >= 0 || source === "wttj") return "WTTJ"
-        if (source.indexOf("francetravail") >= 0) return "FRANCE TRAVAIL"
-        if (source.indexOf("linkedin") >= 0) return "LINKEDIN"
-        return source ? source.toUpperCase() : ""
+        var raw = String(value || "").trim()
+        var key = raw.toLowerCase().replace(/[\s_-]+/g, "")
+        if (key.indexOf("welcometothejungle") >= 0 || key === "wttj") return "WTTJ"
+        if (key.indexOf("francetravail") >= 0) return "FRANCE TRAVAIL"
+        if (key.indexOf("linkedin") >= 0) return "LINKEDIN"
+        if (key.indexOf("serpapi") >= 0) return "WEB"
+        return raw.length > 0 ? raw.replace(/[_-]+/g, " ").toUpperCase() : "SOURCE INCONNUE"
     }
 
     ColumnLayout {
@@ -125,12 +136,19 @@ Item {
                     onSortRequested: function(key) { root.sortBy(key) }
                 }
                 SortHeader {
+                    objectName: "analysisLocationHeader"
                     Layout.preferredWidth: root.locationWidth
                     title: "Lieu"; sortKey: "location"
                     active: root.sortKey === sortKey; ascending: root.ascending
                     onSortRequested: function(key) { root.sortBy(key) }
                 }
+                Item {
+                    visible: root.showDate
+                    Layout.preferredWidth: root.dateSpacerWidth
+                    Layout.fillHeight: true
+                }
                 SortHeader {
+                    objectName: "analysisPublishedDateHeader"
                     visible: root.showDate
                     Layout.preferredWidth: root.dateWidth
                     title: "Date"; sortKey: "published_date"
@@ -248,6 +266,11 @@ Item {
                             wrapMode: Text.WordWrap
                             elide: Text.ElideRight
                             lineHeight: 1.2
+                        }
+                        Item {
+                            visible: root.showDate
+                            Layout.preferredWidth: root.dateSpacerWidth
+                            Layout.fillHeight: true
                         }
                         Text {
                             visible: root.showDate

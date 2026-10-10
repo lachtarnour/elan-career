@@ -84,6 +84,9 @@ Rectangle {
         } else if (purpose === "job_fit_assessment" && provider === "openai" && modelName === "gpt-5.4-mini") {
             reasoning = "medium"; maxOutputTokens = "32000"
         } else if (["cv_adaptation", "application_texts", "document_review", "document_correction"].indexOf(purpose) >= 0
+                && provider === "anthropic" && modelName === "claude-haiku-5-5") {
+            reasoning = "high"; maxOutputTokens = "32000"
+        } else if (["cv_adaptation", "application_texts", "document_review", "document_correction"].indexOf(purpose) >= 0
                 && provider === "openai" && modelName === "gpt-5.4") {
             reasoning = purpose === "document_correction" ? "medium"
                 : purpose === "document_review" ? "low" : "none"

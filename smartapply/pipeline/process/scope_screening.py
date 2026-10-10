@@ -65,4 +65,8 @@ def save_scope(session, job_id, key, data):
 
 def load_scope(session, job_id, key):
     checkpoint = session.get(ScopeCheckpoint, (job_id, key))
-    return checkpoint.result_data if checkpoint and checkpoint.screening_key == key else None
+    if checkpoint and checkpoint.screening_key == key:
+        data = checkpoint.result_data
+        if isinstance(data, dict) and data.get("status") == "valid":
+            return data
+    return None

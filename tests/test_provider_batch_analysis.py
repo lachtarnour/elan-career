@@ -203,6 +203,27 @@ def test_native_unknown_submission_waits_and_recovers_without_buying_a_second_ex
     assert journal(run_id)[0].state == "completed" and counts()["paid"] == 2
 
 
+def test_native_ambiguous_screening_waits_for_recovery_without_second_post():
+    ids = seed_jobs(screened=False)
+    native = NativeClaudeClient()
+    native.create_error = TimeoutError("screening response lost after acceptance")
+    transport = AnthropicBatchTransport(native)
+    coordinator = BatchAnalysisCoordinator(transport=transport, pipeline=pipeline())
+    run_id = coordinator.start(ids)
+    assert journal(run_id)[0].state == "attention"
+    assert journal(run_id)[2][0].state == "submitting"
+    for _ in range(3):
+        BatchAnalysisCoordinator(transport=transport).sync()
+    coordinator.retry(run_id)
+    assert native.created == ["msgbatch-1"]
+    assert journal(run_id)[1][0].state == "screening_pending"
+    native.create_error = None
+    native.complete("msgbatch-1")
+    BatchAnalysisCoordinator(transport=transport).sync()
+    assert native.created == ["msgbatch-1", "msgbatch-2"]
+    assert all("_extraction-" in request["custom_id"] for request in native.inputs["msgbatch-2"])
+
+
 def test_batch_usage_prices_served_snapshot_and_cache_keeps_requested_model(batch_routes):
     requested = "claude-sonnet-4-5"
     for purpose in ("job_scope_screening", "job_offer_extraction", "job_fit_assessment"):

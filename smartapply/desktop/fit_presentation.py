@@ -58,16 +58,45 @@ def fit_summary(diagnostics, *, has_score: bool) -> dict:
     }
 
 
-def fit_detail(diagnostics) -> dict:
+def fit_detail(diagnostics, *, match_reasons=()) -> dict:
     raw = diagnostics if isinstance(diagnostics, dict) else {}
     decisions = raw.get("used_decisions")
     decisions = decisions if isinstance(decisions, dict) else {}
     levels = raw.get("used_levels")
     levels = levels if isinstance(levels, dict) else {}
+    evaluation = raw.get("evaluation")
+    evaluation = evaluation if isinstance(evaluation, dict) else {}
+    annotations = evaluation.get("dimensions")
+    annotations = annotations if isinstance(annotations, dict) else {}
     axes = []
     for axis, label in AXIS_LABELS.items():
         decision = decisions.get(axis)
         level = levels.get(axis)
+        annotation = annotations.get(axis)
+        annotation = annotation if isinstance(annotation, dict) else {}
+        findings = annotation.get("findings")
+        findings = findings if isinstance(findings, list) else []
+        texts = []
+        for item in findings:
+            if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+                continue
+            text = item["text"].strip()
+            if not text:
+                continue
+            # Retain the saved explanation's evidence qualifiers when available.
+            saved = next((reason for reason in match_reasons
+                          if reason == text or reason.endswith(": " + text)), None)
+            support = item.get("support")
+            prefix = {
+                "declared_only": "Déclaré : ",
+                "transferable": "Transférable : ",
+                "partial_support": "Appui partiel, à confirmer : ",
+                "not_documented": "Non documenté : ",
+                "contradicted": "Écart établi : ",
+            }.get(support if isinstance(support, str) else "", "")
+            text = saved or prefix + text
+            if text not in texts:
+                texts.append(text)
         axes.append(
             {
                 "axis": axis,
@@ -77,6 +106,7 @@ def fit_detail(diagnostics) -> dict:
                 if isinstance(decision, str)
                 else "Indisponible",
                 "level": level if type(level) is int and 0 <= level <= 4 else None,
+                "findings": texts,
             }
         )
     admissibility = raw.get("admissibility")

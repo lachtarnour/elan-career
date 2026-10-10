@@ -104,6 +104,7 @@ class Bridge(QObject):
     selectionLoading = Property(bool, lambda self: False, constant=True)
     jobsModel = Property(QObject, lambda self: None, constant=True)
     jobStatuses = Property("QVariantList", lambda self: [
+        {"value": "scraped", "label": "À analyser"},
         {"value": "analyzed", "label": "Analysée"},
         {"value": "ready_for_form_submission", "label": "Prête"},
         {"value": "sent", "label": "Envoyée"},
@@ -201,6 +202,8 @@ class Bridge(QObject):
     @Slot(str)
     def setActiveRoute(self, route):
         self.routes.append(route)
+        if route == "analysis":
+            self.refreshAnalysisWorkspace()
 
     @Slot(str, str, str, bool)
     @Slot(str, str, str, bool, str)
@@ -243,7 +246,14 @@ def offer(job_id, application_id):
         "id": job_id, "title": "ML Engineer", "company": "Example", "location": "Paris",
         "status": "ready_for_form_submission", "can_send": True,
         "description": "A meaningful responsibility with supporting detail.\n" * 100,
-        "application": {"id": application_id, "notes": "persisted", "warnings": ["cv_title_not_offer_anchored"]},
+        "application": {
+            "id": application_id, "notes": "persisted",
+            "warnings": ["cv_title_not_offer_anchored"],
+            "review_points": [{
+                "key": "cv_title_alignment", "label": "Titre du CV à vérifier",
+                "detail": "Rapprochez le titre du CV du poste visé avant l’envoi.",
+            }],
+        },
     }
 
 def wait_until(predicate, timeout_ms=2000):
@@ -336,15 +346,17 @@ host.show()
 control = page.findChild(QQuickItem, "offerMissionRelationFilter")
 status = page.findChild(QQuickItem, "offerStatusFilter")
 wait_until(lambda: control is not None and control.property("visible") and control.width() > 0)
+assert page.findChild(QQuickItem, "offerMissionRelationLabel") is None
+assert all(set(row) == {"value", "label"} for row in control.property("model"))
 assert [(row["value"], row["label"]) for row in control.property("model")] == [
-    ("", "Toutes les relations"),
-    ("direct", "Directe"),
-    ("adjacent", "Adjacente"),
+    ("", "Toutes les offres"),
+    ("direct", "Métier ciblé"),
+    ("adjacent", "Métier proche"),
     ("clearly_outside", "Hors cible"),
-    ("unknown", "Inconnue"),
+    ("unknown", "Non déterminé"),
 ]
-assert control.parentItem() == status.parentItem()
-assert control.x() >= status.x() + status.width()
+assert control.parentItem().parentItem() == status.parentItem()
+assert control.mapToItem(status.parentItem(), QPointF()).x() >= status.x() + status.width()
 invoke(page, "setSelected", 42, True)
 page.setProperty("savedListScrollY", 180)
 page.setProperty("restoreListScroll", True)
@@ -396,9 +408,9 @@ invoke(page, "refreshOffers", 0)
 wait_until(lambda: control.property("visible") and control.width() > 0)
 app.processEvents()
 assert bridge.queries[-1] == ("", "archived", "llm_score", False, "", 0, "")
-assert control.parentItem() == status.parentItem()
-assert abs(control.y() - status.y()) < 1
-assert control.x() >= status.x() + status.width()
+assert control.parentItem().parentItem() == status.parentItem()
+assert abs(control.mapToItem(status.parentItem(), QPointF()).y() - status.y()) < 1
+assert control.mapToItem(status.parentItem(), QPointF()).x() >= status.x() + status.width()
 
 bridge.page_index = 1
 bridge.total = 5
@@ -518,6 +530,10 @@ assert clear.property("visible")
 assert bridge.queries[-1] == ("", "analyzed", "llm_score", False, "", 0)
 invoke(page, "sortBy", "operation_date")
 assert bridge.min_score == 70 and slider.property("value") == 70
+for status in ("ready_for_form_submission", "sent"):
+    page.setProperty("requestedFilter", status)
+    invoke(page, "refreshOffers", 0)
+    assert slider.property("visible") and slider.property("value") == 70
 page.setProperty("requestedFilter", "archived")
 invoke(page, "refreshOffers", 0)
 assert not slider.property("visible") and bridge.min_score == 70
@@ -578,8 +594,24 @@ for status, value in [
     assert QMetaObject.invokeMethod(date_header, "clicked", Qt.DirectConnection)
     assert page.property("sortKey") == "operation_date" and page.property("sortAscending") is False
 page.setProperty("filterStatus", "archived")
+bridge.rows = [{**row, "archived_at": "08/10/2026"} for row in bridge.rows]
+bridge.jobsChanged.emit()
 app.processEvents()
 assert not date_header.property("visible") and not date_cell.property("visible")
+archive_header = page.findChild(QQuickItem, "offerArchiveDateHeader")
+archive_cell = visual_item(page, "offerArchiveDate-42")
+assert archive_header and archive_cell
+assert archive_header.property("visible") and archive_cell.property("visible")
+assert archive_header.property("title") == "Date d’archivage"
+assert archive_cell.property("text") == "08/10/2026"
+for width in (1400, 1100):
+    page.setProperty("width", width)
+    app.processEvents()
+    assert archive_header.x() >= ia_header.x() + ia_header.width()
+    assert archive_header.x() + archive_header.width() <= archive_header.parentItem().width() + 1
+    assert abs(archive_header.x() - archive_cell.x()) <= 1
+assert QMetaObject.invokeMethod(archive_header, "clicked", Qt.DirectConnection)
+assert page.property("sortKey") == "archived_at" and page.property("sortAscending") is False
 host.hide()
 page.setParentItem(None)
 host.deleteLater()
@@ -609,6 +641,9 @@ second = run("run-b", 2, 1, [
 bridge.analysis_workspace = {"candidates": [{"id": 99, "title": "AI Engineer"}],
     "runs": [second, first], "active_run_id": "run-b", "active_run_count": 2}
 analysis = load_page("AnalysisPage.qml")
+assert not analysis.findChild(QQuickItem, "analysisTrackingBand").property("visible")
+invoke(analysis.findChild(QQuickItem, "analysisToggleDetails"), "clicked")
+app.processEvents()
 assert analysis.findChild(QQuickItem, "analysisRunSelector").property("visible")
 assert analysis.findChild(QQuickItem, "analysisRunTitle").property("text") == "Analyse de 1 offre"
 assert len(visual_item(analysis, "analysisExtractionBatches").property("batches")) == 1
@@ -626,12 +661,16 @@ assert analysis.findChild(QQuickItem, "analysisQueuePanel").property("surfaceCol
 assert analysis.findChild(QQuickItem, "analysisDetailPanel").property("surfaceColor") is None
 assert analysis.findChild(QQuickItem, "analysisTableSurface") is None
 assert not details.property("visible")
+assert card.findChild(QQuickItem, "analysisRunSummary").property("text") == "Extraction en cours"
+invoke(card.findChild(QQuickItem, "analysisRunDetailsToggle"), "clicked")
+assert details.property("visible")
 assert card.property("surfaceColor").alpha() == 0
 assert card.property("strokeColor").alpha() == 0
 assert card.property("padding") == 0
 assert analysis.findChild(QQuickItem, "analysisTrackingBand").property("color") is None
 assert "Parcours" not in analysis.findChild(QQuickItem, "analysisRunSummary").property("text")
 assert analysis.findChild(QQuickItem, "analysisLotTab") is None
+invoke(analysis.findChild(QQuickItem, "analysisToggleDetails"), "clicked")
 host = QQuickWindow()
 analysis.setParentItem(host.contentItem())
 host.show()
@@ -649,25 +688,34 @@ for width, height in [(1100, 720), (1320, 740), (1700, 820), (2400, 820)]:
     assert abs(queue.width() - detail.width()) < 20, (width, queue.width(), detail.width())
     assert abs(table.width() - queue.width()) < 2
     assert preview.mapToItem(analysis, QPointF()).x() > table.mapToItem(analysis, QPointF()).x()
-    assert tracking.mapToItem(analysis, QPointF()).y() >= reading.y() + reading.height()
-    assert tracking.height() >= 150
+    advancement = analysis.findChild(QQuickItem, "analysisToggleDetails")
+    actions = analysis.findChild(QQuickItem, "analysisOfferActions")
+    assert advancement.mapToItem(actions, QPointF()).x() + advancement.width() <= actions.width() + 1
+    assert advancement.mapToItem(actions, QPointF()).x() + advancement.width() >= actions.width() - 1
+    assert advancement.mapToItem(analysis, QPointF()).x() >= detail.mapToItem(analysis, QPointF()).x()
+    assert advancement.mapToItem(analysis, QPointF()).y() >= table.mapToItem(analysis, QPointF()).y() + table.height()
+    assert 28 <= preview.mapToItem(analysis, QPointF()).x() - (table.mapToItem(analysis, QPointF()).x() + table.width()) <= 30
+    assert not tracking.property("visible")
     assert table.width() >= 480
     wait_until(lambda: table.height() >= 230)
     assert table.height() >= 230, (width, height, table.height(), reading.height(), tracking.height())
     invoke(analysis.findChild(QQuickItem, "analysisToggleDetails"), "clicked")
     app.processEvents()
+    assert tracking.property("visible") and tracking.height() >= 150
+    wait_until(lambda: tracking.mapToItem(analysis, QPointF()).y() >= reading.y() + reading.height())
     assert details.property("visible")
     assert table.height() >= 160
     assert analysis.findChild(QQuickItem, "analysisCancelAction").property("visible") == bool(first.get("can_cancel"))
     invoke(analysis.findChild(QQuickItem, "analysisToggleDetails"), "clicked")
     app.processEvents()
-# Passive updates preserve the disclosure state; changing runs closes it.
+# Passive updates and run selection preserve the advancement disclosure.
 invoke(analysis.findChild(QQuickItem, "analysisToggleDetails"), "clicked")
 bridge.analysisWorkspaceChanged.emit()
 app.processEvents()
 assert details.property("visible")
 analysis.setProperty("selectedRunId", "run-b")
 app.processEvents()
+assert analysis.findChild(QQuickItem, "analysisTrackingBand").property("visible")
 assert not details.property("visible")
 analysis.setProperty("selectedRunId", "run-a")
 app.processEvents()
@@ -759,7 +807,11 @@ run = {"id": "run-1", "phase": "evaluation", "phase_label": "Étape 2/2 · Éval
         {"phase": "evaluation", "status": "in_progress", "total": 97, "completed": 20, "failed": 0}]}
 bridge.analysis_workspace = {"candidates": [], "runs": [run], "active_run_id": "run-1"}
 analysis = load_page("AnalysisPage.qml")
+analysis.setProperty("trackingExpanded", True)
 assert analysis.findChild(QQuickItem, "analysisRunTitle").property("text") == "Analyse de 100 offres"
+assert not analysis.findChild(QQuickItem, "analysisRunDetails").property("visible")
+invoke(analysis.findChild(QQuickItem, "analysisRunDetailsToggle"), "clicked")
+app.processEvents()
 assert visual_item(analysis, "analysisPhaseMarker_1").property("finished")
 assert visual_item(analysis, "analysisPhaseMarker_2").property("active")
 assert visual_item(analysis, "analysisPhaseGlow_2").property("visible")
@@ -780,7 +832,7 @@ app.processEvents()
 assert "L’envoi doit être vérifié" in analysis.findChild(QQuickItem, "analysisRunError").property("text")
 assert not visual_item(analysis, "analysisPhaseGlow_2").property("visible")
 assert visual_item(analysis, "analysisPhaseStatus_2").property("text") == "Reprise nécessaire"
-assert "2 ignorées" in analysis.findChild(QQuickItem, "analysisRunResult").property("text")
+assert "2 ignorées" in analysis.findChild(QQuickItem, "analysisRunSummary").property("text")
 assert analysis.findChild(QQuickItem, "analysisFailedOffers").property("count") == 1
 run.update(status="blocked", status_label="Connexion à rétablir", is_active=False,
     can_retry=True, can_cancel=True, last_error="Permission api.files.write requise")
@@ -822,20 +874,35 @@ bridge.analysisWorkspaceChanged.emit()
 app.processEvents()
 assert not analysis.findChild(QQuickItem, "analysisRunError").property("visible")
 """,
-    "analysis_launch_is_visible_before_the_first_run_is_saved": r"""
+    "analysis_launch_keeps_preparation_out_of_the_details_band": r"""
 bridge.analysis_workspace = {"candidates": [
     {"id": 42, "title": "AI Engineer", "company": "Example", "location": "Paris"}
 ], "runs": [], "active_run_id": ""}
 analysis = load_page("AnalysisPage.qml")
+host = QQuickWindow()
+host.resize(1400, 820)
+analysis.setParentItem(host.contentItem())
+analysis.setProperty("width", 1400)
+analysis.setProperty("height", 820)
+host.show()
+invoke(analysis, "setSelected", 42, True)
+app.processEvents()
+table = analysis.findChild(QQuickItem, "analysisOfferTable")
+before = (table.x(), table.y(), table.width(), table.height())
+assert analysis.findChild(QQuickItem, "analysisStartBatchAction").property("enabled")
+analysis.setProperty("trackingExpanded", True)
 bridge.analysis_operation = "start"
 bridge.analysis_loading = True
 bridge.analysisWorkspaceOperationChanged.emit()
 bridge.analysisWorkspaceLoadingChanged.emit()
 app.processEvents()
-assert analysis.findChild(QQuickItem, "analysisLaunchCard").property("visible")
+assert not analysis.findChild(QQuickItem, "analysisTrackingBand").property("visible")
+assert not analysis.findChild(QQuickItem, "analysisToggleDetails").property("visible")
+assert analysis.findChild(QQuickItem, "analysisLaunchCard") is None
+assert analysis.findChild(QQuickItem, "analysisCancelLaunchAction") is None
 assert not analysis.findChild(QQuickItem, "analysisStartBatchAction").property("enabled")
-invoke(analysis.findChild(QQuickItem, "analysisCancelLaunchAction"), "clicked")
-assert bridge.analysis_start_cancellations == 1
+assert not analysis.findChild(QQuickItem, "analysisRefreshAction").property("enabled")
+assert (table.x(), table.y(), table.width(), table.height()) == before
 assert analysis.findChild(QQuickItem, "analysisQueuePanel").property("visible")
 bridge.analysis_workspace = {"candidates": [], "runs": [{
     "id": "run-1", "phase": "extraction", "status": "in_progress",
@@ -848,22 +915,40 @@ bridge.analysisWorkspaceChanged.emit()
 bridge.analysisWorkspaceLoadingChanged.emit()
 bridge.analysisWorkspaceOperationChanged.emit()
 app.processEvents()
-assert not analysis.findChild(QQuickItem, "analysisLaunchCard").property("visible")
+advancement = analysis.findChild(QQuickItem, "analysisToggleDetails")
+actions = analysis.findChild(QQuickItem, "analysisOfferActions")
+detail = analysis.findChild(QQuickItem, "analysisDetailPanel")
+assert advancement.property("visible")
+assert advancement.mapToItem(actions, QPointF()).x() + advancement.width() >= actions.width() - 1
+assert advancement.mapToItem(analysis, QPointF()).x() >= detail.mapToItem(analysis, QPointF()).x()
+assert analysis.findChild(QQuickItem, "analysisTrackingBand").property("visible")
 assert analysis.findChild(QQuickItem, "analysisRunCard").property("visible")
 assert analysis.findChild(QQuickItem, "analysisQueuePanel").property("visible")
+bridge.analysis_operation = "start"
+bridge.analysis_loading = True
+bridge.analysisWorkspaceOperationChanged.emit()
+bridge.analysisWorkspaceLoadingChanged.emit()
+app.processEvents()
+assert not analysis.findChild(QQuickItem, "analysisToggleDetails").property("visible")
+assert not analysis.findChild(QQuickItem, "analysisTrackingBand").property("visible")
+host.hide()
+analysis.setParentItem(None)
+host.deleteLater()
 """,
     "analysis_navigation_follows_duplicates_and_moves_launch_actions": r"""
 engine.load(QUrl.fromLocalFile(str(qml / "Main.qml")))
 window = engine.rootObjects()[0]
 actions = window.property("actions").toVariant()
 routes = [action["route"] for action in actions]
-assert routes.index("analysis") == routes.index("duplicates") + 1
+assert "analysis" not in routes
+assert routes.index("jobs") == routes.index("duplicates") + 1
 invoke(window, "navigate", "analysis", 0)
 def analysis_page_ready():
     item = window.findChild(QQuickItem, "analysisPage")
     # An asynchronous Loader exposes the root object before all bindings and
     # children are initialized. Wait for the workspace property and list too.
-    return (item is not None and item.property("selectedIds") is not None
+    return (window.property("currentRoute") == "jobs" and bridge.analysis_refreshes >= 1
+        and item is not None and item.property("selectedIds") is not None
         and item.findChild(QQuickItem, "analysisCandidateList") is not None)
 wait_until(analysis_page_ready)
 assert bridge.analysis_refreshes == 1
@@ -1072,12 +1157,12 @@ bridge.currentJobChanged.emit()
 app.processEvents()
 assert not reasons.property("visible") and card.property("visible")
 """,
-    "new_offers_are_confined_to_analysis": r"""
+    "new_offers_use_analysis_workspace_inside_offers": r"""
 control = page.findChild(QQuickItem, "offerDispositionFilter")
 assert control is not None and not control.property("visible")
 assert page.property("filterStatus") == "analyzed"
 status_control = page.findChild(QQuickItem, "offerStatusFilter")
-assert "scraped" not in [row["value"] for row in status_control.property("model")]
+assert "scraped" in [row["value"] for row in status_control.property("model")]
 assert "duplicate_review" not in [row["value"] for row in status_control.property("model")]
 invoke(page.findChild(QQuickItem, "offerRefreshAction"), "clicked")
 assert bridge.queries[-1] == ("", "analyzed", "llm_score", False, "", 0)
@@ -1101,7 +1186,121 @@ assert bridge.queries[-1] == ("Paris", "ready_for_form_submission", "llm_score",
 page.setProperty("requestedFilter", "scraped")
 invoke(page, "refreshOffers", 0)
 assert not control.property("visible")
-assert bridge.queries[-1] == ("Paris", "analyzed", "llm_score", False, "", 0)
+assert page.property("filterStatus") == "scraped"
+assert page.findChild(QQuickItem, "analysisPage").property("visible")
+assert bridge.queries[-1] == ("Paris", "ready_for_form_submission", "llm_score", False, "", 0)
+""",
+    "offer_status_selector_round_trips_through_analysis": r"""
+status = page.findChild(QQuickItem, "offerStatusFilter")
+status.setProperty("currentIndex", 0)
+assert QMetaObject.invokeMethod(status, "activated", Qt.DirectConnection, Q_ARG(int, 0))
+assert page.property("filterStatus") == "scraped"
+pending = page.findChild(QQuickItem, "analysisPage")
+assert pending.property("visible")
+assert not bridge.queries
+assert not pending.findChild(QQuickItem, "analysisTrackingBand").property("visible")
+pending_status = pending.findChild(QQuickItem, "analysisStatusFilter")
+pending_status.setProperty("currentIndex", 1)
+assert QMetaObject.invokeMethod(pending_status, "activated", Qt.DirectConnection, Q_ARG(int, 1))
+assert page.property("filterStatus") == "analyzed"
+assert not pending.property("visible")
+assert bridge.queries[-1] == ("", "analyzed", "llm_score", False, "", 0)
+""",
+    "offer_analysis_common_layout_matches_other_filters": r"""
+host = QQuickWindow()
+host.resize(1400, 850)
+page.setParentItem(host.contentItem())
+host.show()
+page.setProperty("filterStatus", "sent")
+app.processEvents()
+def position(item):
+    return item.mapToItem(page, QPointF())
+regular_toolbar = page.findChild(QQuickItem, "offerToolbar")
+regular_filter = page.findChild(QQuickItem, "offerStatusFilter")
+regular_table = page.findChild(QQuickItem, "offerTable")
+regular_divider = page.findChild(QQuickItem, "offerWorkspaceDivider")
+regular_company = page.findChild(QQuickItem, "offerCompanyHeader")
+regular_search = page.findChild(QQuickItem, "expandableSearch")
+regular_refresh = page.findChild(QQuickItem, "offerRefreshAction")
+shortlist = page.findChild(QQuickItem, "offerShortlistControls")
+def tools_at_right(toolbar, search, refresh):
+    assert abs(position(search).y() - position(refresh).y()) <= 1
+    assert abs(position(search).x() + search.width() + toolbar.property("spacing")
+        - position(refresh).x()) <= 1
+    assert abs(position(refresh).x() + refresh.width()
+        - position(toolbar).x() - toolbar.width()) <= 1
+regular_layout = [(position(item).x(), position(item).y(), item.width(), item.height())
+    for item in (regular_toolbar, regular_filter, regular_table, regular_divider, regular_company, regular_search)]
+for status in ("analyzed", "ready_for_form_submission", "archived", "sent"):
+    page.setProperty("filterStatus", status)
+    app.processEvents()
+    current = [(position(item).x(), position(item).y(), item.width(), item.height())
+        for item in (regular_toolbar, regular_filter, regular_table, regular_divider, regular_company, regular_search)]
+    assert current == regular_layout, (status, current, regular_layout)
+    tools_at_right(regular_toolbar, regular_search, regular_refresh)
+    assert shortlist.property("visible") == (status == "analyzed")
+    if status == "analyzed":
+        assert abs(position(shortlist).y() - position(regular_filter).y()) <= 1
+        assert position(shortlist).x() + shortlist.width() < position(regular_search).x()
+invoke(page, "setSelected", 42, True)
+app.processEvents()
+assert position(regular_table).y() == regular_layout[2][1]
+invoke(page, "clearSelection")
+page.setProperty("filterStatus", "scraped")
+app.processEvents()
+analysis = page.findChild(QQuickItem, "analysisPage")
+assert analysis.property("visible")
+analysis_items = [analysis.findChild(QQuickItem, name) for name in (
+    "analysisToolbar", "analysisStatusFilter", "analysisOfferTable",
+    "analysisWorkspaceDivider", "analysisCompanyHeader", "analysisExpandableSearch",
+)]
+analysis_layout = [(position(item).x(), position(item).y(), item.width(), item.height())
+    for item in analysis_items]
+for index, (regular, pending) in enumerate(zip(regular_layout, analysis_layout)):
+    compared = (0, 1, 2, 3)
+    assert all(abs(regular[i] - pending[i]) <= 1 for i in compared), (regular, pending)
+analysis_toolbar = analysis.findChild(QQuickItem, "analysisToolbar")
+analysis_search = analysis.findChild(QQuickItem, "analysisExpandableSearch")
+analysis_refresh = analysis.findChild(QQuickItem, "analysisRefreshAction")
+tools_at_right(analysis_toolbar, analysis_search, analysis_refresh)
+assert abs(position(analysis_search).x() - position(regular_search).x()) <= 1
+assert abs(position(analysis_refresh).x() - position(regular_refresh).x()) <= 1
+for width in (1100, 1400, 1800):
+    host.resize(width, 850)
+    page.setProperty("width", width)
+    page.setProperty("filterStatus", "analyzed")
+    app.processEvents()
+    tools_at_right(regular_toolbar, regular_search, regular_refresh)
+    slider = page.findChild(QQuickItem, "offerMinimumLlmScoreSlider")
+    assert position(slider).x() + slider.width() < position(shortlist).x()
+    assert position(slider).y() < position(regular_filter).y()
+    assert abs(position(shortlist).y() - position(regular_filter).y()) <= 1
+    assert position(shortlist).x() + shortlist.width() < position(regular_search).x()
+    page.setProperty("filterStatus", "scraped")
+    app.processEvents()
+    tools_at_right(analysis_toolbar, analysis_search, analysis_refresh)
+    assert abs(position(analysis_search).x() - position(regular_search).x()) <= 1
+    assert abs(position(analysis_refresh).x() - position(regular_refresh).x()) <= 1
+page.setProperty("filterStatus", "analyzed")
+app.processEvents()
+refresh_x = position(regular_refresh).x()
+invoke(page.findChild(QQuickItem, "offerSearchToggle"), "clicked")
+app.processEvents()
+assert abs(position(regular_refresh).x() - refresh_x) <= 1
+assert regular_search.property("expanded")
+assert not shortlist.property("visible")
+for regular_name, pending_name in (
+    ("offerTitleHeader", "analysisTitleHeader"),
+    ("offerLocationHeader", "analysisLocationHeader"),
+):
+    regular = page.findChild(QQuickItem, regular_name)
+    pending = analysis.findChild(QQuickItem, pending_name)
+    assert abs(position(regular).x() - position(pending).x()) <= 1
+    assert abs(regular.width() - pending.width()) <= 1
+assert analysis.findChild(QQuickItem, "analysisStatusFilter").property("emphasized")
+host.hide()
+page.setParentItem(None)
+host.deleteLater()
 """,
     "offer_pages_keep_global_and_page_selection_distinct": r"""
 bridge.matching_rows = [offer(100 + i, 0) for i in range(5)]
@@ -1183,7 +1382,7 @@ bridge.rows = original_rows
 bridge.jobsChanged.emit()
 wait_until(lambda: table.property("contentHeight") > table.property("height"))
 
-for route in ("analysis", "search", "duplicates"):
+for route in ("search", "duplicates"):
     search.setProperty("text", "Paris " + route)
     offers.setProperty("sortKey", "published_date")
     offers.setProperty("sortAscending", False)
@@ -1223,7 +1422,9 @@ assert offers.property("filterStatus") == "archived"
 assert bridge.queries[-1] == ("Paris duplicates", "archived", "llm_score", False, "", 0, "")
 assert offers.property("selectedCount") == 0
 invoke(window, "navigate", "jobs?status=scraped", 0)
-wait_until(lambda: window.property("currentRoute") == "analysis")
+wait_until(lambda: offers.property("filterStatus") == "scraped")
+assert window.property("currentRoute") == "jobs"
+assert offers.findChild(QQuickItem, "analysisPage").property("visible")
 invoke(window, "navigate", "jobs?status=duplicate_review", 0)
 wait_until(lambda: window.property("currentRoute") == "duplicates")
 assert bridge.queries[-1][1] == "duplicate_review"
@@ -1272,10 +1473,9 @@ assert bridge.saves[-1] == (7, "idle draft", 2)
     "context_and_offer_guards": r"""
 viewport = page.findChild(QQuickItem, "offerDetailViewport")
 viewport.setProperty("contentY", 200)
-page.setProperty("documentReviewDetailsExpanded", True)
 bridge.currentJobChanged.emit()
 assert viewport.property("contentY") == 200
-assert page.property("documentReviewDetailsExpanded") is True
+assert page.property("documentReviewPointCount") == 1
 archive = page.findChild(QQuickItem, "offerArchiveApplicationAction")
 assert archive.property("enabled") is True
 assert notes.property("enabled") is True
@@ -1286,7 +1486,7 @@ assert notes.property("enabled") is True
 assert page.findChild(QQuickItem, "offerNextAction").property("enabled") is True
 select(43, 8)
 assert viewport.property("contentY") == 0
-assert page.property("documentReviewDetailsExpanded") is False
+assert page.property("documentReviewPointCount") == 1
 manual = load_page("ManualPage.qml")
 manual.findChild(QQuickItem, "manualTitle").setProperty("text", "AI Engineer")
 manual.findChild(QQuickItem, "manualCompany").setProperty("text", "Example")
@@ -1335,6 +1535,37 @@ assert bridge.maintenance_retries == 1
 assert retry.property("visible") is False
 """,
 }
+
+_SCENARIOS["minimum_ai_score_uses_space_above_toolbar_without_moving_buttons"] = r"""
+engine.load(QUrl.fromLocalFile(str(qml / "Main.qml")))
+window = engine.rootObjects()[0]
+invoke(window, "navigate", "jobs", 0)
+wait_until(lambda: window.findChild(QQuickItem, "jobsPage") is not None and bridge.queries)
+offers = window.findChild(QQuickItem, "jobsPage")
+slider = offers.findChild(QQuickItem, "offerMinimumLlmScoreSlider")
+controls = offers.findChild(QQuickItem, "offerFilterControlsBand")
+status_filter = offers.findChild(QQuickItem, "offerStatusFilter")
+selection = offers.findChild(QQuickItem, "offerSelectionBand")
+analysis = offers.findChild(QQuickItem, "analysisPage")
+def position(item):
+    return item.mapToItem(window.contentItem(), QPointF()).y()
+assert offers.property("topInset") == 28
+assert abs(controls.mapToItem(offers, QPointF()).x()
+    - status_filter.mapToItem(offers, QPointF()).x()) <= 1
+assert position(slider) + slider.height() < position(status_filter)
+assert position(selection) > position(status_filter) + status_filter.height()
+for status in ("ready_for_form_submission", "sent"):
+    offers.setProperty("filterStatus", status)
+    app.processEvents()
+    assert slider.property("visible")
+    assert position(slider) + slider.height() < position(status_filter)
+    assert position(selection) > position(status_filter) + status_filter.height()
+offers.setProperty("filterStatus", "scraped")
+app.processEvents()
+assert not slider.property("visible")
+assert analysis.property("visible")
+assert analysis.property("topInset") == 28
+"""
 
 _SCENARIOS["analysis_numeric_experience_sort_without_state_column"] = r"""
 bridge.analysis_workspace = {"candidates": [
@@ -1419,31 +1650,52 @@ assert single.property("enabled")
 toolbar = analysis.findChild(QQuickItem, "analysisToolbar")
 table = analysis.findChild(QQuickItem, "analysisOfferTable")
 source = analysis.findChild(QQuickItem, "analysisOfferSourceAction")
+selection_bar = analysis.findChild(QQuickItem, "analysisSelectionBar")
+clear = analysis.findChild(QQuickItem, "analysisClearSelection")
+immediate = analysis.findChild(QQuickItem, "analysisStartImmediateAction")
+batch = analysis.findChild(QQuickItem, "analysisStartBatchAction")
+assert selection_bar.property("visible") and clear.property("text") == "Effacer"
+assert immediate.property("text") == "Immédiate (1)"
+assert batch.property("text") == "Batch (1)"
 for width, height in [(1100, 720), (1320, 820), (1480, 920), (1800, 1000), (2524, 1000)]:
     host.resize(width, height)
     analysis.setProperty("width", width)
     analysis.setProperty("height", height)
     app.processEvents()
     ordered_controls = [analysis.findChild(QQuickItem, name) for name in (
-        "analysisStartImmediateAction", "analysisStartBatchAction",
-        "analysisArchiveSelectionAction", "analysisRefreshAction", "analysisExpandableSearch",
-    )]
+        "analysisStatusFilter", "analysisExpandableSearch", "analysisRefreshAction",
+    ) if analysis.findChild(QQuickItem, name).property("visible")]
     positions = [control.mapToItem(toolbar, QPointF()) for control in ordered_controls]
     for before, after in zip(positions, positions[1:]):
         assert before.y() < after.y() - 1 or (
             abs(before.y() - after.y()) <= 1 and before.x() < after.x()
         ), (width, [(point.x(), point.y()) for point in positions])
-    for name in ("analysisArchiveSelectionAction", "analysisStartImmediateAction", "analysisStartBatchAction"):
+    for name in ("analysisStartImmediateAction", "analysisStartBatchAction"):
         button = analysis.findChild(QQuickItem, name)
-        position = button.mapToItem(toolbar, QPointF())
-        assert position.x() >= 0 and position.x() + button.width() <= toolbar.width() + 1, (
-            width, name, position.x(), toolbar.width(),
+        position = button.mapToItem(selection_bar, QPointF())
+        assert position.x() >= 0 and position.x() + button.width() <= selection_bar.width() + 1, (
+            width, name, position.x(), selection_bar.width(),
         )
         assert button.mapToItem(analysis, QPointF()).y() + button.height() <= table.mapToItem(analysis, QPointF()).y()
+    assert clear.mapToItem(selection_bar, QPointF()).x() + clear.width() <= immediate.mapToItem(selection_bar, QPointF()).x()
+    assert immediate.mapToItem(selection_bar, QPointF()).x() + immediate.width() <= batch.mapToItem(selection_bar, QPointF()).x()
+    assert selection_bar.mapToItem(analysis, QPointF()).y() >= toolbar.mapToItem(analysis, QPointF()).y() + toolbar.height()
+    advancement = analysis.findChild(QQuickItem, "analysisToggleDetails")
+    actions = analysis.findChild(QQuickItem, "analysisOfferActions")
+    if advancement.property("visible"):
+        assert advancement.mapToItem(actions, QPointF()).x() + advancement.width() >= actions.width() - 1
+        assert advancement.mapToItem(analysis, QPointF()).x() > table.mapToItem(analysis, QPointF()).x() + table.width()
+        assert advancement.mapToItem(analysis, QPointF()).y() >= table.mapToItem(analysis, QPointF()).y() + table.height()
+    assert bulk.mapToItem(analysis, QPointF()).y() >= table.mapToItem(analysis, QPointF()).y()
     assert single.mapToItem(analysis, QPointF()).x() > source.mapToItem(analysis, QPointF()).x()
 bridge.analysis_offer["status"] = "archived"
 bridge.analysisOfferChanged.emit()
 assert not single.property("enabled") and single.property("text") == "Archivée"
+invoke(clear, "clicked")
+app.processEvents()
+assert analysis.property("selectedIds").toVariant() == []
+assert selection_bar.property("visible") and selection_bar.height() == 48
+assert not clear.property("visible")
 bridge.closing = True
 bridge.shutdownRequestedChanged.emit()
 assert not bulk.property("enabled")
@@ -1460,16 +1712,192 @@ app.processEvents()
 """
 
 
-_SCENARIOS["technical_score_survives_advisory_warnings_and_unknown_admissibility"] = r"""
+_SCENARIOS["completed_analysis_uses_compact_summary_and_optional_steps"] = r"""
+run = {"id": "run-9", "sequence": 9, "phase": "done", "status": "completed",
+    "status_label": "Terminé", "total": 1, "analyzed": 0, "screened_out": 1,
+    "created_at": "2026-10-10T19:49:00Z", "provider_label": "Anthropic",
+    "model": "claude-haiku-5-5", "phase_batches": [
+        {"phase": "screening", "status": "completed", "total": 1, "completed": 1,
+         "batches": [{"number": 1, "status": "completed", "status_label": "Terminé",
+                      "offers": 1, "total": 1, "completed": 1, "failed": 0}]},
+        {"phase": "extraction", "status": "skipped", "batches": []},
+        {"phase": "evaluation", "status": "skipped", "batches": []},
+    ]}
+bridge.analysis_workspace = {"candidates": [], "runs": [run,
+    {"id": "run-8", "sequence": 8, "status": "completed", "total": 1,
+     "created_at": "2026-10-09T19:49:00Z"}], "active_run_id": "run-9"}
+analysis = load_page("AnalysisPage.qml")
+host = QQuickWindow()
+host.resize(1400, 820)
+analysis.setParentItem(host.contentItem())
+analysis.setProperty("width", 1400)
+analysis.setProperty("height", 820)
+host.show()
+analysis.setProperty("trackingExpanded", True)
+app.processEvents()
+band = analysis.findChild(QQuickItem, "analysisTrackingBand")
+details = analysis.findChild(QQuickItem, "analysisRunDetails")
+assert band.property("visible") and band.height() <= 110, band.height()
+assert analysis.findChild(QQuickItem, "analysisRunTitle").property("text") == "Analyse de 1 offre"
+assert analysis.findChild(QQuickItem, "analysisRunSummary").property("text") == "1 écartée au préfiltre"
+assert not details.property("visible")
+assert not analysis.findChild(QQuickItem, "analysisRunProvider").property("visible")
+assert not analysis.findChild(QQuickItem, "analysisTimeline").property("visible")
+selector = analysis.findChild(QQuickItem, "analysisRunSelector")
+assert selector.property("visible")
+assert "Terminé" not in selector.property("model")[0]["label"]
+assert "offre" not in selector.property("model")[0]["label"]
+invoke(analysis.findChild(QQuickItem, "analysisRunDetailsToggle"), "clicked")
+app.processEvents()
+assert details.property("visible") and band.height() <= 240, band.height()
+assert visual_item(analysis, "analysisScreeningBatches").property("visible")
+assert analysis.findChild(QQuickItem, "analysisRunResult") is None
+assert not analysis.findChild(QQuickItem, "analysisTimeline").property("visible")
+assert visual_item(analysis, "analysisBatchProgress_screening_1").property("text") == "1 / 1"
+host.hide()
+analysis.setParentItem(None)
+host.deleteLater()
+"""
+
+
+_SCENARIOS["single_active_batch_does_not_repeat_timeline_progress"] = r"""
+run = {"id": "run-11", "sequence": 11, "phase": "screening", "status": "in_progress",
+    "status_label": "Traitement en cours", "is_active": True, "total": 1,
+    "analyzed": 0, "created_at": "2026-10-10T20:31:00Z", "phase_batches": [
+        {"phase": "screening", "status": "in_progress", "status_label": "Traitement en cours",
+         "total": 1, "completed": 0, "batch_count": 1, "batches": [
+            {"number": 1, "status": "in_progress", "status_label": "Traitement en cours",
+             "total": 1, "completed": 0, "failed": 0}]},
+        {"phase": "extraction", "status": "waiting", "batches": []},
+        {"phase": "evaluation", "status": "waiting", "batches": []},
+    ]}
+bridge.analysis_workspace = {"candidates": [], "runs": [run], "active_run_id": "run-11"}
+analysis = load_page("AnalysisPage.qml")
+host = QQuickWindow()
+host.resize(1400, 820)
+analysis.setParentItem(host.contentItem())
+analysis.setProperty("width", 1400)
+analysis.setProperty("height", 820)
+host.show()
+analysis.setProperty("trackingExpanded", True)
+invoke(analysis.findChild(QQuickItem, "analysisRunDetailsToggle"), "clicked")
+app.processEvents()
+timeline = analysis.findChild(QQuickItem, "analysisTimeline")
+batches = analysis.findChild(QQuickItem, "analysisBatchDetails")
+band = analysis.findChild(QQuickItem, "analysisTrackingBand")
+assert timeline.property("visible")
+assert not batches.property("visible")
+assert band.height() < 230, band.height()
+assert analysis.findChild(QQuickItem, "analysisRunSummary").property("text") == "Préfiltre en cours"
+run["phase_batches"][0]["batches"].append(
+    {"number": 2, "status": "prepared", "status_label": "En attente",
+     "total": 1, "completed": 0, "failed": 0})
+bridge.analysis_workspace = {**bridge.analysis_workspace, "runs": [run]}
+bridge.analysisWorkspaceChanged.emit()
+app.processEvents()
+assert batches.property("visible")
+host.hide()
+analysis.setParentItem(None)
+host.deleteLater()
+"""
+
+
+_SCENARIOS["analyzed_offers_show_analysis_instead_of_scraped_description"] = r"""
+host = QQuickWindow()
+host.resize(1400, 850)
+page.setParentItem(host.contentItem())
+host.show()
+bridge.job.update({
+    "has_analysis": True, "role_type": "Data Scientist", "seniority": "junior",
+    "domain": "Santé", "main_tasks": ["Construire des modèles prédictifs.", "Analyser les résultats."],
+    "required_skills": ["Python", "Machine learning"], "nice_to_have": ["SQL"],
+    "llm_score": 0.75, "fit_current": True,
+    "match_reasons": ["Les projets ML appuient les missions.", "Une autre correspondance utile."],
+    "fit_axes": [
+        {"axis": "missions", "level": 3, "findings": ["Les projets ML appuient les missions."]},
+        {"axis": "essentials", "level": 3, "findings": ["Python est documenté dans les expériences."]},
+        {"axis": "responsibilities", "level": 2, "findings": ["La responsabilité de production reste à préciser."]},
+    ],
+})
+bridge.currentJobChanged.emit()
+app.processEvents()
+summary = page.findChild(QQuickItem, "offerAnalysisSummary")
+raw = page.findChild(QQuickItem, "offerRawDescription")
+for status in ("analyzed", "ready_for_form_submission", "sent", "archived"):
+    page.setProperty("filterStatus", status)
+    bridge.job["status"] = status
+    bridge.currentJobChanged.emit()
+    app.processEvents()
+    assert summary.property("visible") and not raw.property("visible"), status
+assert visual_item(summary, "offerAnalysis_role").property("text") == "Data Scientist"
+assert visual_item(summary, "offerAnalysis_seniority").property("text") == "Junior"
+assert visual_item(summary, "offerAnalysis_domain").property("text") == "Santé"
+assert "Construire des modèles" in visual_item(summary, "offerAnalysis_tasks").property("text")
+assert visual_item(summary, "offerAnalysis_requiredSkills").property("text") == "Python · Machine learning"
+assert visual_item(summary, "offerAnalysis_niceToHave").property("text") == "SQL"
+fit = page.findChild(QQuickItem, "offerFitEvaluation")
+heading = summary.findChild(QQuickItem, "offerAnalysisHeading")
+tasks = visual_item(summary, "offerAnalysis_tasks")
+assert heading.mapToScene(QPointF(0, heading.height())).y() <= fit.mapToScene(QPointF(0, 0)).y()
+assert fit.mapToScene(QPointF(0, fit.height())).y() < tasks.mapToScene(QPointF(0, 0)).y()
+if summary.property("inlineEvaluation"):
+    metadata = summary.findChild(QQuickItem, "offerAnalysisMetadata")
+    assert fit.mapToScene(QPointF(fit.width(), 0)).x() <= metadata.mapToScene(QPointF(0, 0)).x()
+assert page.property("standaloneMatchPoints").toVariant() == ["Une autre correspondance utile."]
+details = summary.findChild(QQuickItem, "offerFitDetails")
+assert not details.property("visible")
+assert QMetaObject.invokeMethod(fit.findChild(QObject, "offerFitDetailsAction"), "clicked")
+app.processEvents()
+assert details.property("visible")
+for axis in ("missions", "essentials", "responsibilities"):
+    assert visual_item(summary, "offerFitFindings_" + axis).property("visible")
+bridge.job["id"] = 43
+bridge.currentJobChanged.emit()
+app.processEvents()
+assert not details.property("visible")
+bridge.job.update({"has_analysis": False, "analyzed": True, "llm_score": None})
+bridge.currentJobChanged.emit()
+app.processEvents()
+assert raw.property("visible") and not summary.property("visible")
+assert "A meaningful responsibility" in raw.property("description")
+# The same rule applies to the independent pre-analysis offer panel.
+component = QQmlComponent(engine, QUrl.fromLocalFile(str(qml / "components" / "AnalysisOfferDetail.qml")))
+assert not component.isError(), [error.toString() for error in component.errors()]
+detail = component.create()
+components.append(component)
+pages.append(detail)
+detail.setProperty("width", 500)
+detail.setProperty("height", 750)
+detail.setProperty("offer", {**bridge.job, "status": "scraped"})
+app.processEvents()
+assert detail.findChild(QQuickItem, "analysisOfferDescription").property("visible")
+assert not detail.findChild(QQuickItem, "analysisOfferSummary").property("visible")
+detail.setProperty("offer", {**bridge.job, "has_analysis": True, "llm_score": 0.75})
+app.processEvents()
+assert not detail.findChild(QQuickItem, "analysisOfferDescription").property("visible")
+assert detail.findChild(QQuickItem, "analysisOfferSummary").property("visible")
+# An incomplete saved analysis stays explicit instead of returning to scraped text.
+detail.setProperty("offer", {"id": 99, "has_analysis": True, "main_tasks": []})
+app.processEvents()
+empty_summary = detail.findChild(QQuickItem, "analysisOfferSummary")
+assert visual_item(empty_summary, "offerAnalysis_role").property("text") == "Non précisé"
+assert visual_item(empty_summary, "offerAnalysis_tasks").property("text") == "Non renseignées dans l’analyse."
+host.hide()
+page.setParentItem(None)
+host.deleteLater()
+"""
+
+
+_SCENARIOS["fit_card_shows_only_three_level_scores"] = r"""
 card = page.findChild(QQuickItem, "offerFitEvaluation")
 assert not card.property("visible")
 bridge.job.update({
-    "llm_score": 0.70, "fit_current": True, "fit_status_label": "Évaluation actuelle",
+    "has_analysis": True, "llm_score": 0.70, "fit_current": True, "fit_status_label": "Évaluation actuelle",
     "candidacy_label": "Candidature à vérifier",
     "fit_axes": [
-        {"axis": "missions", "label": "Missions", "decision_label": "Fort", "level": 4},
-        {"axis": "essentials", "label": "Essentiels", "decision_label": "Très faible", "level": 0},
-        {"axis": "responsibilities", "label": "Responsabilités", "decision_label": "Fort", "level": 4},
+        {"axis": "missions", "label": "Missions", "decision_label": "Crédible", "level": 3},
+        {"axis": "essentials", "label": "Essentiels", "decision_label": "Crédible", "level": 3},
+        {"axis": "responsibilities", "label": "Responsabilités", "decision_label": "Partiel", "level": 2},
     ],
     "fit_admissibility": [
         {"dimension": "mandatory_conditions", "label": "Conditions obligatoires", "status": "unknown",
@@ -1483,32 +1911,24 @@ bridge.job.update({
 bridge.currentJobChanged.emit()
 app.processEvents()
 assert card.property("visible")
-score = page.findChild(QQuickItem, "offerTechnicalScore")
-assert score.property("text") == "70 / 100"
-method = page.findChild(QQuickItem, "offerFitMethod")
-assert "50 / 30 / 20" in method.property("text")
-axis = visual_item(card, "offerFitAxis_essentials")
-assert axis is not None and axis.property("text") == "Très faible · 0 / 4"
-mandatory = visual_item(card, "offerAdmissibility_mandatory_conditions")
-assert mandatory.property("text") == "Conditions obligatoires · À confirmer"
-warning_action = page.findChild(QQuickItem, "offerFitWarningsAction")
-assert warning_action.property("visible")
-card.setProperty("warningsExpanded", True)
-app.processEvents()
-warnings = page.findChild(QQuickItem, "offerFitWarnings")
-assert warnings.property("visible") and "Citation invalide" in warnings.property("text")
-assert score.property("text") == "70 / 100"
+assert visual_item(card, "offerFitAxis_missions").property("text") == "3 / 4"
+assert visual_item(card, "offerFitAxis_essentials").property("text") == "3 / 4"
+assert visual_item(card, "offerFitAxis_responsibilities").property("text") == "2 / 4"
+assert visual_item(card, "offerFitSegment_missions_0").property("color") == \
+    visual_item(card, "offerFitSegment_missions_2").property("color")
+assert visual_item(card, "offerFitSegment_missions_2").property("color") != \
+    visual_item(card, "offerFitSegment_missions_3").property("color")
+assert page.findChild(QQuickItem, "offerTechnicalScore") is None
+assert page.findChild(QQuickItem, "offerFitMethod") is None
+assert page.findChild(QQuickItem, "offerAdmissibility_mandatory_conditions") is None
+assert page.findChild(QQuickItem, "offerFitWarningsAction") is None
 bridge.job.update({"fit_warnings": [], "fit_current": False,
                    "fit_status_label": "Évaluation historique · à réévaluer"})
 bridge.currentJobChanged.emit()
 app.processEvents()
-assert score.property("text") == "70 / 100"
-assert "historique" in page.findChild(QQuickItem, "offerFitStatus").property("text")
-assert "non comparable" in method.property("text")
-assert "réévaluation explicite" in method.property("text")
-assert "50 / 30 / 20" not in method.property("text")
-assert visual_item(card, "offerFitAxis_essentials") is None
-# The Analysis offer detail exposes the same score and dimensions after completion.
+for axis in ("missions", "essentials", "responsibilities"):
+    assert visual_item(card, "offerFitAxis_" + axis).property("text") == "— / 4"
+# The Analysis offer detail uses the same three-level card.
 analysis_component = QQmlComponent(engine, QUrl.fromLocalFile(str(qml / "components" / "AnalysisOfferDetail.qml")))
 assert not analysis_component.isError(), [error.toString() for error in analysis_component.errors()]
 analysis_detail = analysis_component.create()
@@ -1521,9 +1941,47 @@ pages.append(analysis_detail)
 app.processEvents()
 analysis_card = analysis_detail.findChild(QQuickItem, "analysisOfferFitEvaluation")
 assert analysis_card.property("visible")
-assert analysis_detail.findChild(QQuickItem, "offerTechnicalScore").property("text") == "70 / 100"
-assert "réévaluation explicite" in analysis_detail.findChild(QQuickItem, "offerFitMethod").property("text")
-assert visual_item(analysis_card, "offerFitAxis_essentials") is None
+for axis in ("missions", "essentials", "responsibilities"):
+    assert visual_item(analysis_card, "offerFitAxis_" + axis).property("text") == "— / 4"
+"""
+
+
+_SCENARIOS["fit_insight_points_are_brief_by_default_and_expand_without_loss"] = r"""
+bridge.job.update({
+    "match_reasons": ["Point positif " + str(i) + " : " + "preuve détaillée " * 20
+                      for i in range(5)],
+    "risks": [
+        "Lieu à confirmer", "Contrat à confirmer", "Salaire non indiqué",
+        "Appui candidat à préciser : pratique en production non documentée",
+        "Non documenté : encadrement de l’équipe", "Clients non nommés", "Outils à confirmer",
+    ],
+})
+bridge.currentJobChanged.emit()
+wait_until(lambda: visual_item(page, "offerMatchPointText") is not None
+    and visual_item(page, "offerRiskPointText") is not None)
+matches = page.findChild(QQuickItem, "offerMatchPoints")
+risks = page.findChild(QQuickItem, "offerRiskPoints")
+assert matches.property("count") == 3
+assert risks.property("count") == 4
+assert visual_item(page, "offerMatchPointText").property("maximumLineCount") == 2
+assert visual_item(page, "offerRiskPointText").property("maximumLineCount") == 2
+match_toggle = page.findChild(QQuickItem, "offerMatchPointsToggle")
+risk_toggle = page.findChild(QQuickItem, "offerRiskPointsToggle")
+assert match_toggle.property("visible") and risk_toggle.property("visible")
+assert page.property("orderedRiskPoints").toVariant()[:4] == [
+    "Lieu à confirmer", "Contrat à confirmer",
+    "Appui candidat à préciser : pratique en production non documentée",
+    "Non documenté : encadrement de l’équipe",
+]
+invoke(match_toggle, "clicked")
+invoke(risk_toggle, "clicked")
+wait_until(lambda: matches.property("count") == 5 and risks.property("count") == 7
+    and visual_item(page, "offerMatchPointText") is not None
+    and visual_item(page, "offerRiskPointText") is not None)
+assert visual_item(page, "offerMatchPointText").property("maximumLineCount") == 999
+assert visual_item(page, "offerRiskPointText").property("maximumLineCount") == 999
+select(43, 8)
+assert not page.property("matchPointsExpanded") and not page.property("riskPointsExpanded")
 """
 
 
@@ -1645,7 +2103,9 @@ def ready():
     page = window.findChild(QQuickItem, "analysisPage")
     view = page.findChild(QQuickItem, "analysisCandidateList") if page is not None else None
     counts = visual_item(page, "analysisPhaseCounts_3") if page is not None else None
-    return (page is not None and page.property("selectedIds") is not None
+    return (window.property("currentRoute") == "jobs"
+        and page is not None and page.property("visible")
+        and page.property("selectedIds") is not None
         and view is not None and view.property("count") == 29
         and counts is not None and counts.property("text") == "1 / 2 demandes traitées"
         and not bridge.analysisWorkspaceLoading and len(bridge.analysisWorkspace["candidates"]) == 29)
@@ -1661,8 +2121,8 @@ assert not analysis.findChild(QQuickItem, "analysisStartBatchAction").property("
 first_available = bridge.analysisWorkspace["candidates"][0]["id"]
 analysis.setProperty("selectedOffers", {str(first_available): True})
 app.processEvents()
-assert analysis.findChild(QQuickItem, "analysisStartBatchAction").property("enabled")
-assert analysis.findChild(QQuickItem, "analysisStartImmediateAction").property("enabled")
+wait_until(lambda: analysis.findChild(QQuickItem, "analysisStartBatchAction").property("enabled")
+    and analysis.findChild(QQuickItem, "analysisStartImmediateAction").property("enabled"))
 assert visual_item(analysis, "analysisExtractionBatches").property("batches")[0]["completed"] == 2
 assert visual_item(analysis, "analysisEvaluationBatches").property("batches")[0]["completed"] == 1
 assert visual_item(analysis, "analysisPhaseCounts_2").property("text") == "2 / 2 demandes réussies"

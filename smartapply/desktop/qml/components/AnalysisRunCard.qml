@@ -16,13 +16,10 @@ Surface {
     readonly property int analyzed: Number(run.analyzed || 0)
     readonly property int screenedOut: Number(run.screened_out || 0)
     readonly property int failedCount: Number(run.failed || 0) + Number(run.skipped || 0)
+    readonly property bool hasMultipleBatches: (run.phase_batches || []).some(function(phase) {
+        return (phase.batches || []).length > 1
+    })
     readonly property bool needsAction: ["blocked", "attention", "failed"].indexOf(run.status) >= 0
-    readonly property int batchCount: (run.phase_batches || []).reduce(function(sum, phase) {
-        return sum + Number(phase.batch_count || (phase.batches || []).length)
-    }, 0)
-    readonly property int submittedBatchCount: (run.phase_batches || []).reduce(function(sum, phase) {
-        return sum + Number(phase.submitted_count !== undefined ? phase.submitted_count : phase.batch_count || 0)
-    }, 0)
     signal retryRequested(string runId)
     signal cancelRequested(string runId)
     signal runSelected(string runId)
@@ -56,6 +53,22 @@ Surface {
         return "Le traitement a été interrompu. Vous pouvez reprendre les demandes restantes."
     }
 
+    function resultSummary() {
+        var parts = []
+        if (analyzed > 0)
+            parts.push(analyzed + (analyzed === 1 ? " analysée" : " analysées"))
+        if (screenedOut > 0)
+            parts.push(screenedOut + (screenedOut === 1 ? " écartée" : " écartées") + " au préfiltre")
+        if (Number(run.failed || 0) > 0)
+            parts.push(run.failed + " en échec")
+        if (Number(run.skipped || 0) > 0)
+            parts.push(run.skipped + " ignorée" + (Number(run.skipped) === 1 ? "" : "s"))
+        if (parts.length === 0 && run.is_active)
+            return ({screening: "Préfiltre en cours", extraction: "Extraction en cours",
+                evaluation: "Évaluation en cours"})[run.phase] || "Préparation en cours"
+        return parts.join(" · ")
+    }
+
     Item {
         id: runHeader
         Layout.fillWidth: true
@@ -80,23 +93,10 @@ Surface {
             Text {
                 objectName: "analysisRunSummary"
                 Layout.fillWidth: true
-                text: "Analyse n°" + Number(root.run.sequence || 1)
-                    + " · " + root.submittedBatchCount + (root.submittedBatchCount <= 1 ? " Batch envoyé" : " Batch envoyés")
-                    + (root.batchCount > root.submittedBatchCount
-                        ? " · " + (root.batchCount - root.submittedBatchCount) + " programmés" : "")
-                    + " · " + root.analyzed + " / " + root.total
-                    + (root.total === 1 ? " offre analysée" : " offres analysées")
-                    + (root.screenedOut > 0 ? " · " + root.screenedOut + " écartée" + (root.screenedOut === 1 ? "" : "s") + " au préfiltre" : "")
+                visible: text.length > 0
+                text: root.resultSummary()
                 color: Theme.inkMuted
-                font.pixelSize: 10
-                elide: Text.ElideRight
-            }
-            Text {
-                objectName: "analysisRunProvider"
-                Layout.fillWidth: true
-                text: [root.run.provider_label || (root.run.provider === "anthropic" ? "Claude · Anthropic" : "OpenAI"), root.run.model || ""].filter(Boolean).join(" · ")
-                color: Theme.inkMuted
-                font.pixelSize: 10
+                font.pixelSize: 11
                 elide: Text.ElideRight
             }
         }
@@ -104,7 +104,7 @@ Surface {
             id: runSelector
             objectName: "analysisRunSelector"
             visible: root.historyOptions.length > 1
-            width: Math.min(330, Math.max(160,
+            width: Math.min(260, Math.max(160,
                 runHeader.width - 2 * Math.max(300, headerActions.implicitWidth) - 20))
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.top: parent.top
@@ -138,6 +138,15 @@ Surface {
                 compact: true
             }
             AppButton {
+                objectName: "analysisRunDetailsToggle"
+                text: root.detailsExpanded ? "Réduire" : "Détails"
+                refined: true
+                quiet: true
+                fontPixelSize: 11
+                implicitHeight: 30
+                onClicked: root.detailsExpanded = !root.detailsExpanded
+            }
+            AppButton {
                 objectName: "analysisRetryAction"
                 visible: Boolean(root.run.can_retry)
                 text: "Reprendre"
@@ -159,17 +168,6 @@ Surface {
                 implicitHeight: 30
                 enabled: root.controlsEnabled
                 onClicked: root.cancelRequested(root.runId)
-            }
-            AppButton {
-                objectName: "analysisToggleDetails"
-                text: root.detailsExpanded ? "Masquer les détails" : "Voir les détails"
-                iconSource: Theme.icon("sliders")
-                refined: true
-                quiet: true
-                fontPixelSize: 11
-                implicitHeight: 30
-                onClicked: root.detailsExpanded = !root.detailsExpanded
-                Accessible.name: text
             }
         }
     }
@@ -203,6 +201,7 @@ Surface {
 
     AnalysisTimeline {
         objectName: "analysisTimeline"
+        visible: root.detailsExpanded && root.run.status !== "completed"
         Layout.fillWidth: true
         Layout.preferredHeight: 82
         run: root.run
@@ -212,10 +211,22 @@ Surface {
         objectName: "analysisRunDetails"
         visible: root.detailsExpanded
         Layout.fillWidth: true
-        spacing: 12
+        spacing: 8
 
         Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.line }
+        Text {
+            objectName: "analysisRunProvider"
+            Layout.fillWidth: true
+            text: [root.run.provider_label || (root.run.provider === "anthropic" ? "Claude · Anthropic" : "OpenAI"), root.run.model || ""].filter(Boolean).join(" · ")
+            color: Theme.inkMuted
+            font.pixelSize: 10
+            elide: Text.ElideRight
+        }
         GridLayout {
+            objectName: "analysisBatchDetails"
+            // A single Batch repeats the progress already shown by the
+            // timeline. Keep the breakdown only when it adds per-Batch detail.
+            visible: root.run.status === "completed" || root.hasMultipleBatches
             Layout.fillWidth: true
             columns: root.width >= 1000 ? 2 : 1
             columnSpacing: 12
@@ -232,19 +243,6 @@ Surface {
                     blocked: root.run.status === "blocked" && root.run.phase === modelData.phase
                 }
             }
-        }
-        Text {
-            objectName: "analysisRunResult"
-            visible: root.failedCount > 0 || root.screenedOut > 0
-            Layout.fillWidth: true
-            text: root.analyzed + " / " + root.total
-                + (root.total === 1 ? " analyse enregistrée" : " analyses enregistrées")
-                + (Number(root.run.failed || 0) > 0 ? " · " + root.run.failed + " en échec" : "")
-                + (Number(root.run.skipped || 0) > 0 ? " · " + root.run.skipped + " ignorées" : "")
-                + (root.screenedOut > 0 ? " · " + root.screenedOut + " écartée" + (root.screenedOut === 1 ? "" : "s") + " au préfiltre" : "")
-            color: Theme.warning
-            font.pixelSize: 11
-            wrapMode: Text.WordWrap
         }
         Text {
             objectName: "analysisLastCheck"

@@ -1,11 +1,13 @@
 """Desktop facade for Batch analysis, kept separate from offer browsing."""
 
 from smartapply.config import get_llm_settings
+from smartapply.database import session_scope
 from smartapply.database.session import ensure_startup_maintenance_complete
 from smartapply.llm.routes import resolve_route
 from smartapply.pipeline.batch_analysis.coordinator import BatchAnalysisCoordinator
 from smartapply.pipeline.batch_analysis.presentation import analysis_workspace
 from smartapply.pipeline.errors import TaskCancelledError
+from smartapply.pipeline.process.analysis_admission import reserved_analysis_job_ids
 
 
 class AnalysisServiceMixin:
@@ -42,12 +44,18 @@ class AnalysisServiceMixin:
 
     def start_immediate_analysis(self, job_ids, *, stop_requested=None):
         ensure_startup_maintenance_complete()
-        settings = get_llm_settings()
-        for purpose in ("job_scope_screening", "job_offer_extraction", "job_fit_assessment"):
-            resolve_route(settings, purpose)
         ids = list(dict.fromkeys(int(job_id) for job_id in job_ids if int(job_id) > 0))
         if not ids:
             raise ValueError("Sélectionnez au moins une offre à analyser.")
+        settings = get_llm_settings()
+        for purpose in ("job_scope_screening", "job_offer_extraction", "job_fit_assessment"):
+            resolve_route(settings, purpose)
+        with session_scope() as session:
+            if set(ids) & reserved_analysis_job_ids(session):
+                raise ValueError(
+                    "Une offre sélectionnée est déjà réservée par un Batch en cours. "
+                    "Attendez sa fin ou annulez ce Batch avant de lancer l’analyse immédiate."
+                )
         from smartapply.pipeline import Pipeline
 
         pipeline = Pipeline(stop_requested=stop_requested)

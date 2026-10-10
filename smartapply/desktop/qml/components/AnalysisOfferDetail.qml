@@ -8,13 +8,17 @@ Item {
     property int requestedId: 0
     property bool loading: false
     property bool archiveEnabled: false
+    property bool trackingAvailable: false
+    property bool trackingExpanded: false
     property real pageWidth: 1400
     property real textZoom: 1.15
     readonly property int offerId: Number(offer.id || 0)
+    readonly property bool hasAnalysis: Boolean(offer.has_analysis)
     readonly property real fontScale: Math.min(1.25, Math.max(1, pageWidth / 1400)) * textZoom
     signal sourceRequested(string url)
     signal retryRequested()
     signal archiveRequested(int jobId)
+    signal trackingToggled()
     onOfferIdChanged: detailViewport.contentY = 0
 
     EmptyState {
@@ -43,7 +47,6 @@ Item {
 
     ColumnLayout {
         anchors.fill: parent
-        visible: Boolean(root.offerId)
         spacing: 12
 
         Flickable {
@@ -51,6 +54,8 @@ Item {
             objectName: "analysisOfferDetailViewport"
             Layout.fillWidth: true
             Layout.fillHeight: true
+            opacity: root.offerId > 0 ? 1 : 0
+            enabled: root.offerId > 0
             contentWidth: width
             contentHeight: detailContent.implicitHeight
             boundsBehavior: Flickable.StopAtBounds
@@ -159,15 +164,17 @@ Item {
                     }
                 }
                 Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.line }
-                FitEvaluation {
-                    objectName: "analysisOfferFitEvaluation"
-                    visible: root.offer.llm_score !== null && root.offer.llm_score !== undefined
+                OfferAnalysisSummary {
+                    objectName: "analysisOfferSummary"
+                    visible: root.hasAnalysis
                     Layout.fillWidth: true
                     offer: root.offer
                     fontPixelSize: Math.round(11 * root.fontScale)
-                    smallFontPixelSize: Math.round(10 * root.fontScale)
+                    labelFontPixelSize: Math.round(11 * root.fontScale)
+                    fitObjectName: "analysisOfferFitEvaluation"
                 }
                 RowLayout {
+                    visible: !root.hasAnalysis
                     Layout.fillWidth: true
                     Layout.topMargin: 4
                     spacing: 8
@@ -177,6 +184,7 @@ Item {
                 }
                 OfferDescription {
                     objectName: "analysisOfferDescription"
+                    visible: !root.hasAnalysis
                     Layout.fillWidth: true
                     Layout.preferredHeight: implicitHeight
                     description: root.offer.description || ""
@@ -185,13 +193,15 @@ Item {
             }
         }
         RowLayout {
+            objectName: "analysisOfferActions"
             Layout.fillWidth: true
+            visible: root.offerId > 0 || root.trackingAvailable
             spacing: 8
             AppButton {
                 objectName: "analysisOfferSourceAction"
                 text: "Offre d’origine"
                 iconSource: Theme.icon("arrow-up-right")
-                visible: Boolean(root.offer.url)
+                visible: root.offerId > 0 && Boolean(root.offer.url)
                 refined: true
                 quiet: true
                 fontPixelSize: 11
@@ -203,11 +213,28 @@ Item {
                 text: root.offer.status === "archived" ? "Archivée" : "Archiver"
                 iconSource: Theme.icon("archive")
                 kind: "warning"
+                visible: root.offerId > 0
                 refined: true
                 fontPixelSize: 11
                 implicitHeight: 32
                 enabled: root.archiveEnabled && root.offerId > 0
                 onClicked: root.archiveRequested(root.offerId)
+            }
+            Item { Layout.fillWidth: true }
+            AppButton {
+                objectName: "analysisToggleDetails"
+                visible: root.trackingAvailable
+                text: root.trackingExpanded ? "Masquer" : "Voir avancement"
+                iconSource: Theme.icon("sliders")
+                refined: true
+                quiet: true
+                fontPixelSize: 11
+                implicitHeight: 32
+                implicitWidth: contentItem.implicitWidth + 14
+                leftPadding: 6
+                rightPadding: 6
+                onClicked: root.trackingToggled()
+                Accessible.name: text
             }
         }
     }

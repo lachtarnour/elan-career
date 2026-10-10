@@ -11,6 +11,7 @@ Item {
 
     property int selectedId: displayedJobId
     property bool activeView: visible
+    property int topInset: 0
     property real savedListScrollY: 0
     property bool returningToOffers: false
     property bool restoreListScroll: false
@@ -26,7 +27,6 @@ Item {
     readonly property var activeNoteDraft: noteDrafts[String(notesApplicationId)] || ({})
     readonly property bool selectedJobBusy: (AppBridge.busyJobIds || []).indexOf(Number(selectedId)) >= 0
     readonly property bool duplicateCandidateBusy: (AppBridge.busyJobIds || []).indexOf(Number((AppBridge.currentJob.duplicate_candidate || {}).id || 0)) >= 0
-    property bool documentReviewDetailsExpanded: false
     ConfirmDialog {
         id: deleteOfferDialog
         objectName: "deleteReadyOfferDialog"
@@ -42,10 +42,8 @@ Item {
         confirmEnabled: !AppBridge.shutdownRequested && (AppBridge.busyJobIds || []).indexOf(targetJobId) < 0
         onAccepted: AppBridge.deleteReadyOffer(targetJobId)
     }
-    readonly property var documentDiagnostics: applicationData.warnings || []
-    readonly property int documentReviewPointCount: documentDiagnostics.filter(function(item) {
-        return !root.isReviewInformation(String(item))
-    }).length
+    readonly property var documentReviewPoints: applicationData.review_points || []
+    readonly property int documentReviewPointCount: documentReviewPoints.length
     property string sortKey: "llm_score"
     property bool sortAscending: false
     property string filterStatus: "analyzed"
@@ -53,6 +51,8 @@ Item {
     property string filterDisposition: ""
     property string archiveOrigin: ""
     property string missionRelation: ""
+    property bool matchPointsExpanded: false
+    property bool riskPointsExpanded: false
     property var selectedJobs: ({})
     property var selectedOrder: []
     readonly property int tableScrollGutter: Theme.scrollGutter
@@ -65,13 +65,19 @@ Item {
     readonly property int llmScoreWidth: Math.round(42 + 6 * tableScale)
     readonly property int publishedDateWidth: Math.round(76 + 12 * tableScale)
     readonly property int operationDateWidth: Math.round(94 + 10 * tableScale)
+    readonly property int archiveDateWidth: Math.round(110 + 10 * tableScale)
     readonly property bool isNewOffersFilter: filterStatus === "scraped"
     readonly property bool showsLifecycleDate: ["analyzed", "ready_for_form_submission", "sent"].indexOf(filterStatus) >= 0
+    readonly property bool showsArchiveDate: filterStatus === "archived"
     // Nouvelle shows the source publication date beside the local-filter
     // disposition. Unknown publication dates remain explicit instead of
     // falling back to the import date.
     readonly property int filterDispositionWidth: 2 * llmScoreWidth + columnGap
-    readonly property int rightColumnsWidth: isNewOffersFilter ? publishedDateWidth + columnGap + filterDispositionWidth : llmScoreWidth + (showsLifecycleDate ? operationDateWidth + columnGap : 0)
+    // Reserve the widest right-hand block for every status. The company,
+    // title, experience and location columns then keep their positions.
+    readonly property int rightColumnsWidth: Math.max(
+        publishedDateWidth + columnGap + filterDispositionWidth,
+        llmScoreWidth + columnGap + Math.max(operationDateWidth, archiveDateWidth))
     readonly property int visibleColumnGapCount: 5
     readonly property real textColumnsWidth: Math.max(0, tableContentWidth - selectWidth - experienceWidth - rightColumnsWidth - columnGap * visibleColumnGapCount)
     readonly property int companyWidth: Math.round(textColumnsWidth * 0.26)
@@ -97,17 +103,42 @@ Item {
     readonly property color warningIconSurface: "#3A2A18"
     readonly property bool hasFitInsights: AppBridge.currentJob.llm_score !== null
         && AppBridge.currentJob.llm_score !== undefined
-    readonly property bool hasMatchInsights: (AppBridge.currentJob.match_reasons || []).length > 0
+    readonly property bool hasAnalysis: Boolean(AppBridge.currentJob.has_analysis)
+    readonly property var standaloneMatchPoints: {
+        var axisPoints = []
+        if (hasAnalysis) {
+            (AppBridge.currentJob.fit_axes || []).forEach(function(axis) {
+                axisPoints = axisPoints.concat(axis.findings || [])
+            })
+        }
+        return (AppBridge.currentJob.match_reasons || []).filter(function(point) {
+            return axisPoints.indexOf(point) < 0
+        })
+    }
+    readonly property bool hasMatchInsights: standaloneMatchPoints.length > 0
     readonly property bool hasClassificationInsight: Boolean(AppBridge.currentJob.classification_summary)
     readonly property bool hasRiskInsights: (AppBridge.currentJob.risks || []).length > 0
+    readonly property var orderedRiskPoints: prioritizeRiskPoints(AppBridge.currentJob.risks || [])
     readonly property bool hasDuplicateInsight: AppBridge.currentJob.duplicate_review_status === "pending"
     readonly property bool hasArchiveInsight: AppBridge.currentJob.status === "archived"
         && (AppBridge.currentJob.archive_reasons || []).length > 0
     readonly property bool hasInsightCards: hasFitInsights || hasClassificationInsight || hasMatchInsights || hasRiskInsights || hasDuplicateInsight || hasArchiveInsight
-        || documentDiagnostics.length > 0
+        || documentReviewPointCount > 0
 
-    function isReviewInformation(message) {
-        return message.indexOf("text_review_corrected:") === 0
+    function prioritizeRiskPoints(points) {
+        if (points.length <= 4) return points
+        var first = points.slice(0, 2)
+        var candidatePoints = points.filter(function(point) {
+            return /^(Appui candidat à préciser|Écart établi|Non documenté|Orientation\/préférence)\s*:/.test(String(point))
+        }).slice(0, 2)
+        var ordered = first.slice()
+        candidatePoints.forEach(function(point) {
+            if (ordered.indexOf(point) < 0) ordered.push(point)
+        })
+        points.forEach(function(point) {
+            if (ordered.indexOf(point) < 0) ordered.push(point)
+        })
+        return ordered
     }
 
     function setNoteDraft(applicationId, draft) {
@@ -167,8 +198,9 @@ Item {
         }
         if (displayedJobId !== nextJobId) {
             displayedJobId = nextJobId
+            matchPointsExpanded = false
+            riskPointsExpanded = false
             detailViewport.contentY = 0
-            documentReviewDetailsExpanded = false
             var index = selectedIndex()
             if (index >= 0) jobsTable.positionViewAtIndex(index, ListView.Contain)
         }
@@ -179,46 +211,11 @@ Item {
         return ids.some(function(id) { return protectedIds.indexOf(Number(id)) >= 0 })
     }
 
-    function documentDiagnosticLabel(message) {
-        var value = String(message).replace(/^validation_error:/, "")
-        if (isReviewInformation(value)) return "Correction vérifiée."
-        if (value.indexOf("text_review_invalid_correction:") === 0)
-            return "Modification proposée écartée ; texte initial conservé."
-        if (value.indexOf("text_review_incomplete:") === 0)
-            return "Relecture automatique incomplète."
-        if (value.indexOf("text_review_unavailable:") === 0)
-            return "Relecture automatique indisponible."
-        if (value.indexOf("text_review_invalid_") === 0)
-            return "Résultat de relecture à vérifier."
-        if (value.indexOf("cv_title_not_offer_anchored") === 0)
-            return "Titre du CV à rapprocher de l’offre."
-        if (value.indexOf("summary_not_offer_anchored") === 0)
-            return "Résumé à rapprocher de l’offre."
-        if (value.indexOf("summary_too_long:") === 0)
-            return "Longueur du résumé à vérifier."
-        if (value.indexOf("summary_too_many_lines:") === 0)
-            return "Mise en page du résumé à vérifier."
-        if (value.indexOf("letter_too_long:") === 0 || value.indexOf("letter_too_short:") === 0)
-            return "Longueur de la lettre à vérifier."
-        if (value.indexOf("letter_not_3_paragraphs:") === 0)
-            return "Organisation des paragraphes de la lettre à vérifier."
-        if (value.indexOf("text_review:factual:") === 0)
-            return "Affirmation signalée lors de la relecture à vérifier."
-        if (value.indexOf("text_review:language:") === 0)
-            return "Formulation à vérifier."
-        if (value.indexOf("text_review:structure:") === 0)
-            return "Présentation ou longueur à vérifier."
-        if (value.indexOf("text_review:style:") === 0)
-            return "Suggestion de présentation."
-        if (value.indexOf("cv_pdf_not_generated") === 0) return "PDF du CV indisponible."
-        if (value.indexOf("letter_pdf_not_generated") === 0) return "PDF de la lettre indisponible."
-        return "Point signalé lors de la création."
-    }
-
     function companyX() { return selectWidth + columnGap }
     function titleX() { return companyX() + companyWidth + columnGap }
     function lifecycleDateX(contentWidth) { return contentWidth - operationDateWidth }
-    function llmScoreX(contentWidth) { return contentWidth - llmScoreWidth - (showsLifecycleDate ? operationDateWidth + columnGap : 0) }
+    function archiveDateX(contentWidth) { return contentWidth - archiveDateWidth }
+    function llmScoreX(contentWidth) { return contentWidth - rightColumnsWidth }
     function filterDispositionX(contentWidth) { return contentWidth - filterDispositionWidth }
     function publishedDateX(contentWidth) { return filterDispositionX(contentWidth) - columnGap - publishedDateWidth }
     function locationX(contentWidth) {
@@ -335,7 +332,7 @@ Item {
         if (sortKey === key) sortAscending = !sortAscending
         else {
             sortKey = key
-            sortAscending = ["llm_score", "published_date", "operation_date"].indexOf(key) < 0
+            sortAscending = ["llm_score", "published_date", "operation_date", "archived_at"].indexOf(key) < 0
         }
         loadOffers(0)
     }
@@ -424,6 +421,9 @@ Item {
 
     function refreshOffers(jobId) {
         applyRequestedFilter()
+        if (isNewOffersFilter) {
+            return
+        }
         searchTimer.stop()
         restoreListScroll = returningToOffers && !jobId
         returningToOffers = false
@@ -529,19 +529,24 @@ Item {
     RowLayout {
         anchors.fill: parent
         anchors.margins: 10
+        anchors.topMargin: 10 + root.topInset
         spacing: 0
+        visible: !root.isNewOffersFilter
 
         ColumnLayout {
+            id: offersColumn
             Layout.fillWidth: true
             Layout.preferredWidth: 1
-            Layout.minimumWidth: 560
+            Layout.minimumWidth: 500
             Layout.fillHeight: true
             Layout.rightMargin: 14
             spacing: 10
 
             Item {
                 Layout.fillWidth: true
+                Layout.minimumHeight: 38
                 Layout.preferredHeight: 38
+                Layout.maximumHeight: 38
                 RowLayout {
                     id: toolbarRow
                     objectName: "offerToolbar"
@@ -551,7 +556,7 @@ Item {
                         id: statusFilter
                         objectName: "offerStatusFilter"
                         Layout.minimumWidth: 112
-                        Layout.preferredWidth: 124
+                        Layout.preferredWidth: toolbarRow.width < 600 ? 112 : 124
                         implicitHeight: 34
                         leftPadding: 12
                         rightPadding: 34
@@ -572,96 +577,145 @@ Item {
                             root.clearSelection()
                             AppBridge.selectJob(0)
                             jobsTable.contentY = 0
-                            root.loadOffers(0)
+                            if (!root.isNewOffersFilter) root.loadOffers(0)
                         }
                     }
-                    AppSelect {
-                        id: dispositionFilter
-                        objectName: "offerDispositionFilter"
-                        visible: root.isNewOffersFilter
-                        Layout.minimumWidth: visible ? 160 : 0
-                        Layout.preferredWidth: visible ? 160 : 0
-                        implicitHeight: 34
-                        leftPadding: 12
-                        rightPadding: 34
-                        fontPixelSize: 12
-                        indicatorSize: 14
-                        indicatorMargin: 12
-                        textRole: "label"
-                        valueRole: "value"
-                        Accessible.name: "Filtrer par classe"
-                        model: [
-                            {value: "", label: "Toutes les classes"},
-                            {value: "rejected", label: "Rejeté"},
-                            {value: "pending_relevance", label: "À classer"}
-                        ]
-                        currentIndex: Math.max(0, indexOfValue(root.filterDisposition))
-                        onActivated: root.selectDisposition(currentValue)
+                    Item {
+                        id: secondaryFilterSlot
+                        objectName: "offerSecondaryFilterSlot"
+                        Layout.minimumWidth: toolbarRow.width < 600 ? 130 : 170
+                        Layout.preferredWidth: Layout.minimumWidth
+                        Layout.maximumWidth: Layout.minimumWidth
+                        Layout.preferredHeight: 34
+                        AppSelect {
+                            id: dispositionFilter
+                            objectName: "offerDispositionFilter"
+                            visible: root.isNewOffersFilter
+                            anchors.fill: parent
+                            implicitHeight: 34
+                            leftPadding: 12
+                            rightPadding: 34
+                            fontPixelSize: 12
+                            indicatorSize: 14
+                            indicatorMargin: 12
+                            textRole: "label"
+                            valueRole: "value"
+                            Accessible.name: "Filtrer par classe"
+                            model: [
+                                {value: "", label: "Toutes les classes"},
+                                {value: "rejected", label: "Rejeté"},
+                                {value: "pending_relevance", label: "À classer"}
+                            ]
+                            currentIndex: Math.max(0, indexOfValue(root.filterDisposition))
+                            onActivated: root.selectDisposition(currentValue)
+                        }
+                        AppSelect {
+                            id: missionRelationFilter
+                            objectName: "offerMissionRelationFilter"
+                            visible: root.filterStatus === "analyzed"
+                            anchors.fill: parent
+                            implicitHeight: 34
+                            leftPadding: 10
+                            rightPadding: 24
+                            fontPixelSize: 11
+                            indicatorSize: 14
+                            indicatorMargin: 8
+                            textRole: "label"
+                            valueRole: "value"
+                            Accessible.name: "Métier proposé selon les missions : " + displayText
+                            Accessible.description: "Classement des missions de l’offre, indépendant du score d’adéquation et de la candidature."
+                            ToolTip.visible: hovered && !popup.visible
+                            ToolTip.delay: 700
+                            ToolTip.text: "Selon les missions de l’offre, indépendamment du score d’adéquation et de votre candidature."
+                            model: [
+                                {value: "", label: "Toutes les offres"},
+                                {value: "direct", label: "Métier ciblé"},
+                                {value: "adjacent", label: "Métier proche"},
+                                {value: "clearly_outside", label: "Hors cible"},
+                                {value: "unknown", label: "Non déterminé"}
+                            ]
+                            currentIndex: Math.max(0, indexOfValue(root.missionRelation))
+                            onActivated: root.selectMissionRelation(currentValue)
+                        }
+                        AppSelect {
+                            id: archiveOriginFilter
+                            objectName: "offerArchiveOriginFilter"
+                            visible: root.filterStatus === "archived"
+                            anchors.fill: parent
+                            implicitHeight: 34
+                            leftPadding: 12
+                            rightPadding: 34
+                            fontPixelSize: 12
+                            indicatorSize: 14
+                            indicatorMargin: 12
+                            textRole: "label"
+                            valueRole: "value"
+                            Accessible.name: "Origine de l’archivage"
+                            model: [
+                                {value: "", label: "Tous les archivages"},
+                                {value: "automatic_filter", label: "Filtre automatique"},
+                                {value: "mission_screen", label: "Missions hors cible"},
+                                {value: "manual", label: "Archivage manuel"},
+                                {value: "confirmed_duplicate", label: "Doublon confirmé"}
+                            ]
+                            currentIndex: Math.max(0, indexOfValue(root.archiveOrigin))
+                            onActivated: root.selectArchiveOrigin(currentValue)
+                        }
                     }
-                    AppSelect {
-                        id: missionRelationFilter
-                        objectName: "offerMissionRelationFilter"
-                        visible: root.filterStatus === "analyzed"
-                        Layout.minimumWidth: visible ? 170 : 0
-                        Layout.preferredWidth: visible ? 170 : 0
-                        implicitHeight: 34
-                        leftPadding: 12
-                        rightPadding: 34
-                        fontPixelSize: 12
-                        indicatorSize: 14
-                        indicatorMargin: 12
-                        textRole: "label"
-                        valueRole: "value"
-                        Accessible.name: "Relation des missions selon l’analyse IA"
-                        model: [
-                            {value: "", label: "Toutes les relations"},
-                            {value: "direct", label: "Directe"},
-                            {value: "adjacent", label: "Adjacente"},
-                            {value: "clearly_outside", label: "Hors cible"},
-                            {value: "unknown", label: "Inconnue"}
-                        ]
-                        currentIndex: Math.max(0, indexOfValue(root.missionRelation))
-                        onActivated: root.selectMissionRelation(currentValue)
+                    RowLayout {
+                        id: shortlistControls
+                        objectName: "offerShortlistControls"
+                        visible: root.filterStatus === "analyzed" && !searchControl.expanded
+                        Layout.minimumWidth: toolbarRow.width < 600 ? 156 : 192
+                        Layout.preferredWidth: Layout.minimumWidth
+                        Layout.maximumWidth: Layout.minimumWidth
+                        spacing: 6
+                        AppSpinBox {
+                            id: topK
+                            from: 1
+                            to: 100
+                            value: AppBridge.shortlistTopK
+                            Layout.minimumWidth: toolbarRow.width < 600 ? 62 : 90
+                            Layout.preferredWidth: Layout.minimumWidth
+                            Layout.maximumWidth: Layout.minimumWidth
+                            implicitHeight: 34
+                            leftPadding: toolbarRow.width < 600 ? 22 : 34
+                            rightPadding: toolbarRow.width < 600 ? 22 : 34
+                            fontPixelSize: 12
+                            indicatorSize: 13
+                            indicatorWidth: toolbarRow.width < 600 ? 19 : 28
+                            indicatorMargin: 4
+                            onUserValueModified: function(nextValue) { AppBridge.setShortlistTopK(Number(nextValue)) }
+                        }
+                        AppButton {
+                            Layout.minimumWidth: toolbarRow.width < 600 ? 88 : 96
+                            Layout.preferredWidth: Layout.minimumWidth
+                            Layout.maximumWidth: Layout.minimumWidth
+                            text: "Shortlist"
+                            iconSource: Theme.icon("sparkle")
+                            kind: "primary"
+                            refined: true
+                            iconSize: 14
+                            fontPixelSize: 11
+                            implicitHeight: 34
+                            enabled: !AppBridge.shutdownRequested
+                            onClicked: {
+                                topK.commitInput()
+                                AppBridge.updateShortlist(topK.value)
+                            }
+                        }
                     }
-                    AppSelect {
-                        id: archiveOriginFilter
-                        objectName: "offerArchiveOriginFilter"
-                        visible: root.filterStatus === "archived"
-                        Layout.minimumWidth: visible ? 170 : 0
-                        Layout.preferredWidth: visible ? 170 : 0
-                        implicitHeight: 34
-                        leftPadding: 12
-                        rightPadding: 34
-                        fontPixelSize: 12
-                        indicatorSize: 14
-                        indicatorMargin: 12
-                        textRole: "label"
-                        valueRole: "value"
-                        Accessible.name: "Origine de l’archivage"
-                        model: [
-                            {value: "", label: "Tous les archivages"},
-                            {value: "automatic_filter", label: "Filtre automatique"},
-                            {value: "mission_screen", label: "Missions hors cible"},
-                            {value: "manual", label: "Archivage manuel"},
-                            {value: "confirmed_duplicate", label: "Doublon confirmé"}
-                        ]
-                        currentIndex: Math.max(0, indexOfValue(root.archiveOrigin))
-                        onActivated: root.selectArchiveOrigin(currentValue)
-                    }
+                    Item { Layout.fillWidth: true }
                     Item {
                         id: searchControl
                         objectName: "expandableSearch"
                         property bool expanded: false
                         Layout.minimumWidth: 34
-                        // Reserve the actions' actual width before expanding the field.
-                        // The toolbar must never push into the adjacent offer.
                         Layout.preferredWidth: expanded ? Math.min(260, Math.max(34,
-                            toolbarRow.width - statusFilter.Layout.preferredWidth - shortlistControls.Layout.preferredWidth
-                            - dispositionFilter.Layout.preferredWidth
-                            - missionRelationFilter.Layout.preferredWidth
-                            - archiveOriginFilter.Layout.preferredWidth
-                            - (generationAction.visible ? generationAction.implicitWidth + toolbarRow.spacing : 0)
-                            - toolbarRow.spacing * 3)) : 34
+                            toolbarRow.width - statusFilter.Layout.preferredWidth
+                            - secondaryFilterSlot.Layout.preferredWidth
+                            - (shortlistControls.visible ? shortlistControls.Layout.preferredWidth + toolbarRow.spacing : 0)
+                            - refreshAction.implicitWidth - toolbarRow.spacing * 4)) : 34
                         Layout.maximumWidth: Layout.preferredWidth
                         Layout.preferredHeight: 34
                         clip: true
@@ -734,175 +788,46 @@ Item {
                             }
                         }
                     }
-                    Item { Layout.fillWidth: true }
                     AppButton {
-                        id: generationAction
-                        visible: !root.isNewOffersFilter && (AppBridge.shortlist.ready_to_generate || 0) > 0
-                        Layout.minimumWidth: visible ? implicitWidth : 0
-                        Layout.preferredWidth: visible ? implicitWidth : 0
-                        Layout.maximumWidth: visible ? implicitWidth : 0
-                        text: "Générer (" + AppBridge.shortlist.ready_to_generate + ")"
-                        iconSource: Theme.icon("sparkle")
-                        kind: "primary"
-                        refined: true
-                        iconSize: 14
-                        fontPixelSize: 11
-                        implicitHeight: 34
-                        enabled: !AppBridge.shutdownRequested
-                        onClicked: AppBridge.generateShortlistedApplications()
-                    }
-                    RowLayout {
-                        id: shortlistControls
-                        objectName: "offerShortlistControls"
-                        visible: !root.isNewOffersFilter
-                        Layout.minimumWidth: root.isNewOffersFilter ? 0 : 192
-                        Layout.preferredWidth: root.isNewOffersFilter ? 0 : 192
-                        Layout.maximumWidth: root.isNewOffersFilter ? 0 : 192
-                        spacing: 6
-                        AppSpinBox {
-                            id: topK
-                            from: 1
-                            to: 100
-                            value: AppBridge.shortlistTopK
-                            Layout.minimumWidth: 90
-                            Layout.preferredWidth: 90
-                            Layout.maximumWidth: 90
-                            implicitHeight: 34
-                            leftPadding: 34
-                            rightPadding: 34
-                            fontPixelSize: 12
-                            indicatorSize: 13
-                            indicatorWidth: 28
-                            indicatorMargin: 4
-                            // This is an independent preference; background
-                            // searches must not disable its +/- controls.
-                            onUserValueModified: function(nextValue) { AppBridge.setShortlistTopK(Number(nextValue)) }
-                        }
-                        AppButton {
-                            Layout.minimumWidth: 96
-                            Layout.preferredWidth: 96
-                            Layout.maximumWidth: 96
-                            text: "Shortlist"
-                            iconSource: Theme.icon("sparkle")
-                            kind: "primary"
-                            refined: true
-                            iconSize: 14
-                            fontPixelSize: 11
-                            implicitHeight: 34
-                            enabled: !AppBridge.shutdownRequested
-                            onClicked: {
-                                topK.commitInput()
-                                AppBridge.updateShortlist(topK.value)
-                            }
-                        }
-                    }
-                }
-            }
-
-            Item {
-                visible: root.filterStatus === "analyzed"
-                Layout.fillWidth: true
-                Layout.preferredHeight: visible ? 28 : 0
-                RowLayout {
-                    anchors.fill: parent
-                    spacing: 7
-                    Text {
-                        text: "IA min."
-                        color: Theme.inkMuted
-                        font.pixelSize: 11
-                        verticalAlignment: Text.AlignVCenter
-                    }
-                    Slider {
-                        id: minimumScoreSlider
-                        objectName: "offerMinimumLlmScoreSlider"
-                        Layout.preferredWidth: 150
-                        Layout.preferredHeight: 24
-                        from: 0
-                        to: 100
-                        stepSize: 1
-                        snapMode: Slider.SnapAlways
-                        value: Math.max(0, AppBridge.minimumLlmScorePercent)
-                        leftPadding: 6
-                        rightPadding: 6
-                        Accessible.name: "Score IA minimum"
-                        ToolTip.visible: hovered
-                        ToolTip.text: "Le seuil porte sur l’indice technique actuel. Les évaluations historiques restent visibles pour réévaluation."
-                        Accessible.description: AppBridge.minimumLlmScorePercent < 0
-                            ? "Aucun seuil" : Math.round(value) + " pour cent"
-                        onMoved: {
-                            if (!pressed) root.setMinLlmScorePercent(Math.round(value))
-                        }
-                        onPressedChanged: {
-                            if (!pressed) root.setMinLlmScorePercent(Math.round(value))
-                        }
-                        background: Rectangle {
-                            x: minimumScoreSlider.leftPadding
-                            y: (minimumScoreSlider.height - height) / 2
-                            width: minimumScoreSlider.availableWidth
-                            height: 3
-                            radius: 2
-                            color: Theme.lineStrong
-                            Rectangle {
-                                width: parent.width * minimumScoreSlider.visualPosition
-                                height: parent.height
-                                radius: parent.radius
-                                color: Theme.accentBright
-                            }
-                        }
-                        handle: Rectangle {
-                            x: minimumScoreSlider.leftPadding
-                                + minimumScoreSlider.visualPosition * (minimumScoreSlider.availableWidth - width)
-                            y: (minimumScoreSlider.height - height) / 2
-                            width: 12
-                            height: 12
-                            radius: 6
-                            color: minimumScoreSlider.pressed ? Theme.accentBright : Theme.inkSoft
-                            border.color: Theme.accentBright
-                            border.width: 1
-                        }
-                    }
-                    Text {
-                        Layout.preferredWidth: 44
-                        text: AppBridge.minimumLlmScorePercent < 0 && !minimumScoreSlider.pressed
-                            ? "Aucun" : Math.round(minimumScoreSlider.value) + " %"
-                        color: AppBridge.minimumLlmScorePercent < 0 ? Theme.inkMuted : Theme.inkSoft
-                        font.pixelSize: 11
-                        font.weight: Font.DemiBold
-                    }
-                    AppButton {
-                        objectName: "offerMinimumLlmScoreClear"
-                        visible: AppBridge.minimumLlmScorePercent >= 0
-                        Layout.preferredWidth: visible ? 22 : 0
-                        Layout.preferredHeight: 22
+                        id: refreshAction
+                        objectName: "offerRefreshAction"
                         text: ""
-                        iconSource: Theme.icon("x")
-                        iconSize: 11
+                        iconSource: Theme.icon("refresh")
                         refined: true
                         quiet: true
-                        Accessible.name: "Supprimer le score IA minimum"
-                        onClicked: root.setMinLlmScorePercent(-1)
+                        implicitWidth: 34
+                        implicitHeight: 34
+                        Accessible.name: "Actualiser les offres"
+                        enabled: !AppBridge.shutdownRequested
+                        onClicked: root.loadOffers()
                     }
-                    Item { Layout.fillWidth: true }
                 }
             }
 
             Rectangle {
-                visible: root.selectedCount > 0
+                objectName: "offerSelectionBand"
                 Layout.fillWidth: true
-                Layout.preferredHeight: visible ? 48 : 0
+                Layout.preferredHeight: 48
                 radius: 13
-                gradient: Gradient {
-                    orientation: Gradient.Horizontal
-                    GradientStop { position: 0; color: "#252039" }
-                    GradientStop { position: 1; color: Theme.surfaceMuted }
+                color: root.selectedCount > 0 ? "#252039" : Theme.surfaceMuted
+                border.color: root.selectedCount > 0 ? Theme.accentLine : Theme.line
+                Rectangle { visible: root.selectedCount > 0; anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; width: 3; height: 24; radius: 2; color: Theme.accentBright }
+                Text {
+                    visible: root.selectedCount === 0
+                    anchors.left: parent.left
+                    anchors.leftMargin: 14
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: AppBridge.jobsLoading ? "Chargement des offres…"
+                        : AppBridge.jobsTotal + (AppBridge.jobsTotal === 1 ? " offre" : " offres")
+                    color: Theme.inkMuted
+                    font.pixelSize: 11
                 }
-                border.color: Theme.accentLine
-                Rectangle { anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; width: 3; height: 24; radius: 2; color: Theme.accentBright }
                 RowLayout {
                     anchors.fill: parent
                     anchors.leftMargin: 12
                     anchors.rightMargin: 8
                     spacing: 8
+                    visible: root.selectedCount > 0
                     Rectangle {
                         Layout.preferredWidth: 28; Layout.preferredHeight: 28; radius: 9
                         color: Theme.accentSoft; border.color: Theme.accentLine
@@ -993,7 +918,7 @@ Item {
                                 SortHeader { objectName: "offerCompanyHeader"; x: root.companyX(); width: root.companyWidth; anchors.verticalCenter: parent.verticalCenter; title: "Entreprise"; sortKey: "company"; active: root.sortKey === sortKey; ascending: root.sortAscending; onSortRequested: function(key) { root.sortBy(key) } }
                                 SortHeader { objectName: "offerTitleHeader"; x: root.titleX(); width: root.titleWidthFor(parent.width); anchors.verticalCenter: parent.verticalCenter; title: "Poste"; sortKey: "title"; active: root.sortKey === sortKey; ascending: root.sortAscending; onSortRequested: function(key) { root.sortBy(key) } }
                                 SortHeader { x: root.experienceX(parent.width); width: root.experienceWidth; anchors.verticalCenter: parent.verticalCenter; title: "Exp."; sortKey: "experience"; active: root.sortKey === sortKey; ascending: root.sortAscending; onSortRequested: function(key) { root.sortBy(key) } }
-                                SortHeader { x: root.locationX(parent.width); width: root.locationWidth; anchors.verticalCenter: parent.verticalCenter; title: "Lieu"; sortKey: "location"; active: root.sortKey === sortKey; ascending: root.sortAscending; onSortRequested: function(key) { root.sortBy(key) } }
+                                SortHeader { objectName: "offerLocationHeader"; x: root.locationX(parent.width); width: root.locationWidth; anchors.verticalCenter: parent.verticalCenter; title: "Lieu"; sortKey: "location"; active: root.sortKey === sortKey; ascending: root.sortAscending; onSortRequested: function(key) { root.sortBy(key) } }
                                 SortHeader { objectName: "offerIaHeader"; visible: !root.isNewOffersFilter; x: root.llmScoreX(parent.width); width: root.llmScoreWidth; anchors.verticalCenter: parent.verticalCenter; title: "IA"; sortKey: "llm_score"; active: root.sortKey === sortKey; ascending: root.sortAscending; centered: true; onSortRequested: function(key) { root.sortBy(key) } }
                                 SortHeader {
                                     objectName: "offerLifecycleDateHeader"
@@ -1004,6 +929,19 @@ Item {
                                     title: "Operation date"
                                     Accessible.name: "Trier par date d’opération puis score IA"
                                     sortKey: "operation_date"
+                                    active: root.sortKey === sortKey
+                                    ascending: root.sortAscending
+                                    centered: true
+                                    onSortRequested: function(key) { root.sortBy(key) }
+                                }
+                                SortHeader {
+                                    objectName: "offerArchiveDateHeader"
+                                    visible: root.showsArchiveDate
+                                    x: root.archiveDateX(parent.width)
+                                    width: root.archiveDateWidth
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    title: "Date d’archivage"
+                                    sortKey: "archived_at"
                                     active: root.sortKey === sortKey
                                     ascending: root.sortAscending
                                     centered: true
@@ -1148,6 +1086,17 @@ Item {
                                             font.pixelSize: root.tableTextSize - 1
                                         }
                                         Text {
+                                            objectName: "offerArchiveDate-" + modelData.id
+                                            visible: root.showsArchiveDate
+                                            x: root.archiveDateX(parent.width)
+                                            width: root.archiveDateWidth
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            horizontalAlignment: Text.AlignHCenter
+                                            text: modelData.archived_at || "—"
+                                            color: text === "—" ? Theme.inkFaint : Theme.inkMuted
+                                            font.pixelSize: root.tableTextSize - 1
+                                        }
+                                        Text {
                                             objectName: "offerFilter-" + modelData.id
                                             visible: root.isNewOffersFilter
                                             x: root.filterDispositionX(parent.width)
@@ -1256,7 +1205,7 @@ Item {
         Item {
                 Layout.fillWidth: true
                 Layout.preferredWidth: 1
-                Layout.minimumWidth: 560
+                Layout.minimumWidth: 500
                 Layout.fillHeight: true
                 Layout.leftMargin: 14
                 Item {
@@ -1419,13 +1368,13 @@ Item {
                                     Layout.bottomMargin: root.hasInsightCards ? 8 : 0
                                     color: Theme.line
                                 }
-                                FitEvaluation {
-                                    objectName: "offerFitEvaluation"
-                                    visible: root.hasFitInsights
+                                OfferAnalysisSummary {
+                                    objectName: "offerAnalysisSummary"
+                                    visible: root.hasAnalysis
                                     Layout.fillWidth: true
                                     offer: AppBridge.currentJob
                                     fontPixelSize: root.detailMetaFontSize
-                                    smallFontPixelSize: root.detailSmallFontSize
+                                    labelFontPixelSize: root.detailMetaFontSize
                                 }
                                 Rectangle {
                                     objectName: "offerClassificationCard"
@@ -1470,66 +1419,94 @@ Item {
                                 }
                                 Rectangle {
                                     objectName: "documentReviewCard"
-                                    visible: root.documentDiagnostics.length > 0
+                                    visible: root.documentReviewPointCount > 0
                                     Layout.fillWidth: true
-                                    implicitHeight: documentReviewContent.implicitHeight + 24
+                                    implicitHeight: documentReviewContent.implicitHeight + 28
                                     radius: 16
                                     color: Theme.surfaceMuted
-                                    border.color: root.documentReviewPointCount > 0 ? Theme.warningLine : Theme.successLine
+                                    border.color: Theme.warningLine
+                                    Rectangle {
+                                        anchors.left: parent.left
+                                        anchors.right: parent.right
+                                        anchors.top: parent.top
+                                        anchors.leftMargin: 16
+                                        anchors.rightMargin: 16
+                                        height: 1
+                                        color: Theme.highlight
+                                    }
                                     ColumnLayout {
                                         id: documentReviewContent
                                         anchors.fill: parent
-                                        anchors.margins: 12
-                                        spacing: 8
-                                        Text {
+                                        anchors.margins: 14
+                                        spacing: 11
+                                        RowLayout {
                                             Layout.fillWidth: true
-                                            text: "Contrôle du CV et de la lettre"
-                                            color: Theme.ink
-                                            font.pixelSize: root.detailMetaFontSize
-                                            font.weight: Font.Bold
-                                            wrapMode: Text.WordWrap
-                                        }
-                                        Text {
-                                            Layout.fillWidth: true
-                                            text: root.documentReviewPointCount > 0
-                                                ? root.documentReviewPointCount + (root.documentReviewPointCount === 1 ? " point à vérifier. Les documents restent disponibles." : " points à vérifier. Les documents restent disponibles.")
-                                                : "Corrections vérifiées."
-                                            color: root.documentReviewPointCount > 0 ? Theme.warning : Theme.success
-                                            font.pixelSize: root.detailMetaFontSize
-                                            wrapMode: Text.WordWrap
-                                        }
-                                        Repeater {
-                                            model: root.documentDiagnostics
-                                            delegate: ColumnLayout {
-                                                required property var modelData
+                                            spacing: 8
+                                            Rectangle {
+                                                Layout.preferredWidth: 7
+                                                Layout.preferredHeight: 7
+                                                radius: 4
+                                                color: Theme.warning
+                                            }
+                                            Text {
+                                                objectName: "documentReviewCardTitle"
                                                 Layout.fillWidth: true
-                                                spacing: 4
-                                                Text {
-                                                    Layout.fillWidth: true
-                                                    text: root.documentDiagnosticLabel(modelData)
-                                                    textFormat: Text.PlainText
-                                                    color: root.isReviewInformation(String(modelData)) ? Theme.success : Theme.inkSoft
-                                                    font.pixelSize: root.detailMetaFontSize
-                                                    wrapMode: Text.WordWrap
-                                                }
-                                                Text {
-                                                    visible: root.documentReviewDetailsExpanded
-                                                    Layout.fillWidth: true
-                                                    text: String(modelData)
-                                                    textFormat: Text.PlainText
-                                                    color: Theme.inkMuted
-                                                    font.pixelSize: root.detailSmallFontSize
-                                                    wrapMode: Text.Wrap
-                                                }
+                                                text: "CV et lettre"
+                                                color: Theme.ink
+                                                font.pixelSize: root.detailMetaFontSize
+                                                font.weight: Font.Bold
+                                                elide: Text.ElideRight
+                                            }
+                                            Text {
+                                                objectName: "documentReviewCardCount"
+                                                text: root.documentReviewPointCount
+                                                    + (root.documentReviewPointCount === 1
+                                                        ? " point à vérifier" : " points à vérifier")
+                                                color: Theme.warning
+                                                font.pixelSize: root.detailSmallFontSize
+                                                font.weight: Font.DemiBold
                                             }
                                         }
-                                        AppButton {
-                                            objectName: "documentReviewDetailsToggle"
-                                            text: root.documentReviewDetailsExpanded ? "Masquer les détails" : "Afficher les détails"
-                                            quiet: true
-                                            refined: true
-                                            fontPixelSize: root.detailSmallFontSize
-                                            onClicked: root.documentReviewDetailsExpanded = !root.documentReviewDetailsExpanded
+                                        Repeater {
+                                            model: root.documentReviewPoints
+                                            delegate: RowLayout {
+                                                required property var modelData
+                                                Layout.fillWidth: true
+                                                Layout.alignment: Qt.AlignTop
+                                                spacing: 9
+                                                Rectangle {
+                                                    Layout.preferredWidth: 3
+                                                    Layout.preferredHeight: 18
+                                                    Layout.alignment: Qt.AlignTop
+                                                    radius: 2
+                                                    color: Theme.warning
+                                                    opacity: 0.7
+                                                }
+                                                ColumnLayout {
+                                                    Layout.fillWidth: true
+                                                    spacing: 2
+                                                    Text {
+                                                        objectName: "documentReviewPoint_" + modelData.key
+                                                        Layout.fillWidth: true
+                                                        text: modelData.label
+                                                        textFormat: Text.PlainText
+                                                        color: Theme.inkSoft
+                                                        font.pixelSize: root.detailMetaFontSize
+                                                        font.weight: Font.DemiBold
+                                                        wrapMode: Text.WordWrap
+                                                    }
+                                                    Text {
+                                                        objectName: "documentReviewDetail_" + modelData.key
+                                                        visible: Boolean(modelData.detail)
+                                                        Layout.fillWidth: true
+                                                        text: modelData.detail || ""
+                                                        textFormat: Text.PlainText
+                                                        color: Theme.inkMuted
+                                                        font.pixelSize: root.detailSmallFontSize
+                                                        wrapMode: Text.WordWrap
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1569,14 +1546,38 @@ Item {
                                             Text { Layout.fillWidth: true; text: "Correspond à votre profil"; color: Theme.success; font.pixelSize: root.detailMetaFontSize; font.weight: Font.Bold }
                                         }
                                         Repeater {
-                                            model: AppBridge.currentJob.match_reasons || []
+                                            objectName: "offerMatchPoints"
+                                            model: root.matchPointsExpanded
+                                                ? root.standaloneMatchPoints
+                                                : root.standaloneMatchPoints.slice(0, 3)
                                             delegate: RowLayout {
                                                 required property var modelData
                                                 Layout.fillWidth: true
                                                 spacing: 8
                                                 Rectangle { Layout.preferredWidth: 5; Layout.preferredHeight: 5; radius: 3; color: Theme.success }
-                                                Text { Layout.fillWidth: true; text: modelData; color: Theme.ink; font.pixelSize: root.detailMetaFontSize; wrapMode: Text.WordWrap; lineHeight: 1.25 }
+                                                Text {
+                                                    objectName: "offerMatchPointText"
+                                                    Layout.fillWidth: true
+                                                    text: modelData
+                                                    textFormat: Text.PlainText
+                                                    color: Theme.ink
+                                                    font.pixelSize: root.detailMetaFontSize
+                                                    wrapMode: Text.WordWrap
+                                                    lineHeight: 1.25
+                                                    maximumLineCount: root.matchPointsExpanded ? 999 : 2
+                                                    elide: root.matchPointsExpanded ? Text.ElideNone : Text.ElideRight
+                                                }
                                             }
+                                        }
+                                        AppButton {
+                                            objectName: "offerMatchPointsToggle"
+                                            visible: root.standaloneMatchPoints.length > 3
+                                            text: root.matchPointsExpanded ? "Réduire"
+                                                : "Voir les " + (root.standaloneMatchPoints.length - 3) + " autres points"
+                                            quiet: true
+                                            refined: true
+                                            fontPixelSize: root.detailSmallFontSize
+                                            onClicked: root.matchPointsExpanded = !root.matchPointsExpanded
                                         }
                                     }
                                 }
@@ -1616,14 +1617,37 @@ Item {
                                             Text { Layout.fillWidth: true; text: "Points à vérifier"; color: Theme.warning; font.pixelSize: root.detailMetaFontSize; font.weight: Font.Bold }
                                         }
                                         Repeater {
-                                            model: AppBridge.currentJob.risks || []
+                                            objectName: "offerRiskPoints"
+                                            model: root.riskPointsExpanded
+                                                ? root.orderedRiskPoints : root.orderedRiskPoints.slice(0, 4)
                                             delegate: RowLayout {
                                                 required property var modelData
                                                 Layout.fillWidth: true
                                                 spacing: 8
                                                 Rectangle { Layout.preferredWidth: 5; Layout.preferredHeight: 5; radius: 3; color: Theme.warning }
-                                                Text { Layout.fillWidth: true; text: modelData; color: Theme.ink; font.pixelSize: root.detailMetaFontSize; wrapMode: Text.WordWrap; lineHeight: 1.25 }
+                                                Text {
+                                                    objectName: "offerRiskPointText"
+                                                    Layout.fillWidth: true
+                                                    text: modelData
+                                                    textFormat: Text.PlainText
+                                                    color: Theme.ink
+                                                    font.pixelSize: root.detailMetaFontSize
+                                                    wrapMode: Text.WordWrap
+                                                    lineHeight: 1.25
+                                                    maximumLineCount: root.riskPointsExpanded ? 999 : 2
+                                                    elide: root.riskPointsExpanded ? Text.ElideNone : Text.ElideRight
+                                                }
                                             }
+                                        }
+                                        AppButton {
+                                            objectName: "offerRiskPointsToggle"
+                                            visible: root.orderedRiskPoints.length > 4
+                                            text: root.riskPointsExpanded ? "Réduire"
+                                                : "Voir les " + (root.orderedRiskPoints.length - 4) + " autres points"
+                                            quiet: true
+                                            refined: true
+                                            fontPixelSize: root.detailSmallFontSize
+                                            onClicked: root.riskPointsExpanded = !root.riskPointsExpanded
                                         }
                                     }
                                 }
@@ -1719,6 +1743,8 @@ Item {
                                     }
                                 }
                                 RowLayout {
+                                    objectName: "offerRawDescriptionHeading"
+                                    visible: !root.hasAnalysis
                                     Layout.fillWidth: true
                                     Layout.topMargin: root.hasInsightCards ? 18 : 4
                                     spacing: 8
@@ -1728,6 +1754,8 @@ Item {
                                     Text { Layout.maximumWidth: detailContent.width * 0.42; text: AppBridge.currentJob.role_type || AppBridge.currentJob.domain || ""; color: Theme.inkFaint; font.pixelSize: root.detailSmallFontSize; elide: Text.ElideRight }
                                 }
                                 OfferDescription {
+                                    objectName: "offerRawDescription"
+                                    visible: !root.hasAnalysis
                                     Layout.fillWidth: true
                                     Layout.preferredHeight: implicitHeight
                                     description: AppBridge.currentJob.description || ""
@@ -2011,7 +2039,8 @@ Item {
                                 }
                                 Item { Layout.fillWidth: true }
                                 Rectangle {
-                                    Layout.preferredWidth: root.sortedJobs.length > 1 ? 150 : 30
+                                    visible: root.sortedJobs.length > 1
+                                    Layout.preferredWidth: visible ? 120 : 0
                                     Layout.preferredHeight: 30
                                     radius: 10
                                     color: Theme.surfaceMuted
@@ -2021,19 +2050,6 @@ Item {
                                         anchors.margins: 1
                                         spacing: 0
                                         AppButton {
-                                            objectName: "offerRefreshAction"
-                                            Layout.preferredWidth: 28
-                                            Layout.preferredHeight: 28
-                                            text: ""
-                                            iconSource: Theme.icon("refresh")
-                                            refined: true
-                                            quiet: true
-                                            iconSize: 12
-                                            Accessible.name: "Actualiser les offres"
-                                            onClicked: root.loadOffers()
-                                        }
-                                        AppButton {
-                                            visible: root.sortedJobs.length > 1
                                             Layout.preferredWidth: 28
                                             Layout.preferredHeight: 28
                                             text: ""
@@ -2047,7 +2063,6 @@ Item {
                                             onClicked: root.moveSelection(-1)
                                         }
                                         Text {
-                                            visible: root.sortedJobs.length > 1
                                             Layout.fillWidth: true
                                             horizontalAlignment: Text.AlignHCenter
                                             text: root.selectedPosition >= 0
@@ -2058,7 +2073,6 @@ Item {
                                             font.weight: Font.DemiBold
                                         }
                                         AppButton {
-                                            visible: root.sortedJobs.length > 1
                                             Layout.preferredWidth: 28
                                             Layout.preferredHeight: 28
                                             text: ""
@@ -2101,4 +2115,131 @@ Item {
                 }
             }
         }
+
+    Item {
+        objectName: "offerFilterControlsBand"
+        visible: !root.isNewOffersFilter
+        x: offersColumn.parent.x + offersColumn.x
+        width: offersColumn.width
+        anchors.top: parent.top
+        anchors.topMargin: root.topInset > 0 ? 3 : 0
+        height: 28
+        z: 1
+        RowLayout {
+            anchors.fill: parent
+            spacing: 8
+            RowLayout {
+                visible: ["analyzed", "ready_for_form_submission", "sent"].indexOf(root.filterStatus) >= 0
+                spacing: 7
+                Text {
+                    text: "IA min."
+                    color: Theme.inkMuted
+                    font.pixelSize: 11
+                    verticalAlignment: Text.AlignVCenter
+                }
+                Slider {
+                    id: minimumScoreSlider
+                    objectName: "offerMinimumLlmScoreSlider"
+                    Layout.preferredWidth: 150
+                    Layout.preferredHeight: 24
+                    from: 0
+                    to: 100
+                    stepSize: 1
+                    snapMode: Slider.SnapAlways
+                    value: Math.max(0, AppBridge.minimumLlmScorePercent)
+                    leftPadding: 6
+                    rightPadding: 6
+                    Accessible.name: "Score IA minimum"
+                    ToolTip.visible: hovered
+                    ToolTip.text: "Le seuil porte sur l’indice technique actuel. Les évaluations historiques restent visibles pour réévaluation."
+                    Accessible.description: AppBridge.minimumLlmScorePercent < 0
+                        ? "Aucun seuil" : Math.round(value) + " pour cent"
+                    onMoved: {
+                        if (!pressed) root.setMinLlmScorePercent(Math.round(value))
+                    }
+                    onPressedChanged: {
+                        if (!pressed) root.setMinLlmScorePercent(Math.round(value))
+                    }
+                    background: Rectangle {
+                        x: minimumScoreSlider.leftPadding
+                        y: (minimumScoreSlider.height - height) / 2
+                        width: minimumScoreSlider.availableWidth
+                        height: 3
+                        radius: 2
+                        color: Theme.lineStrong
+                        Rectangle {
+                            width: parent.width * minimumScoreSlider.visualPosition
+                            height: parent.height
+                            radius: parent.radius
+                            color: Theme.accentBright
+                        }
+                    }
+                    handle: Rectangle {
+                        x: minimumScoreSlider.leftPadding
+                            + minimumScoreSlider.visualPosition * (minimumScoreSlider.availableWidth - width)
+                        y: (minimumScoreSlider.height - height) / 2
+                        width: 12
+                        height: 12
+                        radius: 6
+                        color: minimumScoreSlider.pressed ? Theme.accentBright : Theme.inkSoft
+                        border.color: Theme.accentBright
+                        border.width: 1
+                    }
+                }
+                Text {
+                    Layout.preferredWidth: 44
+                    text: AppBridge.minimumLlmScorePercent < 0 && !minimumScoreSlider.pressed
+                        ? "Aucun" : Math.round(minimumScoreSlider.value) + " %"
+                    color: AppBridge.minimumLlmScorePercent < 0 ? Theme.inkMuted : Theme.inkSoft
+                    font.pixelSize: 11
+                    font.weight: Font.DemiBold
+                }
+                AppButton {
+                    objectName: "offerMinimumLlmScoreClear"
+                    visible: AppBridge.minimumLlmScorePercent >= 0
+                    Layout.preferredWidth: visible ? 22 : 0
+                    Layout.preferredHeight: 22
+                    text: ""
+                    iconSource: Theme.icon("x")
+                    iconSize: 11
+                    refined: true
+                    quiet: true
+                    Accessible.name: "Supprimer le score IA minimum"
+                    onClicked: root.setMinLlmScorePercent(-1)
+                }
+            }
+            Item { Layout.fillWidth: true }
+            AppButton {
+                id: generationAction
+                visible: root.filterStatus === "analyzed"
+                    && (AppBridge.shortlist.ready_to_generate || 0) > 0
+                text: "Générer (" + AppBridge.shortlist.ready_to_generate + ")"
+                iconSource: Theme.icon("sparkle")
+                kind: "primary"
+                refined: true
+                iconSize: 14
+                fontPixelSize: 11
+                implicitHeight: 28
+                enabled: !AppBridge.shutdownRequested
+                onClicked: AppBridge.generateShortlistedApplications()
+            }
+        }
     }
+
+    AnalysisPage {
+        anchors.fill: parent
+        topInset: root.topInset
+        visible: root.isNewOffersFilter
+        onFilterChanged: function(status) {
+            root.filterStatus = status
+            root.useDefaultSortForStatus(status)
+            root.filterChanged(status)
+            root.clearSelection()
+            root.pageResetRequested = false
+            if (status !== "scraped") {
+                AppBridge.selectJob(0)
+                root.loadOffers(0)
+            }
+        }
+    }
+}

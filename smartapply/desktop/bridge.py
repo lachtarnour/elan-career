@@ -19,6 +19,7 @@ from smartapply.database.models import JobStatus
 from smartapply.database.session import subscribe_database_changes
 from smartapply.desktop.analysis_controller import AnalysisController
 from smartapply.desktop.analysis_offer_controller import AnalysisOfferController
+from smartapply.desktop.document_review_presentation import present_document_review
 from smartapply.desktop.models import OfferListModel
 from smartapply.desktop.services import DesktopService, SearchResult
 from smartapply.desktop.workers import TaskWorker
@@ -54,18 +55,14 @@ def _diagnostic_messages(item: Any) -> list[str]:
     return [part.strip() for part in str(item).split(" · ") if part.strip()]
 
 
-def _is_review_information(message: str) -> bool:
-    return message.startswith("text_review_corrected:")
-
-
 def _batch_review_counts(warnings: list[Any]) -> tuple[int, bool]:
     """Count affected dossiers; a verified correction is useful information."""
     affected = set()
     corrected = False
     for index, item in enumerate(warnings):
-        messages = _diagnostic_messages(item)
-        corrected = corrected or any(_is_review_information(message) for message in messages)
-        if any(not _is_review_information(message) for message in messages):
+        presentation = present_document_review(_diagnostic_messages(item))
+        corrected = corrected or presentation["corrected"]
+        if presentation["points"]:
             key = (
                 (item.get("application_id") or item.get("job_id"))
                 if isinstance(item, dict)
@@ -753,7 +750,9 @@ class DesktopBridge(QObject):
         self._job_archive_origin = archive_origin if status == JobStatus.ARCHIVED else ""
         self._job_mission_relation = mission_relation if status == JobStatus.ANALYZED else ""
         min_score_percent = (
-            self._minimum_llm_score_percent if status == JobStatus.ANALYZED else -1
+            self._minimum_llm_score_percent
+            if status in {JobStatus.ANALYZED, JobStatus.READY_FOR_FORM_SUBMISSION, JobStatus.SENT}
+            else -1
         )
         duplicates_only = (
             self._duplicate_pending_only if status == JobStatus.DUPLICATE_REVIEW else False
@@ -863,7 +862,9 @@ class DesktopBridge(QObject):
         query = (
             self._job_search, self._job_status, self._job_sort_key,
             self._job_sort_ascending, self._job_filter_disposition,
-            self._minimum_llm_score_percent if self._job_status == JobStatus.ANALYZED else -1,
+            self._minimum_llm_score_percent
+            if self._job_status in {JobStatus.ANALYZED, JobStatus.READY_FOR_FORM_SUBMISSION, JobStatus.SENT}
+            else -1,
             self._job_archive_origin,
             getattr(self, "_job_mission_relation", ""),
         )
@@ -874,7 +875,9 @@ class DesktopBridge(QObject):
             current = (
                 self._job_search, self._job_status, self._job_sort_key,
                 self._job_sort_ascending, self._job_filter_disposition,
-                self._minimum_llm_score_percent if self._job_status == JobStatus.ANALYZED else -1,
+                self._minimum_llm_score_percent
+                if self._job_status in {JobStatus.ANALYZED, JobStatus.READY_FOR_FORM_SUBMISSION, JobStatus.SENT}
+                else -1,
                 self._job_archive_origin,
                 getattr(self, "_job_mission_relation", ""),
             )
@@ -932,7 +935,9 @@ class DesktopBridge(QObject):
             current = (
                 self._job_search, self._job_status, self._job_sort_key,
                 self._job_sort_ascending, False, self._job_filter_disposition,
-                self._minimum_llm_score_percent if self._job_status == JobStatus.ANALYZED else -1,
+                self._minimum_llm_score_percent
+                if self._job_status in {JobStatus.ANALYZED, JobStatus.READY_FOR_FORM_SUBMISSION, JobStatus.SENT}
+                else -1,
                 0, self._job_archive_origin,
                 getattr(self, "_job_mission_relation", ""),
             )
@@ -949,7 +954,7 @@ class DesktopBridge(QObject):
                     mission_relation=getattr(self, "_job_mission_relation", ""),
                     min_llm_score=(
                         self._minimum_llm_score_percent / 100
-                        if self._job_status == JobStatus.ANALYZED
+                        if self._job_status in {JobStatus.ANALYZED, JobStatus.READY_FOR_FORM_SUBMISSION, JobStatus.SENT}
                         and self._minimum_llm_score_percent >= 0 else None
                     ),
                     page_size=self._jobs_page_size,
@@ -1471,8 +1476,9 @@ class DesktopBridge(QObject):
         issues = [
             message for item in [*warnings, *errors] for message in _diagnostic_messages(item)
         ]
-        points = {message for message in issues if not _is_review_information(message)}
-        corrected = any(_is_review_information(message) for message in issues)
+        presentation = present_document_review(issues)
+        points = presentation["points"]
+        corrected = presentation["corrected"]
         message = "Le CV et la lettre sont disponibles."
         message += _review_notification_suffix(len(points), corrected, batch=False)
         kind = "warning" if points else "success"
@@ -1492,8 +1498,9 @@ class DesktopBridge(QObject):
             ]
             for message in _diagnostic_messages(item)
         ]
-        review_points = {str(issue) for issue in issues if not _is_review_information(str(issue))}
-        corrected = any(_is_review_information(str(issue)) for issue in issues)
+        presentation = present_document_review(issues)
+        review_points = presentation["points"]
+        corrected = presentation["corrected"]
         message = "Le CV et la lettre ont été régénérés dans le dossier existant."
         suffix = _review_notification_suffix(len(review_points), corrected, batch=False)
         if suffix:

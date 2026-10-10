@@ -23,3 +23,4 @@ LlmCallSettings 1.0 LlmCallSettings.qml
 SettingsField 1.0 SettingsField.qml
 SettingsGroup 1.0 SettingsGroup.qml
 FitEvaluation 1.0 FitEvaluation.qml
+OfferAnalysisSummary 1.0 OfferAnalysisSummary.qml

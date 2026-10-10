@@ -87,7 +87,10 @@ def check_request_budget(context: dict, user: str) -> dict:
     }
 
 
-def complete_fit(provider, context: dict, offer, *, job_id=None, extraction_provenance=None):
+def complete_fit(
+    provider, context: dict, offer, *, job_id=None, extraction_provenance=None,
+    refresh_cache=False,
+):
     """Freeze the request inputs; annotation inspections cannot veto its score."""
     context = copy.deepcopy(context)
     provider = frozen_provider(
@@ -113,6 +116,7 @@ def complete_fit(provider, context: dict, offer, *, job_id=None, extraction_prov
         job_id=job_id,
         max_completion_tokens=context["max_completion_tokens"],
         effort=context.get("effort"),
+        **({"refresh_cache": True} if refresh_cache else {}),
     )
     result, metadata = evaluate_fit(
         diagnostic, context, offer, extraction_provenance=extraction_provenance

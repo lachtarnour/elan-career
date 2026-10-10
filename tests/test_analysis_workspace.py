@@ -945,7 +945,7 @@ def test_cancelled_batch_preparation_returns_the_existing_workspace(monkeypatch)
     )
 
 
-def test_immediate_service_analyzes_only_selected_offers(monkeypatch):
+def test_immediate_service_analyzes_only_selected_offers(isolated_db, monkeypatch):
     calls = []
     report = SimpleNamespace(analyzed=1, errors=[])
     snapshot = workspace()
@@ -973,6 +973,27 @@ def test_immediate_service_analyzes_only_selected_offers(monkeypatch):
         ("prepare", [7]),
         ("analyze", [7]),
     ]
+
+
+@pytest.mark.parametrize("state", ["active", "attention", "blocked"])
+def test_immediate_service_rejects_offers_reserved_by_batch(isolated_db, monkeypatch, state):
+    with session_scope() as session:
+        reserved = _job(f"reserved-{state}")
+        available = _job(f"available-{state}")
+        session.add_all([reserved, available])
+        session.flush()
+        _run_items(session, [reserved], state=state)
+        reserved_id, available_id = reserved.id, available.id
+
+    monkeypatch.setattr(
+        "smartapply.desktop.analysis_services.ensure_startup_maintenance_complete", lambda: None
+    )
+    monkeypatch.setattr(
+        "smartapply.pipeline.Pipeline",
+        lambda **kwargs: pytest.fail("Immediate pipeline must not start for a reserved offer"),
+    )
+    with pytest.raises(ValueError, match="déjà réservée par un Batch"):
+        AnalysisServiceMixin().start_immediate_analysis([available_id, reserved_id])
 
 
 def test_cancel_and_monitor_batch_remain_available_during_immediate_analysis(make_bridge):

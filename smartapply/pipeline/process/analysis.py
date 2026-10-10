@@ -161,6 +161,7 @@ class AnalysisMixin(AnalysisAdmissionMixin):
         *,
         allow_existing: bool = False,
         exclude_applications: bool = True,
+        force_reanalyze: bool = False,
     ) -> tuple[int, list[dict[str, object]]]:
         """Run ``_analyze_one`` concurrently over the admitted offers.
 
@@ -181,6 +182,7 @@ class AnalysisMixin(AnalysisAdmissionMixin):
                         job_id=job.id,
                         allow_existing=allow_existing,
                         exclude_applications=exclude_applications,
+                        force_reanalyze=force_reanalyze,
                     )
                 ), []
             except TaskCancelledError:
@@ -205,6 +207,7 @@ class AnalysisMixin(AnalysisAdmissionMixin):
                     job_id=job.id,
                     allow_existing=allow_existing,
                     exclude_applications=exclude_applications,
+                    force_reanalyze=force_reanalyze,
                 ): job
                 for job in jobs
             }
@@ -257,6 +260,7 @@ class AnalysisMixin(AnalysisAdmissionMixin):
             to_analyze,
             allow_existing=force_reanalyze,
             exclude_applications=exclude_applications,
+            force_reanalyze=force_reanalyze,
         )
         screened_out = 0
         if to_analyze:
@@ -300,6 +304,7 @@ class AnalysisMixin(AnalysisAdmissionMixin):
         job_id: int,
         allow_existing: bool = True,
         exclude_applications: bool = False,
+        force_reanalyze: bool = False,
     ) -> bool:
         stop_requested = getattr(self, "stop_requested", None)
         check_cancelled(stop_requested)
@@ -343,12 +348,10 @@ class AnalysisMixin(AnalysisAdmissionMixin):
             key = extraction_key(
                 analyzer_input, model, provider=provider_name, effort=extraction_effort
             )
-            with write_session_scope() as session:
-                offer = load_extraction(
-                    session,
-                    session.get(Job, job_id),
-                    key,
-                )
+            offer = None
+            if not force_reanalyze:
+                with write_session_scope() as session:
+                    offer = load_extraction(session, session.get(Job, job_id), key)
             check_cancelled(stop_requested)
             screening_llm = provider_for(self.llm, "job_scope_screening")
             screening_context = scope_context(
@@ -362,8 +365,10 @@ class AnalysisMixin(AnalysisAdmissionMixin):
                 effort="auto" if getattr(screening_llm, "_settings", None) is not None else None,
             )
             request = scope_request(screening_context, analyzer_input)
-            with session_scope() as session:
-                screened = load_scope(session, job_id, request.cache_key)
+            screened = None
+            if not force_reanalyze:
+                with session_scope() as session:
+                    screened = load_scope(session, job_id, request.cache_key)
             if screened is None:
                 try:
                     from smartapply.llm.schemas import JobScopeScreening
@@ -378,6 +383,7 @@ class AnalysisMixin(AnalysisAdmissionMixin):
                             job_id=job_id,
                             effort=screening_context.get("effort"),
                             max_completion_tokens=screening_context["max_completion_tokens"],
+                            **({"refresh_cache": True} if force_reanalyze else {}),
                         ),
                         context=screening_context,
                     )
@@ -411,6 +417,7 @@ class AnalysisMixin(AnalysisAdmissionMixin):
                         provider_settings, "job_offer_extraction"
                     ).max_output_tokens,
                     effort=extraction_effort,
+                    **({"refresh_cache": True} if force_reanalyze else {}),
                 )
             # A changed offer must not consume a second paid call.
             with write_session_scope() as session:
@@ -445,6 +452,7 @@ class AnalysisMixin(AnalysisAdmissionMixin):
                     "provider": provider_name,
                     **({"effort": extraction_effort} if extraction_effort is not None else {}),
                 },
+                refresh_cache=force_reanalyze,
             )
             check_cancelled(stop_requested)
             analysis = _assemble_analysis(offer_facts, fit)

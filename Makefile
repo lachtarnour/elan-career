@@ -4,6 +4,7 @@ PY ?= python3
 VENV = .venv
 BIN = $(VENV)/bin
 DIRECTION ?= to-app
+APP_PROFILE ?= $(if $(ELAN_HOME),$(ELAN_HOME),$(HOME)/Library/Application Support/Elan)/profile
 COMPANIES_CSV ?= $(CURDIR)/data/company-targeting/companies.csv
 
 .PHONY: sync-companies check-companies-sync
@@ -43,10 +44,10 @@ init-db:
 	$(BIN)/elan init-db
 
 check-profile-sync:
-	$(BIN)/elan sync-profile --project-profile "$(CURDIR)/smartapply/profile/data" --direction "$(DIRECTION)" --dry-run
+	$(BIN)/elan sync-profile --project-profile "$(CURDIR)/smartapply/profile/data" --app-profile "$(APP_PROFILE)" --direction "$(DIRECTION)" --dry-run
 
 sync-profile:
-	$(BIN)/elan sync-profile --project-profile "$(CURDIR)/smartapply/profile/data" --direction "$(DIRECTION)"
+	$(BIN)/elan sync-profile --project-profile "$(CURDIR)/smartapply/profile/data" --app-profile "$(APP_PROFILE)" --direction "$(DIRECTION)"
 
 check-companies-sync:
 	$(BIN)/elan sync-companies --csv "$(COMPANIES_CSV)" --dry-run

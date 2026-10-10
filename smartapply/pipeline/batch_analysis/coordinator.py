@@ -324,7 +324,14 @@ class BatchAnalysisCoordinator:
                     try:
                         refreshed = self._refresh_wave(wave.id, cancelling=cancelling)
                     except Exception as exc:
-                        if wave.phase != "screening" or cancelling:
+                        if (
+                            wave.phase != "screening"
+                            or cancelling
+                            or (
+                                (wave.state == "submitting" or wave.provider_batch_id)
+                                and phase_route(run, wave.phase)[0] == "anthropic"
+                            )
+                        ):
                             raise
                         self._screening_wave_failed(wave.id, exc)
                         refreshed = True
@@ -489,14 +496,16 @@ class BatchAnalysisCoordinator:
                 else transport.create(input_file_id, metadata=metadata)
             )
         except Exception as exc:
-            if wave.phase == "screening":
-                # A failed/ambiguous prefilter is fail-open. Keep the intent in
-                # the journal and never resubmit it, even if POST was accepted.
-                self._screening_wave_failed(wave_id, exc)
-                return False
             status_code = getattr(exc, "status_code", None) or getattr(
                 exc.__cause__, "status_code", None
             )
+            if wave.phase == "screening" and (
+                provider != "anthropic" or status_code in {400, 401, 403, 404, 422, 429}
+            ):
+                # Anthropic may have accepted an ambiguous POST. Its journal
+                # must be recovered before this phase can advance.
+                self._screening_wave_failed(wave_id, exc)
+                return False
             if status_code in {400, 401, 403, 404, 422, 429}:
                 with write_session_scope() as session:
                     wave = session.get(AnalysisBatchWave, wave_id)

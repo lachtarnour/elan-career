@@ -7,6 +7,9 @@ Item {
     id: root
     objectName: "analysisPage"
     signal navigateRequested(string route, int selectedId)
+    signal filterChanged(string status)
+    property int topInset: 0
+    property bool trackingExpanded: false
 
     // Analysis owns its list and run history. Passive refreshes never replace
     // the offer list, selected dossier or note drafts in the Offers workspace.
@@ -20,14 +23,12 @@ Item {
     readonly property string error: AppBridge.analysisWorkspaceError || ""
     readonly property bool controlsEnabled: (!loading || immediateRunning)
         && !AppBridge.shutdownRequested && !AppBridge.analysisArchiving
-    readonly property int paneDividerWidth: 29
     property string offerView: "available"
     readonly property bool viewingLot: offerView === "lot" && Boolean(selectedRun.id)
     readonly property var listedOffers: viewingLot ? (selectedRun.items || []) : candidates
     property string query: ""
     property var selectedOffers: ({})
     property string selectedRunId: ""
-    property bool launchCancelRequested: false
     property int listRevision: 0
     readonly property var filteredCandidates: {
         var needle = query.trim().toLowerCase()
@@ -94,9 +95,8 @@ Item {
 
     function historyLabel(run) {
         var created = new Date(String(run.created_at || ""))
-        var date = isNaN(created.getTime()) ? "" : Qt.formatDateTime(created, "dd/MM HH:mm") + " · "
-        return "Analyse n°" + Number(run.sequence || 1) + " · " + date
-            + Number(run.total || 0) + (Number(run.total || 0) === 1 ? " offre · " : " offres · ") + (run.status_label || run.status)
+        var date = isNaN(created.getTime()) ? "" : " · " + Qt.formatDateTime(created, "dd/MM HH:mm")
+        return "Analyse n°" + Number(run.sequence || 1) + date
     }
 
     function preserveCandidateState() {
@@ -124,7 +124,6 @@ Item {
         preserveCandidateState()
         Qt.callLater(openFirstOffer)
     }
-    onLaunchingChanged: if (!launching) launchCancelRequested = false
     onQueryChanged: {
         listRevision += 1
         offerTable.contentY = 0
@@ -145,7 +144,9 @@ Item {
 
     ColumnLayout {
         anchors.fill: parent
-        spacing: 14
+        anchors.margins: 10
+        anchors.topMargin: 10 + root.topInset
+        spacing: 0
 
         Rectangle {
             visible: root.error.length > 0
@@ -176,114 +177,81 @@ Item {
             }
         }
 
-        SplitView {
+        RowLayout {
             id: readingWorkspace
             objectName: "analysisReadingWorkspace"
             Layout.fillWidth: true
             Layout.fillHeight: true
-            Layout.leftMargin: 10
-            Layout.rightMargin: 10
-            Layout.topMargin: 10
-            orientation: Qt.Horizontal
-            handle: Item {
-                implicitWidth: root.paneDividerWidth
-                Rectangle {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    anchors.top: parent.top
-                    anchors.bottom: parent.bottom
-                    anchors.topMargin: 8
-                    anchors.bottomMargin: 8
-                    width: 1
-                    color: SplitHandle.hovered || SplitHandle.pressed ? Theme.accentBright : Theme.line
-                }
-            }
+            spacing: 0
 
             ColumnLayout {
                 objectName: "analysisQueuePanel"
-                SplitView.minimumWidth: 500
-                SplitView.preferredWidth: (readingWorkspace.width - root.paneDividerWidth) * 0.5
+                Layout.fillWidth: true
+                Layout.preferredWidth: 1
+                Layout.minimumWidth: 500
+                Layout.fillHeight: true
+                Layout.rightMargin: 14
                 spacing: 10
 
-                Flow {
+                RowLayout {
                     id: analysisToolbar
                     objectName: "analysisToolbar"
                     Layout.fillWidth: true
-                    Layout.preferredHeight: childrenRect.height
-                    Layout.bottomMargin: 6
+                    Layout.minimumHeight: 38
+                    Layout.preferredHeight: 38
+                    Layout.maximumHeight: 38
                     spacing: 8
+                    AppSelect {
+                        objectName: "analysisStatusFilter"
+                        Layout.minimumWidth: 112
+                        Layout.preferredWidth: analysisToolbar.width < 600 ? 112 : 124
+                        implicitHeight: 34
+                        leftPadding: 12
+                        rightPadding: 34
+                        fontPixelSize: 12
+                        indicatorSize: 14
+                        indicatorMargin: 12
+                        emphasized: true
+                        textRole: "label"
+                        valueRole: "value"
+                        model: AppBridge.jobStatuses
+                        currentIndex: Math.max(0, indexOfValue("scraped"))
+                        onActivated: root.filterChanged(String(currentValue))
+                    }
+                    // Reserve the secondary filter's slot across all views.
+                    Item {
+                        Layout.minimumWidth: analysisToolbar.width < 600 ? 130 : 170
+                        Layout.preferredWidth: Layout.minimumWidth
+                        Layout.maximumWidth: Layout.minimumWidth
+                    }
+                    Item { Layout.fillWidth: true }
                     RowLayout {
                         id: analysisToolbarActions
                         objectName: "analysisToolbarActions"
-                        visible: !root.viewingLot || root.immediateRunning
-                        width: implicitWidth
-                        height: visible ? 36 : 0
-                        spacing: 8
+                        visible: root.immediateRunning
+                        spacing: 6
                         AppButton {
                             objectName: "analysisCancelImmediateAction"
-                            visible: root.immediateRunning
                             text: "Arrêter l’analyse"
                             iconSource: Theme.icon("x")
                             kind: "danger"
                             refined: true
                             onClicked: AppBridge.cancelImmediateAnalysis()
                         }
-                        AppButton {
-                            objectName: "analysisStartImmediateAction"
-                            visible: !root.viewingLot && !root.immediateRunning
-                            text: "Analyse immédiate"
-                            fontPixelSize: 11
-                            implicitHeight: 36
-                            refined: true
-                            enabled: root.controlsEnabled && root.selectedIds.length > 0
-                            onClicked: root.startImmediate()
-                        }
-                        AppButton {
-                            objectName: "analysisStartBatchAction"
-                            visible: !root.viewingLot && !root.immediateRunning
-                            text: "Analyse par Batch"
-                            fontPixelSize: 11
-                            implicitHeight: 36
-                            iconSource: Theme.icon("analysis")
-                            kind: "primary"
-                            enabled: root.controlsEnabled && root.selectedIds.length > 0
-                            onClicked: root.startBatch()
-                        }
-                        AppButton {
-                            objectName: "analysisArchiveSelectionAction"
-                            visible: !root.viewingLot
-                            text: AppBridge.analysisArchiving ? "Archivage…" : "Archiver (" + root.selectedIds.length + ")"
-                            iconSource: Theme.icon("archive")
-                            kind: "warning"
-                            refined: true
-                            fontPixelSize: 11
-                            implicitHeight: 36
-                            enabled: root.selectedIds.length > 0 && root.selectedIds.every(root.canArchive)
-                            onClicked: root.confirmArchive(root.selectedIds)
-                        }
                     }
                     RowLayout {
-                        id: primaryControls
-                        width: implicitWidth
-                        height: 36
-                        spacing: 8
-                        AppButton {
-                            id: refreshAction
-                            objectName: "analysisRefreshAction"
-                            text: root.loading && !root.immediateRunning ? "Actualisation…" : "Actualiser"
-                            iconSource: Theme.icon("refresh")
-                            refined: true
-                            quiet: true
-                            enabled: root.controlsEnabled
-                            onClicked: AppBridge.refreshAnalysisWorkspace()
-                        }
+                        spacing: 0
                         Item {
                             id: searchControl
                             objectName: "analysisExpandableSearch"
                             property bool expanded: false
                             Layout.minimumWidth: 34
-                            Layout.preferredWidth: expanded ? Math.min(230, Math.max(34,
-                                analysisToolbar.width - refreshAction.implicitWidth
-                                - primaryControls.spacing)) : 34
+                            Layout.preferredWidth: expanded ? Math.min(260, Math.max(34,
+                                analysisToolbar.width - (analysisToolbar.width < 600 ? 112 : 124)
+                                - (analysisToolbar.width < 600 ? 130 : 170)
+                                - (analysisToolbarActions.visible ? analysisToolbarActions.implicitWidth : 0)
+                                - refreshAction.implicitWidth
+                                - (analysisToolbarActions.visible ? 5 : 4) * analysisToolbar.spacing)) : 34
                             Layout.maximumWidth: Layout.preferredWidth
                             Layout.preferredHeight: 34
                             clip: true
@@ -354,6 +322,91 @@ Item {
                             }
                         }
                     }
+                    AppButton {
+                        id: refreshAction
+                        objectName: "analysisRefreshAction"
+                        text: ""
+                        iconSource: Theme.icon("refresh")
+                        refined: true
+                        quiet: true
+                        implicitWidth: 34
+                        implicitHeight: 34
+                        Accessible.name: root.loading && !root.immediateRunning ? "Actualisation…" : "Actualiser"
+                        enabled: root.controlsEnabled
+                        onClicked: AppBridge.refreshAnalysisWorkspace()
+                    }
+                }
+                Rectangle {
+                    objectName: "analysisSelectionBar"
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 48
+                    radius: 13
+                    color: !root.viewingLot && root.selectedIds.length > 0 ? "#252039" : Theme.surfaceMuted
+                    border.color: !root.viewingLot && root.selectedIds.length > 0 ? Theme.accentLine : Theme.line
+                    Rectangle { visible: !root.viewingLot && root.selectedIds.length > 0; anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; width: 3; height: 24; radius: 2; color: Theme.accentBright }
+                    Text {
+                        visible: root.viewingLot || root.selectedIds.length === 0
+                        anchors.left: parent.left
+                        anchors.leftMargin: 14
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: root.loading ? "Chargement des offres…"
+                            : root.filteredCandidates.length + (root.filteredCandidates.length === 1 ? " offre" : " offres")
+                        color: Theme.inkMuted
+                        font.pixelSize: 11
+                    }
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 8
+                        spacing: 8
+                        visible: !root.viewingLot && root.selectedIds.length > 0
+                        Rectangle {
+                            Layout.preferredWidth: 28; Layout.preferredHeight: 28; radius: 9
+                            color: Theme.accentSoft; border.color: Theme.accentLine
+                            Text { anchors.centerIn: parent; text: root.selectedIds.length > 999 ? "999+" : root.selectedIds.length; color: Theme.accentDark; font.pixelSize: 11; font.weight: Font.Bold }
+                        }
+                        Text {
+                            text: root.selectedIds.length === 1 ? "1 offre sélectionnée" : root.selectedIds.length + " offres sélectionnées"
+                            color: Theme.ink
+                            font.pixelSize: 12
+                            font.weight: Font.DemiBold
+                        }
+                        Item { Layout.fillWidth: true }
+                        AppButton {
+                            objectName: "analysisClearSelection"
+                            text: "Effacer"
+                            iconSource: Theme.icon("x")
+                            refined: true
+                            quiet: true
+                            iconSize: 13
+                            fontPixelSize: 11
+                            implicitHeight: 30
+                            onClicked: root.selectedOffers = ({})
+                        }
+                        AppButton {
+                            objectName: "analysisStartImmediateAction"
+                            text: "Immédiate (" + root.selectedIds.length + ")"
+                            iconSource: Theme.icon("plus")
+                            refined: true
+                            iconSize: 13
+                            fontPixelSize: 11
+                            implicitHeight: 30
+                            enabled: root.controlsEnabled && !root.loading && root.selectedIds.length > 0
+                            onClicked: root.startImmediate()
+                        }
+                        AppButton {
+                            objectName: "analysisStartBatchAction"
+                            text: "Batch (" + root.selectedIds.length + ")"
+                            iconSource: Theme.icon("analysis")
+                            kind: "primary"
+                            refined: true
+                            iconSize: 13
+                            fontPixelSize: 11
+                            implicitHeight: 30
+                            enabled: root.controlsEnabled && !root.loading && root.selectedIds.length > 0
+                            onClicked: root.startBatch()
+                        }
+                    }
                 }
                 AnalysisOfferTable {
                     id: offerTable
@@ -376,6 +429,7 @@ Item {
                 RowLayout {
                     objectName: "analysisActionBar"
                     Layout.fillWidth: true
+                    Layout.preferredHeight: 34
                     spacing: 10
                     BusyIndicator {
                         visible: root.immediateRunning
@@ -389,6 +443,7 @@ Item {
                         Text {
                             objectName: "analysisCandidateCount"
                             Layout.fillWidth: true
+                            visible: root.selectedIds.length === 0 || root.immediateRunning
                             text: root.immediateRunning ? "Analyse immédiate en cours…"
                                 : !root.viewingLot && root.selectedIds.length > 0
                                     ? root.selectedIds.length + (root.selectedIds.length === 1
@@ -402,48 +457,59 @@ Item {
                         }
                     }
                     AppButton {
-                        objectName: "analysisClearSelection"
+                        objectName: "analysisArchiveSelectionAction"
                         visible: !root.viewingLot && root.selectedIds.length > 0
-                        text: ""
-                        iconSource: Theme.icon("x")
-                        implicitWidth: 28
-                        implicitHeight: 32
+                        text: AppBridge.analysisArchiving ? "Archivage…" : "Archiver (" + root.selectedIds.length + ")"
+                        iconSource: Theme.icon("archive")
+                        kind: "warning"
                         refined: true
-                        quiet: true
                         fontPixelSize: 11
-                        onClicked: root.selectedOffers = ({})
-                        Accessible.name: "Effacer la sélection"
+                        implicitHeight: 32
+                        enabled: root.selectedIds.length > 0 && root.selectedIds.every(root.canArchive)
+                        onClicked: root.confirmArchive(root.selectedIds)
                     }
                 }
             }
+            Rectangle {
+                objectName: "analysisWorkspaceDivider"
+                Layout.preferredWidth: 1
+                Layout.fillHeight: true
+                Layout.topMargin: 8
+                Layout.bottomMargin: 8
+                color: Theme.line
+            }
             Item {
                 objectName: "analysisDetailPanel"
-                SplitView.minimumWidth: 500
-                SplitView.preferredWidth: (readingWorkspace.width - root.paneDividerWidth) * 0.5
-                SplitView.fillWidth: true
+                Layout.fillWidth: true
+                Layout.preferredWidth: 1
+                Layout.minimumWidth: 500
+                Layout.fillHeight: true
+                Layout.leftMargin: 14
                 AnalysisOfferDetail {
                     objectName: "analysisOfferDetail"
                     anchors.fill: parent
                     offer: AppBridge.analysisOffer || ({})
                     loading: AppBridge.analysisOfferLoading
                     archiveEnabled: !loading && offer.status !== "archived" && root.canArchive(offerId)
+                    trackingAvailable: Boolean(root.selectedRun.id) && !root.launching
+                    trackingExpanded: root.trackingExpanded
                     requestedId: Number(AppBridge.analysisOfferId || 0)
                     onRetryRequested: AppBridge.selectAnalysisOffer(requestedId)
                     pageWidth: root.width
                     onSourceRequested: function(url) { AppBridge.openUrl(url) }
                     onArchiveRequested: function(jobId) { root.confirmArchive([jobId]) }
+                    onTrackingToggled: root.trackingExpanded = !root.trackingExpanded
                 }
             }
         }
 
-        // Keep tracking compact. Expanded details scroll independently so the
-        // offer table and its action bar always remain available.
+        // The reading workspace fills the page until the user opens tracking.
         Item {
             objectName: "analysisTrackingBand"
-            visible: Boolean(root.selectedRun.id) || root.launching
+            visible: root.trackingExpanded && Boolean(root.selectedRun.id) && !root.launching
             Layout.fillWidth: true
             Layout.topMargin: 8
-            Layout.preferredHeight: Math.min(runContent.implicitHeight + 24, root.height * 0.38)
+            Layout.preferredHeight: visible ? Math.min(runContent.implicitHeight + 24, 240, root.height * 0.30) : 0
             Flickable {
                 id: runViewport
                 objectName: "analysisTrackingViewport"
@@ -466,7 +532,7 @@ Item {
                     spacing: 8
                     AnalysisRunCard {
                         objectName: "analysisRunCard"
-                        visible: Boolean(root.selectedRun.id) && !root.launching
+                        visible: Boolean(root.selectedRun.id)
                         Layout.fillWidth: true
                         surfaceColor: "transparent"
                         strokeColor: "transparent"
@@ -482,51 +548,6 @@ Item {
                             cancelDialog.runId = runId
                             cancelDialog.blocked = root.selectedRun.status === "blocked"
                             cancelDialog.open()
-                        }
-                    }
-                    Surface {
-                        objectName: "analysisLaunchCard"
-                        visible: root.launching
-                        Layout.fillWidth: true
-                        padding: 0
-                        surfaceColor: "transparent"
-                        strokeColor: "transparent"
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 12
-                            BusyIndicator {
-                                Layout.preferredWidth: 28
-                                Layout.preferredHeight: 28
-                                running: root.launching
-                            }
-                            Text {
-                                Layout.fillWidth: true
-                                text: root.launchCancelRequested ? "Annulation demandée…" : "Préparation de l’analyse"
-                                color: Theme.ink
-                                font.pixelSize: 15
-                                font.weight: Font.DemiBold
-                            }
-                            AppButton {
-                                objectName: "analysisCancelLaunchAction"
-                                text: "Annuler le lancement"
-                                kind: "danger"
-                                refined: true
-                                enabled: !root.launchCancelRequested
-                                onClicked: {
-                                    root.launchCancelRequested = true
-                                    AppBridge.cancelBatchStart()
-                                }
-                            }
-                        }
-                        AnalysisTimeline {
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 82
-                            run: ({
-                                id: "launching", phase: "extraction", status: "preparing",
-                                is_active: true, phase_batches: [
-                                    {phase: "extraction", status: "preparing"}
-                                ]
-                            })
                         }
                     }
                 }

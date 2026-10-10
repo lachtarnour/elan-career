@@ -11,11 +11,11 @@ Chaque entrée exige `provider`, `model`, `reasoning` et `max_output_tokens` :
 | --- | --- | --- | --- | ---: |
 | `job_scope_screening` | Anthropic | `claude-haiku-5-5` | `high` | 16000 |
 | `job_offer_extraction` | Anthropic | `claude-haiku-5-5` | `high` | 16000 |
-| `job_fit_assessment` | Anthropic | `claude-haiku-5-5` | `high` | 32768 |
-| `cv_adaptation` | OpenAI | `gpt-5.4` | `none` | 32000 |
-| `application_texts` | OpenAI | `gpt-5.4` | `none` | 32000 |
-| `document_review` | OpenAI | `gpt-5.4` | `low` | 32000 |
-| `document_correction` | OpenAI | `gpt-5.4` | `medium` | 32000 |
+| `job_fit_assessment` | Anthropic | `claude-haiku-5-5` | `high` | 32000 |
+| `cv_adaptation` | Anthropic | `claude-haiku-5-5` | `high` | 32000 |
+| `application_texts` | Anthropic | `claude-haiku-5-5` | `high` | 32000 |
+| `document_review` | Anthropic | `claude-haiku-5-5` | `high` | 32000 |
+| `document_correction` | Anthropic | `claude-haiku-5-5` | `high` | 32000 |
 
 La génération expose quatre configurations : sélection du CV, résumé et lettre,
 relecture, puis correction. La relecture identifie les défauts sans proposer de
@@ -29,7 +29,8 @@ entrées JSON individuelles sont retirées lors de la sauvegarde des modèles.
 
 Dans la page de configuration, choisir `claude-haiku-5-5` pour l'un des trois
 appels d'analyse propose `high`, avec 16 000 tokens pour le préfiltre et
-l'extraction ou 32 768 tokens pour l'évaluation. Les autres combinaisons
+l'extraction ou 32 768 tokens pour l'évaluation. Les quatre appels de documents
+proposent `high` et 32 000 tokens avec ce modèle. Les autres combinaisons
 initiales du tableau proposent aussi leurs valeurs correspondantes. Ces valeurs
 restent modifiables avant l'enregistrement.
 

@@ -337,10 +337,8 @@ def accept_cache(
         return False
     try:
         validated = validate_request_response(request.body, cached.response)
-    except (ValueError, LLMValidationError) as exc:
-        if phase == "screening":
-            fail_open_screening(session, item, run, exc, key=request.cache_key)
-            return True
+    except (ValueError, LLMValidationError):
+        # A corrupt cached verdict is not a completed screening attempt.
         session.delete(cached)
         return False
     # Publication/context failures are not invalid cached content. Keep the entry

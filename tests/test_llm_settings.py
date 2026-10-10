@@ -382,6 +382,13 @@ fit_editor.setProperty("modelName","gpt-5.4-mini")
 assert QMetaObject.invokeMethod(fit_editor,"applyRecommendedSettings")
 assert fit_editor.property("reasoning")=="medium"
 assert fit_editor.property("maxOutputTokens")=="32000"
+cv_editor=find(page,"llmCall_cv_adaptation")
+assert cv_editor is not None
+cv_editor.setProperty("provider","anthropic")
+cv_editor.setProperty("modelName","claude-haiku-5-5")
+assert QMetaObject.invokeMethod(cv_editor,"applyRecommendedSettings")
+assert cv_editor.property("reasoning")=="high"
+assert cv_editor.property("maxOutputTokens")=="32000"
 # Only one model control is visible; custom IDs replace the suggested list.
 page.setProperty("expandedCall","job_fit_assessment")
 app.processEvents()

@@ -87,12 +87,14 @@ def test_desktop_search_prefers_extracted_employer_and_exposes_source(isolated_d
 
 
 def test_saved_benchmark_document_decisions_cover_200_offers_and_400_extractions():
-    if not CORPUS.exists():
+    if not (CORPUS / "corpus/corpus_1/offers.jsonl").is_file():
         pytest.skip("Frozen local benchmark is unavailable")
-    offers = {row["offer_id"]: row for row in _jsonl(CORPUS / "corpus/offers.jsonl")}
+    offers = {row["offer_id"]: row for row in _jsonl(CORPUS / "corpus/corpus_1/offers.jsonl")}
     assert len(offers) == 200
-    runs = sorted((CORPUS / "job_offer_extraction/runs").glob("*/results.jsonl"))
-    assert len(runs) == 2
+    runs = [CORPUS / "job_offer_extraction/runs" / run / "results.jsonl"
+            for run in ("v2-gpt54mini-medium-16000-20261009",
+                        "v3-gpt54mini-medium-16000-20261009")]
+    assert all(path.is_file() for path in runs)
     decisions = {}
     for path in runs:
         rows = _jsonl(path)

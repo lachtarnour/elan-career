@@ -86,6 +86,8 @@ def test_job_detail_exposes_classification_without_changing_the_record(isolated_
     detail = DesktopService().get_job(job_id)
 
     assert detail is not None
+    assert detail.has_analysis is False
+    assert detail.main_tasks == detail.required_skills == detail.nice_to_have == ()
     assert "pertinence" in detail.classification_summary
     assert detail.classification_reasons
     assert "contrat" in " ".join(detail.classification_reasons).lower()
@@ -283,6 +285,26 @@ def test_new_offer_rows_expose_and_sort_by_publication_date(isolated_db) -> None
     assert [row.published_date for row in rows] == ["01/10/2026", "28/09/2026"]
 
 
+def test_archived_offer_date_is_exposed_and_sorted_across_pages(isolated_db) -> None:
+    ids = [_job(external_id=f"archive-date-{index}") for index in range(3)]
+    with session_scope() as session:
+        for job_id in ids:
+            mark_archived(session, job_id)
+        session.get(Job, ids[0]).archived_at = datetime(2026, 10, 2, 12, tzinfo=timezone.utc)
+        session.get(Job, ids[1]).archived_at = datetime(2026, 10, 5, 12, tzinfo=timezone.utc)
+        session.get(Job, ids[2]).archived_at = None
+
+    service = DesktopService()
+    rows = service.list_jobs(status=JobStatus.ARCHIVED, sort_key="archived_at")
+    assert [row.id for row in rows] == [ids[1], ids[0], ids[2]]
+    assert [row.archived_at for row in rows] == ["05/10/2026", "02/10/2026", "—"]
+    page = service.list_jobs_page(
+        status=JobStatus.ARCHIVED, sort_key="archived_at", page=1, page_size=1,
+    )
+    assert page["total"] == 3 and page["rows"][0].id == ids[0]
+    assert service.get_job(ids[1]).archived_at == "05/10/2026"
+
+
 def test_analysis_dates_use_completion_and_sort_across_pages(isolated_db) -> None:
     ids = [_job(external_id=f"analysis-date-{index}") for index in range(3)]
     with session_scope() as session:
@@ -437,6 +459,7 @@ def test_job_rows_expose_generation_capability_from_analysis_state(isolated_db) 
     assert row.analyzed is True
     assert row.can_generate is True
     assert row.can_send is False
+    assert DesktopService().get_job(job_id).has_analysis is False
 
 
 def test_job_detail_keeps_profile_matches_and_review_points(isolated_db) -> None:
@@ -448,14 +471,26 @@ def test_job_detail_keeps_profile_matches_and_review_points(isolated_db) -> None
             role_type="Data Scientist",
             seniority="junior",
             domain="IA appliquée",
-            main_tasks=[],
+            main_tasks=["Développer des modèles de classification."],
             required_skills=["Python"],
-            nice_to_have=[],
+            nice_to_have=["SQL"],
             match_reasons=["Python et machine learning correspondent au profil."],
             risks=["Vérifier le niveau d’expérience demandé."],
             cv_keywords_to_include=["Python"],
             raw_response={},
             model_used="test",
+            fit_diagnostics={
+                "evaluation": {"dimensions": {"missions": {"findings": [
+                    {"text": "La pratique du machine learning appuie les missions."},
+                    {"text": "La pratique du machine learning appuie les missions."},
+                    {"text": ""},
+                ]}, "essentials": {"findings": [
+                    {"text": "La pratique de SQL est déclarée.", "support": "declared_only"},
+                    {"text": "Une pratique de déploiement manque.", "support": "not_documented"},
+                ]}}},
+                "used_levels": {"missions": 3},
+                "used_decisions": {"missions": "credible_fit"},
+            },
         )
         set_score(
             session,
@@ -466,9 +501,53 @@ def test_job_detail_keeps_profile_matches_and_review_points(isolated_db) -> None
     detail = DesktopService().get_job(job_id)
 
     assert detail is not None
+    assert detail.has_analysis is True
+    assert (detail.role_type, detail.seniority, detail.domain) == (
+        "Data Scientist", "junior", "IA appliquée"
+    )
+    assert detail.main_tasks == ("Développer des modèles de classification.",)
+    assert detail.required_skills == ("Python",)
+    assert detail.nice_to_have == ("SQL",)
+    assert detail.fit_axes[0]["findings"] == [
+        "La pratique du machine learning appuie les missions."
+    ]
+    assert detail.fit_axes[1]["findings"] == [
+        "Déclaré : La pratique de SQL est déclarée.",
+        "Non documenté : Une pratique de déploiement manque.",
+    ]
+    assert detail.fit_axes[2]["findings"] == []
     assert detail.match_reasons == ("Python et machine learning correspondent au profil.",)
     assert detail.risks == ("Vérifier le niveau d’expérience demandé.",)
     assert detail.archive_reasons == ()
+
+
+def test_application_detail_exposes_short_review_points_without_changing_audit(
+    isolated_db,
+) -> None:
+    job_id = _job(external_id="manual:document-review-presentation")
+    raw = [
+        "text_review_corrected: correction vérifiée",
+        "text_review:structure:motivation_letter_body: " + "Private letter passage " * 200,
+        "letter_too_long:252",
+        "validation_error:text_review_structural_error:letter_too_long:252",
+        "validation_error:letter_too_long:252",
+        "cv_title_not_offer_anchored",
+    ]
+    with session_scope() as session:
+        application = create_or_get_application(session, job_id)
+        application.status = JobStatus.READY_FOR_FORM_SUBMISSION
+        application.validation_warnings = raw
+
+    detail = DesktopService().get_job(job_id)
+
+    assert detail is not None and detail.application is not None
+    assert detail.application.warnings == tuple(raw)
+    assert detail.application.review_corrected is True
+    assert [point["key"] for point in detail.application.review_points] == [
+        "structure:motivation_letter_body", "letter_length", "cv_title_alignment",
+    ]
+    assert "252 mots" in detail.application.review_points[1]["detail"]
+    assert "Private letter passage" not in str(detail.application.review_points)
 
 
 def test_archived_job_detail_shows_only_human_readable_decisive_reason(isolated_db) -> None:
@@ -1118,7 +1197,7 @@ def test_analyzed_minimum_ai_score_filters_before_sort_and_pagination(isolated_d
         sort_key="llm_score", page_size=1,
     ) is None
     with pytest.raises(ValueError):
-        service.list_jobs(status=JobStatus.SENT, min_llm_score=0.7)
+        service.list_jobs(status=JobStatus.SCRAPED, min_llm_score=0.7)
 
 
 def test_minimum_ai_score_preference_persists_and_none_clears_it(isolated_db) -> None:
@@ -1150,6 +1229,24 @@ def test_ready_offer_pages_follow_persisted_ai_score(isolated_db) -> None:
     assert [row.id for row in DesktopService().list_jobs(
         status=JobStatus.READY_FOR_FORM_SUBMISSION
     )] == [ids[1], ids[2], ids[0]]
+
+
+@pytest.mark.parametrize("status", [JobStatus.READY_FOR_FORM_SUBMISSION, JobStatus.SENT])
+def test_minimum_ai_score_filters_ready_and_sent_offers(isolated_db, status) -> None:
+    ids = [_job(external_id=f"manual:{status}-minimum-{index}") for index in range(3)]
+    with session_scope() as session:
+        for job_id, score in zip(ids, [0.50, 0.70, 0.90], strict=True):
+            _prepare_analyzed_offer(session, job_id)
+            set_analysis(session, job_id, fit_score=score)
+            create_or_get_application(session, job_id).status = status
+
+    service = DesktopService()
+    first = service.list_jobs_page(status=status, min_llm_score=0.7, page_size=1)
+    second = service.list_jobs_page(status=status, min_llm_score=0.7, page=1, page_size=1)
+    assert first["total"] == second["total"] == 2
+    assert [first["rows"][0].id, second["rows"][0].id] == [ids[2], ids[1]]
+    assert service.job_page_for(ids[0], status=status, min_llm_score=0.7, page_size=1) is None
+    assert [row.id for row in service.list_jobs(status=status, min_llm_score=0.7)] == [ids[2], ids[1]]
 
 
 def test_new_offer_disposition_filter_is_exact_and_sql_scoped(isolated_db) -> None:
@@ -1362,18 +1459,20 @@ def test_shortlist_summary_ignores_unanalyzed_legacy_rows(isolated_db) -> None:
     assert service.shortlisted_generation_ids() == [valid_id]
 
 
-def test_job_statuses_hide_states_managed_outside_offers(isolated_db) -> None:
+def test_job_statuses_include_analysis_filter_but_hide_internal_states(isolated_db) -> None:
     statuses = DesktopService.job_statuses()
 
     assert JobStatus.FILTERED not in {value for value, _label in statuses}
     assert JobStatus.DUPLICATE_REVIEW not in {value for value, _label in statuses}
     assert [value for value, _label in statuses] == [
+        JobStatus.SCRAPED,
         JobStatus.ANALYZED,
         JobStatus.SHORTLISTED,
         JobStatus.READY_FOR_FORM_SUBMISSION,
         JobStatus.SENT,
         JobStatus.ARCHIVED,
     ]
+    assert statuses[0][1] == "À analyser"
 
 
 def test_job_status_filters_follow_application_tracking_state(isolated_db) -> None:

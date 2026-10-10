@@ -13,6 +13,7 @@ from smartapply.config import get_llm_settings
 from smartapply.database import session_scope
 from smartapply.database.analysis_checkpoints import AnalysisCheckpoint
 from smartapply.database.models import Job, LLMCache, LLMUsage
+from smartapply.database.repository.llm_cache import cache_set
 from smartapply.database.scope_checkpoints import ScopeCheckpoint
 from smartapply.desktop.llm_settings import llm_configuration, save_llm_calls
 from smartapply.llm.anthropic_provider import AnthropicProvider
@@ -29,7 +30,7 @@ from smartapply.llm_policy import resolve_route
 from smartapply.offers import build_analyzer_input
 from smartapply.pipeline.batch_analysis.coordinator import BatchAnalysisCoordinator
 from smartapply.pipeline.errors import TaskCancelledError
-from smartapply.pipeline.process.scope_screening import scope_context, scope_request
+from smartapply.pipeline.process.scope_screening import load_scope, scope_context, scope_request
 from smartapply.pipeline.snapshots import CancellableProvider
 from tests.fit_fixtures import evaluation_from_user
 from tests.scope_fixtures import set_test_routes
@@ -173,7 +174,7 @@ def test_gate_precedes_extraction_and_never_transmits_verdict(isolated_db, relat
         {"mission_screen": {"mission_relation": "invalid", "mission_evidence": "sufficient"}},
     ],
 )
-def test_invalid_or_failed_screen_is_checkpointed_and_not_repeated_on_fit_retry(
+def test_invalid_or_failed_screen_is_checkpointed_but_retried_after_fit_failure(
     isolated_db, screen
 ):
     job_id = seed_jobs(screened=False)[0]
@@ -185,12 +186,66 @@ def test_invalid_or_failed_screen_is_checkpointed_and_not_repeated_on_fit_retry(
         "job_scope_screening",
         "job_offer_extraction",
         "job_fit_assessment",
+        "job_scope_screening",
         "job_fit_assessment",
     ]
     with session_scope() as session:
         saved = session.scalar(select(ScopeCheckpoint).where(ScopeCheckpoint.job_id == job_id))
         assert saved.result_data["status"] == "fail_open"
         assert session.get(Job, job_id).archived_at is None
+
+
+def test_dns_fail_open_continues_then_new_analysis_retries_screen(isolated_db):
+    job_id = seed_jobs(screened=False)[0]
+    calls = []
+    dns_error = OSError("[Errno 8] nodename nor servname provided")
+    assert runner(simulated_provider(calls, dns_error))._analyze_one(job_id=job_id)
+    assert [call["purpose"] for call in calls] == [
+        "job_scope_screening", "job_offer_extraction", "job_fit_assessment"
+    ]
+    with session_scope() as session:
+        saved = session.scalar(select(ScopeCheckpoint).where(ScopeCheckpoint.job_id == job_id))
+        assert saved.result_data["status"] == "fail_open"
+        assert "nodename" in saved.result_data["error"]
+        assert load_scope(session, job_id, saved.screening_key) is None
+    assert runner(simulated_provider(calls)).analyze_jobs(
+        [job_id], force_reanalyze=True
+    ).analyzed == 1
+    assert [call["purpose"] for call in calls[3:]] == [
+        "job_scope_screening", "job_offer_extraction", "job_fit_assessment"
+    ]
+
+
+def test_valid_scope_checkpoint_and_extraction_resume_without_redundant_calls(isolated_db):
+    job_id = seed_jobs(screened=False)[0]
+    calls = []
+    with pytest.raises(LLMError, match="fit unavailable"):
+        runner(simulated_provider(calls, fit_error=True))._analyze_one(job_id=job_id)
+    with session_scope() as session:
+        saved = session.scalar(select(ScopeCheckpoint).where(ScopeCheckpoint.job_id == job_id))
+        assert load_scope(session, job_id, saved.screening_key)["status"] == "valid"
+    assert runner(simulated_provider(calls))._analyze_one(job_id=job_id)
+    assert [call["purpose"] for call in calls] == [
+        "job_scope_screening", "job_offer_extraction", "job_fit_assessment",
+        "job_fit_assessment",
+    ]
+
+
+def test_force_reanalysis_refreshes_all_three_calls_without_changing_requests(isolated_db):
+    job_id = seed_jobs(screened=False)[0]
+    calls = []
+    instance = runner(simulated_provider(calls))
+    assert instance._analyze_one(job_id=job_id)
+    assert instance.analyze_jobs([job_id], force_reanalyze=True).analyzed == 1
+    assert [call["purpose"] for call in calls] == [
+        "job_scope_screening", "job_offer_extraction", "job_fit_assessment"
+    ] * 2
+    for before, after in zip(calls[:3], calls[3:], strict=True):
+        assert before.get("refresh_cache", False) is False
+        assert after["refresh_cache"] is True
+        assert {k: v for k, v in before.items() if k != "refresh_cache"} == {
+            k: v for k, v in after.items() if k != "refresh_cache"
+        }
 
 
 def test_cancellation_after_screen_retains_checkpoint_before_extraction(isolated_db):
@@ -262,6 +317,74 @@ def test_provider_caches_and_usage_are_separate_with_reference_routes(isolated_d
         usage = {entry.purpose: entry for entry in session.scalars(select(LLMUsage))}
         assert usage["job_scope_screening"].provider == "anthropic"
         assert usage["job_offer_extraction"].provider == "openai"
+
+
+def test_force_reanalysis_makes_three_fresh_provider_calls_with_same_wire_bodies(
+    isolated_db, monkeypatch
+):
+    calls = []
+
+    def generate(provider, body):
+        calls.append((provider.name, copy.deepcopy(body)))
+        name = body["response_format"]["json_schema"]["name"]
+        answer = (
+            verdict() if name == "JobScopeScreening"
+            else factual_offer() if name == "OfferExtractionOutput"
+            else evaluation_from_user(body["messages"][1]["content"])
+        )
+        return Completion(
+            content=answer.model_dump_json(), model=body["model"],
+            prompt_tokens=10, completion_tokens=10,
+        )
+
+    monkeypatch.setattr(AnthropicProvider, "_generate", generate)
+    monkeypatch.setattr(OpenAIProvider, "_generate", generate)
+    job_id = seed_jobs(screened=False)[0]
+    instance = runner(get_llm_provider())
+    assert instance._analyze_one(job_id=job_id)
+    assert instance.analyze_jobs([job_id], force_reanalyze=True).analyzed == 1
+    assert len(calls) == 6
+    assert calls[:3] == calls[3:]
+
+
+def test_invalid_immediate_screen_cache_is_evicted_before_provider_call(
+    isolated_db, monkeypatch
+):
+    calls = []
+
+    def generate(provider, body):
+        name = body["response_format"]["json_schema"]["name"]
+        calls.append(name)
+        answer = (
+            verdict() if name == "JobScopeScreening"
+            else factual_offer() if name == "OfferExtractionOutput"
+            else evaluation_from_user(body["messages"][1]["content"])
+        )
+        return Completion(
+            content=answer.model_dump_json(), model=body["model"],
+            prompt_tokens=10, completion_tokens=10,
+        )
+
+    monkeypatch.setattr(AnthropicProvider, "_generate", generate)
+    monkeypatch.setattr(OpenAIProvider, "_generate", generate)
+    job_id = seed_jobs(screened=False)[0]
+    with session_scope() as session:
+        analyzer = build_analyzer_input(session.get(Job, job_id))
+        route = resolve_route(get_llm_settings(), "job_scope_screening")
+        context = scope_context(
+            provider=route.provider, model=route.model, settings=get_llm_settings(),
+            max_completion_tokens=route.max_output_tokens,
+        )
+        key = scope_request(context, analyzer).cache_key
+        cache_set(
+            session, cache_key=key, model=route.model, response="{}",
+            prompt_tokens=1, completion_tokens=1,
+            purpose="job_scope_screening", provider=route.provider,
+        )
+    assert runner(get_llm_provider())._analyze_one(job_id=job_id)
+    assert calls == ["JobScopeScreening", "OfferExtractionOutput", "JobFitDecisionEvaluation"]
+    with session_scope() as session:
+        assert session.scalar(select(LLMCache).where(LLMCache.cache_key == key)).response != "{}"
 
 
 def test_scope_identity_changes_with_prompt_source_provider_model_and_effort(isolated_db):
@@ -336,7 +459,7 @@ def test_batch_reference_routes_wait_for_screening_and_extract_only_kept_offers(
 
 
 @pytest.mark.parametrize(
-    "failure", ["upload", "create", "retrieve", "invalid", "missing", "provider_error"]
+    "failure", ["upload", "invalid", "missing", "provider_error"]
 )
 def test_batch_screen_errors_fail_open_without_another_screen_request(
     isolated_db, monkeypatch, failure
@@ -347,19 +470,10 @@ def test_batch_screen_errors_fail_open_without_another_screen_request(
     screen = transports["anthropic"]
     if failure == "upload":
         screen.upload_error = LLMError("no screening API access")
-    elif failure == "create":
-        screen.create_error = LLMError("screening request outcome unknown")
-        screen.accept_before_error = True
-    elif failure == "retrieve":
-
-        def unavailable(batch_id):
-            raise LLMError("screening service unavailable")
-
-        screen.retrieve = unavailable
     coordinator = BatchAnalysisCoordinator(pipeline=pipeline())
     coordinator._transports = transports
     run_id = coordinator.start(ids)
-    if failure not in {"upload", "create", "retrieve"}:
+    if failure != "upload":
         custom_id = screen.requests("scope-1")[0]["custom_id"]
         screen.complete(
             "scope-1",
@@ -376,6 +490,93 @@ def test_batch_screen_errors_fail_open_without_another_screen_request(
     coordinator.sync()
     assert journal(run_id)[0].state == "completed"
     assert screen.upload_attempts == 1
+
+
+def test_invalid_batch_screen_cache_is_evicted_and_requested_again(isolated_db):
+    job_id = seed_jobs(screened=False)[0]
+    with session_scope() as session:
+        analyzer = build_analyzer_input(session.get(Job, job_id))
+        route = resolve_route(get_llm_settings(), "job_scope_screening")
+        context = scope_context(
+            provider=route.provider,
+            model=route.model,
+            settings=get_llm_settings(),
+            max_completion_tokens=route.max_output_tokens,
+        )
+        key = scope_request(context, analyzer).cache_key
+        cache_set(
+            session, cache_key=key, model=route.model, response="{}",
+            prompt_tokens=1, completion_tokens=1,
+            purpose="job_scope_screening", provider=route.provider,
+        )
+    transports = {"anthropic": FakeTransport(batch_prefix="scope"), "openai": FakeTransport()}
+    coordinator = BatchAnalysisCoordinator(pipeline=pipeline())
+    coordinator._transports = transports
+    run_id = coordinator.start([job_id])
+    assert transports["anthropic"].created == ["scope-1"]
+    assert journal(run_id)[1][0].state == "screening_pending"
+    with session_scope() as session:
+        assert session.scalar(select(LLMCache).where(LLMCache.cache_key == key)) is None
+    transports["anthropic"].complete("scope-1")
+    coordinator.sync()
+    assert journal(run_id)[1][0].scope_data["status"] == "valid"
+
+
+def test_ambiguous_anthropic_screen_submission_waits_for_recovery(isolated_db):
+    job_id = seed_jobs(screened=False)[0]
+    screen = FakeTransport(batch_prefix="scope")
+    screen.create_error = TimeoutError("outcome unknown")
+    screen.accept_before_error = True
+    extraction = FakeTransport()
+    coordinator = BatchAnalysisCoordinator(pipeline=pipeline())
+    coordinator._transports = {"anthropic": screen, "openai": extraction}
+    run_id = coordinator.start([job_id])
+    assert journal(run_id)[0].state == "attention"
+    assert journal(run_id)[2][0].state == "submitting"
+    assert screen.created == ["scope-1"] and extraction.created == []
+    coordinator.sync()
+    coordinator.retry(run_id)
+    assert screen.created == ["scope-1"] and extraction.created == []
+    assert screen.recovered
+    screen.complete("scope-1")
+    coordinator.sync()
+    assert screen.created == ["scope-1"]
+    assert extraction.created == ["batch-1"]
+
+
+def test_unconfirmed_anthropic_screen_submission_never_posts_again(isolated_db):
+    job_id = seed_jobs(screened=False)[0]
+    screen = FakeTransport(batch_prefix="scope")
+    screen.create_error = TimeoutError("outcome unknown")
+    coordinator = BatchAnalysisCoordinator(pipeline=pipeline())
+    coordinator._transports = {"anthropic": screen, "openai": FakeTransport()}
+    run_id = coordinator.start([job_id])
+    for _ in range(3):
+        coordinator.sync()
+    coordinator.retry(run_id)
+    assert screen.created == ["scope-1"]
+    assert journal(run_id)[2][0].state == "submitting"
+    assert journal(run_id)[0].state == "attention"
+    assert "aucun lot retrouvé" in journal(run_id)[0].last_error
+
+
+def test_anthropic_screen_retrieve_failure_keeps_accepted_wave_pending(isolated_db):
+    job_id = seed_jobs(screened=False)[0]
+    screen = FakeTransport(batch_prefix="scope")
+    extraction = FakeTransport()
+    coordinator = BatchAnalysisCoordinator(pipeline=pipeline())
+    coordinator._transports = {"anthropic": screen, "openai": extraction}
+    run_id = coordinator.start([job_id])
+
+    def unavailable(batch_id):
+        raise LLMError("screening service unavailable")
+
+    screen.retrieve = unavailable
+    coordinator.sync()
+    assert screen.created == ["scope-1"] and extraction.created == []
+    assert journal(run_id)[2][0].state == "in_progress"
+    assert journal(run_id)[1][0].state == "screening_pending"
+    assert "screening service unavailable" in journal(run_id)[0].last_error
 
 
 def test_batch_manual_override_keeps_decisively_outside_offer(isolated_db):

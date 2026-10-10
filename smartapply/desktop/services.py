@@ -62,6 +62,7 @@ from smartapply.database.session import (
 )
 from smartapply.desktop.analysis_services import AnalysisServiceMixin
 from smartapply.desktop.classification_explanation import classification_explanation
+from smartapply.desktop.document_review_presentation import present_document_review
 from smartapply.desktop.fit_presentation import fit_detail, fit_summary
 from smartapply.desktop.llm_settings import (
     llm_configuration,
@@ -277,6 +278,7 @@ class JobRow:
     analyzed_at: str = "—"
     ready_at: str = "—"
     operation_date: str = "—"
+    archived_at: str = "—"
     related_application_id: int | None = None
     duplicate_review_status: str = JobDuplicateStatus.NONE
     possible_duplicate_of_id: int | None = None
@@ -299,6 +301,10 @@ class JobDetail(JobRow):
     role_type: str = ""
     domain: str = ""
     seniority: str = ""
+    has_analysis: bool = False
+    main_tasks: tuple[str, ...] = ()
+    required_skills: tuple[str, ...] = ()
+    nice_to_have: tuple[str, ...] = ()
     classification_summary: str = ""
     classification_reasons: tuple[str, ...] = ()
     match_reasons: tuple[str, ...] = ()
@@ -339,6 +345,8 @@ class ApplicationDetail:
     match_reasons: tuple[str, ...] = ()
     risks: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    review_points: tuple[dict, ...] = ()
+    review_corrected: bool = False
     source_company: str = ""
 
     @property
@@ -625,9 +633,11 @@ class DesktopService(AnalysisServiceMixin):
         if mission_relation and status != JobStatus.ANALYZED:
             raise ValueError("Mission relation is available only for analyzed offers")
         if min_llm_score is not None and (
-            status != JobStatus.ANALYZED or not 0 <= min_llm_score <= 1
+            status not in {
+                JobStatus.ANALYZED, JobStatus.READY_FOR_FORM_SUBMISSION, JobStatus.SENT,
+            } or not 0 <= min_llm_score <= 1
         ):
-            raise ValueError("Minimum IA score requires analyzed offers and a value from 0 to 1")
+            raise ValueError("Minimum IA score requires analyzed, ready, or sent offers and a value from 0 to 1")
         reusable_job_ids = set()
         if status in {JobStatus.SCRAPED, JobStatus.ANALYZED, JobStatus.SHORTLISTED}:
             with session_scope() as session:
@@ -849,6 +859,7 @@ class DesktopService(AnalysisServiceMixin):
             ),
             "title": Job.title,
             "published_date": Job.published_date,
+            "archived_at": Job.archived_at,
             "analyzed_at": func.coalesce(Job.analyzed_at, JobAnalysis.created_at),
             "ready_at": ready_date,
             "operation_date": (
@@ -1057,13 +1068,20 @@ class DesktopService(AnalysisServiceMixin):
                 ]
             return JobDetail(
                 **base_values,
-                **fit_detail(analysis.fit_diagnostics if analysis else None),
+                **fit_detail(
+                    analysis.fit_diagnostics if analysis else None,
+                    match_reasons=_text_list(analysis.match_reasons if analysis else None),
+                ),
                 remote=job.remote_policy or "",
                 url=job.application_url or "",
                 description=job.cleaned_description or job.description or "",
                 role_type=analysis.role_type or "" if analysis else "",
                 domain=analysis.domain or "" if analysis else "",
                 seniority=analysis.seniority or "" if analysis else "",
+                has_analysis=analysis is not None,
+                main_tasks=_text_list(analysis.main_tasks if analysis else None),
+                required_skills=_text_list(analysis.required_skills if analysis else None),
+                nice_to_have=_text_list(analysis.nice_to_have if analysis else None),
                 classification_summary=classification_summary,
                 classification_reasons=classification_reasons,
                 match_reasons=_text_list(analysis.match_reasons if analysis else None),
@@ -1094,6 +1112,8 @@ class DesktopService(AnalysisServiceMixin):
         for doc in sorted(app.documents, key=lambda item: item.id):
             docs[doc.doc_type] = doc
         letter_pdf = docs.get("motivation_letter_pdf")
+        warnings = _text_list(app.validation_warnings)
+        review = present_document_review(warnings)
         return ApplicationDetail(
             id=app.id,
             job_id=app.job_id,
@@ -1117,7 +1137,9 @@ class DesktopService(AnalysisServiceMixin):
             letter_pdf_path=letter_pdf.path or "" if letter_pdf else "",
             match_reasons=_text_list(analysis.match_reasons if analysis else None),
             risks=_text_list(analysis.risks if analysis else None),
-            warnings=_text_list(app.validation_warnings),
+            warnings=warnings,
+            review_points=review["points"],
+            review_corrected=review["corrected"],
         )
 
     @staticmethod
@@ -1203,6 +1225,7 @@ class DesktopService(AnalysisServiceMixin):
                 and application.form_submitted_at is None
             ),
             scraped_at=_date_text(job.scraped_at),
+            archived_at=_event_date_text(job.archived_at),
             analyzed_at=_event_date_text(
                 job.analyzed_at or (job.analysis.created_at if job.analysis else None)
             ),
@@ -2531,10 +2554,9 @@ class DesktopService(AnalysisServiceMixin):
 
     @staticmethod
     def job_statuses() -> list[tuple[str, str]]:
-        # ``filtered`` is an internal pipeline marker and duplicate reviews
-        # have their own page. The remaining offer/application states are
-        # visible on the unified Offers page.
-        return [
+        # The pre-analysis filter uses the dedicated analysis workspace;
+        # list_jobs() continues to serve the post-analysis offer states.
+        return [("scraped", "À analyser")] + [
             (row["status"], row["label"])
             for row in STATUS_FLOW
             if row["status"] in OFFER_FILTER_STATUSES

@@ -532,6 +532,10 @@ def test_minimum_ai_score_survives_sort_refresh_and_status_changes(bridge):
     assert seen[-1]["min_llm_score"] == 0.7
     assert [row["id"] for row in selected] == [1]
     bridge.service.list_jobs = read
+    for status in ("ready_for_form_submission", "sent"):
+        bridge.loadJobs("", status, "llm_score", False)
+        bridge._read_pool.finish_next()
+        assert seen[-1]["min_llm_score"] == 0.7
     bridge.loadJobs("", "archived", "score", False)
     bridge._read_pool.finish_next()
     assert seen[-1]["min_llm_score"] is None
