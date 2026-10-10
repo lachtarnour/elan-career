@@ -919,7 +919,9 @@ advancement = analysis.findChild(QQuickItem, "analysisToggleDetails")
 actions = analysis.findChild(QQuickItem, "analysisOfferActions")
 detail = analysis.findChild(QQuickItem, "analysisDetailPanel")
 assert advancement.property("visible")
-assert advancement.mapToItem(actions, QPointF()).x() + advancement.width() >= actions.width() - 1
+# Qt may apply the final RowLayout polish on the next event-loop turn.
+wait_until(lambda: advancement.mapToItem(actions, QPointF()).x()
+    + advancement.width() >= actions.width() - 1)
 assert advancement.mapToItem(analysis, QPointF()).x() >= detail.mapToItem(analysis, QPointF()).x()
 assert analysis.findChild(QQuickItem, "analysisTrackingBand").property("visible")
 assert analysis.findChild(QQuickItem, "analysisRunCard").property("visible")
