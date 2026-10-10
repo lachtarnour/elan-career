@@ -94,3 +94,5 @@ Les cellules donnent le score ordinal et le nombre de défauts : C critique, M m
 ## Recommandation
 
 Sur ce jeu de 40 offres, utiliser Haiku 5.5 high comme modèle de référence opérationnelle pour `CVSelection`, avec validation applicative des politiques de projet et du catalogue de compétences. Il a le meilleur résultat métier observé et le coût estimé le plus faible. Garder GPT-5.4 mini high comme second candidat seulement si un besoin particulier le justifie : ses six victoires isolées ne compensent pas ici deux défauts critiques et une dépense estimée plus élevée. Ne pas retenir GPT-5.4 none comme choix par défaut sur ce corpus en raison de quatre violations critiques et d’une fréquence élevée de compétences hors sujet. Avant généralisation, refaire l’évaluation avec au moins un second évaluateur aveugle et un autre échantillon d’offres ; les présents résultats ne mesurent ni le CV rendu ni un succès de candidature.
+
+Un [contrôle complémentaire de crédibilité du profil](HAIKU_PROFILE_AUDIT.md) distingue les champs effectivement présents dans le profil des compétences seulement déclarées, notamment RL et PyTorch DDP.
