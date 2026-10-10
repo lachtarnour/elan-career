@@ -26,7 +26,7 @@ BUNDLE_NAME = "Elan"
 PRODUCT_NAME = "Élan"
 DIST_APP = PROJECT_ROOT / "dist" / f"{BUNDLE_NAME}.app"
 RUNTIME_HOME = Path.home() / "Library" / "Application Support" / "Elan"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 
 
 def _running_bundle_pids(executable: Path) -> list[int]:
@@ -264,7 +264,7 @@ def _finalize_bundle_metadata() -> None:
     metadata.update(
         {
             "CFBundleShortVersionString": APP_VERSION,
-            "CFBundleVersion": "1",
+            "CFBundleVersion": "2",
             "CFBundleDevelopmentRegion": "fr",
             "LSApplicationCategoryType": "public.app-category.productivity",
             "LSMinimumSystemVersion": "13.0",

@@ -67,4 +67,4 @@ Le guide explique aussi le mode IA simulée, l'utilisation depuis les sources et
 make check
 ```
 
-Les tests utilisent des données fictives et des fournisseurs IA simulés. Voir [Contribuer](CONTRIBUTING.md) pour l'organisation du code et les vérifications, et [l'index des guides](docs/README.md) pour retrouver la documentation par sujet.
+Les tests utilisent des données fictives et des fournisseurs IA simulés. Voir [Contribuer](CONTRIBUTING.md) pour l'organisation du code et les vérifications, [l'historique des versions](CHANGELOG.md) pour les changements publiés et [l'index des guides](docs/README.md) pour retrouver la documentation par sujet.
