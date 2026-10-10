@@ -1,0 +1,35 @@
+{
+  "run_id": "1c70015822804b7eb0257c7c6477e6d6",
+  "created_at": "2026-10-10T17:34:39.632437+00:00",
+  "providers": {
+    "openai": {
+      "status": "in_progress",
+      "batch_id": "batch_6aca775463548190b228c5f6985e21c3",
+      "input_file_id": "file-8iesFEwSJverVRSjcumehf",
+      "upload_attempted_at": "2026-10-10T17:35:14.416912+00:00",
+      "attempt_history": [
+        {
+          "stage": "upload",
+          "at": "2026-10-10T17:34:50.096972+00:00",
+          "outcome": "local DNS resolution failed before TCP connection",
+          "error": "APIConnectionError('Connection error.')"
+        }
+      ],
+      "submission_attempted_at": "2026-10-10T17:35:16.074836+00:00",
+      "metadata": {
+        "elan_benchmark": "cvselection-v1",
+        "run_id": "1c70015822804b7eb0257c7c6477e6d6"
+      },
+      "submitted_at": "2026-10-10T17:35:17.089572+00:00",
+      "last_polled_at": "2026-10-10T17:36:54.512512+00:00"
+    },
+    "anthropic": {
+      "status": "in_progress",
+      "batch_id": "msgbatch_01RD38AyHQqjWzBfHNbwARpF",
+      "input_file_id": null,
+      "submission_attempted_at": "2026-10-10T17:35:23.268674+00:00",
+      "submitted_at": "2026-10-10T17:35:24.152523+00:00",
+      "last_polled_at": "2026-10-10T17:36:55.327760+00:00"
+    }
+  }
+}
