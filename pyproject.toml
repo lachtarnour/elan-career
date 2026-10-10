@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Native macOS job-search workspace with semantic ranking and grounded CV and motivation-letter generation."
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = {file = "LICENSE"}
 authors = [{name = "Lachtar Nour"}]
 dependencies = [
     "pydantic>=2.6",

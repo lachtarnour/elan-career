@@ -8,8 +8,9 @@ Find relevant roles, assess your fit, prepare tailored CVs and cover letters, an
 
 [![macOS 13+](https://img.shields.io/badge/macOS-13%2B-111017?logo=apple&logoColor=white)](#getting-started)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
-[![MIT License](https://img.shields.io/badge/License-MIT-55bd92)](LICENSE)
 [![CI](https://github.com/lachtarnour/elan-career/actions/workflows/ci.yml/badge.svg)](https://github.com/lachtarnour/elan-career/actions/workflows/ci.yml)
+
+Copyright © 2026 Lachtar Nour. All rights reserved. This repository is publicly accessible only for consultation, visual demonstration, and technical evaluation. Any use of the code requires explicit authorization from the author; see [LICENSE](LICENSE). The installation, customization, and development instructions below are intended only for people with this authorization.
 
 ## Demo
 
