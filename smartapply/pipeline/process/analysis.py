@@ -47,7 +47,6 @@ from smartapply.pipeline.process.analysis_checkpoint import (
     save_extraction,
 )
 from smartapply.pipeline.process.audit import (
-    _should_replace_job_company,
     _should_replace_job_location,
 )
 from smartapply.pipeline.process.extraction_screening import (
@@ -146,8 +145,6 @@ def persist_job_analysis(
         model_used=model,
         fit_diagnostics=fit_diagnostics,
     )
-    if _should_replace_job_company(job.company, analysis.extracted_company_name):
-        job.company = analysis.extracted_company_name.strip()
     if _should_replace_job_location(job.location, analysis.extracted_location):
         job.location = analysis.extracted_location.strip()
     clear_extraction(session, job.id)
@@ -194,7 +191,7 @@ class AnalysisMixin(AnalysisAdmissionMixin):
                     {
                         "job_id": int(job.id),
                         "title": job.title,
-                        "company": job.company,
+                        "company": job.source_company,
                         "message": str(exc),
                     }
                 ]
@@ -224,7 +221,7 @@ class AnalysisMixin(AnalysisAdmissionMixin):
                         {
                             "job_id": int(job.id),
                             "title": job.title,
-                            "company": job.company,
+                            "company": job.source_company,
                             "message": str(e),
                         }
                     )

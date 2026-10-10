@@ -6,7 +6,7 @@ import pytest
 
 from smartapply.cv.adapter import CvAdapter
 from smartapply.cv.role_contracts import _is_explicit_offer_skill
-from smartapply.llm import AdaptedCV, JobAnalysis, MockLLMProvider
+from smartapply.llm import AdaptedCV, JobAnalysis, MockLLMProvider, SkillSelectionBlock
 from smartapply.llm.prompts import cv_adaptation
 from smartapply.profile import get_profile
 from smartapply.profile.schema import SkillCategory, Skills
@@ -109,6 +109,70 @@ def test_related_terms_or_word_fragments_are_not_aliases(skill: str, term: str) 
 def test_expanded_model_name_matches_canonical_skill_in_context() -> None:
     assert skill_term_matches("Built graph neural networks for segmentation.", "GNN")
     assert not skill_term_matches("Studied graph theory.", "GNN")
+
+
+@pytest.mark.parametrize(
+    ("analysis_field", "term", "description", "expected"),
+    [
+        ("required_skills", "Python programming", "", {"Python"}),
+        ("cv_keywords_to_include", "Experience with PyTorch", "", {"PyTorch"}),
+        ("nice_to_have", "LangGraph", "", {"LangGraph"}),
+        (None, "", "Missions: requêtes SQL. Stack: Docker et Kubernetes.", {"SQL", "Docker"}),
+    ],
+)
+def test_offer_skills_are_added_from_each_explicit_source(
+    analysis_field: str | None, term: str, description: str, expected: set[str]
+) -> None:
+    profile = get_profile().model_copy(deep=True)
+    profile.skills = Skills(categories=[
+        SkillCategory(
+            id="technical", name="Technical",
+            skills=["Python", "PyTorch", "LangGraph", "SQL", "Docker"],
+        )
+    ])
+    analysis = _analysis("").model_copy(update={"required_skills": []})
+    if analysis_field:
+        analysis = analysis.model_copy(update={analysis_field: [term]})
+    cv = AdaptedCV(
+        cv_title="Engineer", professional_summary="Summary",
+        selected_experiences=[], selected_project_ids=[],
+        selected_skills=[], skills_order=[], warnings=[],
+    )
+
+    selected = CvAdapter(profile, llm=MockLLMProvider())._ensure_supported_offer_skills(
+        cv, analysis, job_description=description
+    )
+
+    assert {skill for block in selected.selected_skills for skill in block.skills} == expected
+
+
+def test_description_matching_avoids_fragments_overlaps_and_duplicates() -> None:
+    profile = get_profile().model_copy(deep=True)
+    profile.skills = Skills(categories=[
+        SkillCategory(
+            id="technical", name="Technical",
+            skills=["Git", "PyTorch", "Distributed training (PyTorch DDP)", "SQL", "R"],
+        ),
+        SkillCategory(id="other", name="Other", skills=[]),
+    ])
+    analysis = _analysis("").model_copy(update={
+        "required_skills": ["SQL"], "nice_to_have": ["SQL"],
+    })
+    cv = AdaptedCV(
+        cv_title="Engineer", professional_summary="Summary",
+        selected_experiences=[], selected_project_ids=[],
+        selected_skills=[SkillSelectionBlock(category_id="other", skills=["SQL"])],
+        skills_order=["other"], warnings=[],
+    )
+
+    selected = CvAdapter(profile, llm=MockLLMProvider())._ensure_supported_offer_skills(
+        cv, analysis,
+        job_description="GitHub Copilot, digital tools, PyTorch and SQL. R&D team.",
+    )
+
+    assert [(block.category_id, block.skills) for block in selected.selected_skills] == [
+        ("other", ["SQL"]), ("technical", ["PyTorch"]),
+    ]
 
 
 @pytest.mark.parametrize("allowed", [False, True])

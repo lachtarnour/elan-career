@@ -243,7 +243,7 @@ def seed_jobs(count=1, *, exact_copies=False, screened=True):
                 Job(
                     external_id=f"batch-test-{index}",
                     title="Machine Learning Engineer",
-                    company="Example AI",
+                    source_company="Example AI",
                     location="Paris",
                     description=body,
                     source="manual",

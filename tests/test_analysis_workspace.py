@@ -429,7 +429,7 @@ def _job(external_id, **changes):
     values = {
         "external_id": external_id,
         "title": "Machine Learning Engineer",
-        "company": "Example AI",
+        "source_company": "Example AI",
         "description": "Large body " * 1000,
         "source": "manual",
         "location": "Paris",
@@ -468,7 +468,7 @@ def _run_items(session, jobs, *, state="active", item_states=None, error="", can
             job_id=job.id,
             job_snapshot="snapshot",
             title=job.title,
-            company=job.company,
+            company=job.source_company,
             state=item_states[index] if item_states else "extraction_pending",
             analyzer_input={"large_offer": "x" * 50_000},
             offer_data={"large_extraction": "x" * 50_000},
@@ -638,7 +638,7 @@ def test_workspace_keeps_each_run_and_provider_batch_progress_distinct(isolated_
                 job_id=jobs[2].id,
                 job_snapshot="snapshot",
                 title=jobs[2].title,
-                company=jobs[2].company,
+                company=jobs[2].source_company,
                 analyzer_input={},
                 state="extraction_pending",
             )

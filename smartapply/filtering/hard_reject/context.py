@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from smartapply.company_identity import source_company_of
 from smartapply.filtering.rules import RuleSet
 from smartapply.filtering.source_facts import FilterFacts
 from smartapply.filtering.text import norm
@@ -77,7 +78,7 @@ class HardRejectContext:
             facts=facts,
             qualifications=qualifications or CandidateQualifications(),
             title=norm(job.title),
-            company=norm(job.company),
+            company=norm(source_company_of(job)),
             description=norm(job.description),
             contract=norm(job.contract_type),
             remote=norm(job.remote_policy or facts.structured_remote_policy),

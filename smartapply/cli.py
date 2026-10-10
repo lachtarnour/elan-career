@@ -331,7 +331,7 @@ def list_jobs_command(status: str | None, limit: int) -> None:
             {
                 "id": j.id,
                 "title": j.title,
-                "company": j.company,
+                "company": j.source_company,
                 "location": j.location,
                 "source": j.source,
                 "status": j.status,

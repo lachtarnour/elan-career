@@ -36,7 +36,7 @@ class _Rejector:
 def _offer(session, title="ML Engineer", *, components=None, scored=False) -> Job:
     offer = Job(
         external_id=f"fixture-{title}-{len(session.new)}", title=title,
-        company="Fixture", description="Python and machine learning.",
+        source_company="Fixture", description="Python and machine learning.",
         location="Paris", contract_type="CDI", source="manual",
     )
     session.add(offer)

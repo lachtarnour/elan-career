@@ -140,7 +140,7 @@ def test_invalid_recent_snapshot_never_authenticates_different_historical_facts(
                     job_id=job_id,
                     job_snapshot="historical",
                     title=job.title,
-                    company=job.company,
+                    company=job.source_company,
                     analyzer_input=source,
                     offer_data=old_facts,
                     state="completed",

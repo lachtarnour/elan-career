@@ -1404,6 +1404,15 @@ Item {
                                         elide: Text.ElideRight
                                     }
                                 }
+                                Text {
+                                    Layout.fillWidth: true
+                                    visible: !!AppBridge.currentJob.source_company
+                                        && AppBridge.currentJob.source_company !== AppBridge.currentJob.company
+                                    text: "Nom de l’annonce : " + (AppBridge.currentJob.source_company || "")
+                                    color: Theme.inkMuted
+                                    font.pixelSize: root.detailMetaFontSize - 1
+                                    elide: Text.ElideRight
+                                }
                                 Rectangle {
                                     Layout.fillWidth: true
                                     Layout.preferredHeight: 1

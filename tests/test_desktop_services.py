@@ -1051,8 +1051,8 @@ def test_offer_pages_sort_and_filter_before_pagination(isolated_db) -> None:
         for job_id, score in zip(ids, scores, strict=True):
             _prepare_analyzed_offer(session, job_id)
             set_analysis(session, job_id, fit_score=score)
-        session.get(Job, ids[1]).company = "Target"
-        session.get(Job, ids[3]).company = "Target"
+        session.get(Job, ids[1]).source_company = "Target"
+        session.get(Job, ids[3]).source_company = "Target"
 
     service = DesktopService()
     first = service.list_jobs_page(

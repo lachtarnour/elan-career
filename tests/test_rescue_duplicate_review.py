@@ -10,7 +10,7 @@ from smartapply.desktop.services import DesktopService
 
 
 def _job(session, key, *, application_only=False):
-    job = Job(external_id=key, title="ML Engineer", company="Fixture", source="fixture",
+    job = Job(external_id=key, title="ML Engineer", source_company="Fixture", source="fixture",
               description="Python ML", status="analyzed" if application_only else "archived",
               archived_at=None if application_only else datetime.now(timezone.utc))
     job.analysis = JobAnalysis(fit_score=0.8, raw_response={"preserved": key})
@@ -116,7 +116,7 @@ def test_rescue_archived_reference_protects_an_already_active_pending_pair(isola
 
     with session_scope() as session:
         reference = _job(session, "reference")
-        pending = Job(external_id="pending", title=reference.title, company=reference.company,
+        pending = Job(external_id="pending", title=reference.title, source_company=reference.source_company,
                       source="fixture", description="Unrelated original text", status="scraped",
                       duplicate_review_status="pending", duplicate_match_type="fuzzy",
                       possible_duplicate_of_id=reference.id)

@@ -52,7 +52,7 @@ def _rescued_job() -> tuple[int, dict]:
         job = Job(
             external_id="rescued:fixture",
             title="Senior Data Scientist",
-            company="Example",
+            source_company="Example",
             description="8 ans requis. Construire des modèles Python.",
             source="test_search",
             score=JobScore(
@@ -171,7 +171,7 @@ def test_malformed_restoration_marker_cannot_bypass_automatic_rejection(
         job = Job(
             external_id="invalid:rescue",
             title="Chargé de comptes",
-            company="Example",
+            source_company="Example",
             description="Vendre des abonnements.",
             source="test_search",
             score=JobScore(components={"manual_rescue": marker}),

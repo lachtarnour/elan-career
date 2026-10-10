@@ -12,7 +12,7 @@ from smartapply.desktop.services import DesktopService
 
 
 def _archive(session, key, components=None, *, application_only=False):
-    job = Job(external_id=key, title=key, company="Fixture", source="fixture",
+    job = Job(external_id=key, title=key, source_company="Fixture", source="fixture",
               description="ML", status=JobStatus.ARCHIVED if not application_only else "analyzed")
     if components is not None:
         job.score = JobScore(components=components)
@@ -25,7 +25,7 @@ def _archive(session, key, components=None, *, application_only=False):
 
 def test_archive_filter_matches_labels_and_precedes_pagination(isolated_db):
     with session_scope() as session:
-        root = Job(external_id="root", title="Root", company="Fixture", source="fixture", description="ML")
+        root = Job(external_id="root", title="Root", source_company="Fixture", source="fixture", description="ML")
         session.add(root)
         session.flush()
         cases = [

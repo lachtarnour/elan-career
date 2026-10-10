@@ -166,7 +166,7 @@
   </header>
 
   <div class="meta">
-    <div>{{ job_company }}</div>
+    {% if job_company %}<div>{{ job_company }}</div>{% endif %}
     <div>{{ labels.role }}{{ labels.separator }} {{ job_title }}</div>
   </div>
 

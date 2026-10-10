@@ -91,12 +91,15 @@ class Company(Base):
 
 class Job(Base):
     __tablename__ = "jobs"
-    __table_args__ = (Index("ix_jobs_status_scraped_at", "status", "scraped_at"),)
+    __table_args__ = (
+        Index("ix_jobs_status_scraped_at", "status", "scraped_at"),
+        Index("ix_jobs_company", "source_company"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     external_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     title: Mapped[str] = mapped_column(String(500))
-    company: Mapped[str] = mapped_column(String(255), index=True)
+    source_company: Mapped[str] = mapped_column(String(255))
     location: Mapped[str | None] = mapped_column(String(255), nullable=True)
     contract_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     remote_policy: Mapped[str | None] = mapped_column(String(50), nullable=True)

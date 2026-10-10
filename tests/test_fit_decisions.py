@@ -582,14 +582,14 @@ def test_reasons_include_each_positive_axis_and_generator_nonfit_inputs_are_pres
 
 
 def test_historical_extraction_readers_and_source_input_remain_identical():
-    # Historical readers and source input stay compatible with main at 6a9309d.
-    # New extraction enums intentionally revise its generation prompt and cache key.
+    # Prompt templates remain frozen; analyzer_input only reads the renamed
+    # persisted source_company while keeping the external company payload.
     root = Path(__file__).resolve().parents[1]
     signatures = {
         "smartapply/llm/prompts/templates/job_analysis/user.j2": "1630d597e1c1e70a04971483fecf528af5c4b6b9be195d08494dadfad67892cc",
         "smartapply/llm/prompts/templates/job_analysis/source_metadata_block.j2": "5b6a532adf452ca4a1ffa90930c72a5f92fed841d56e5b06685495530d94cf17",
         "smartapply/llm/prompts/job_analysis.py": "714ffcb156b5e48fff49c4497dfe8e3ded67c54def8b9148285269569fffd4df",
-        "smartapply/offers/analyzer_input.py": "c65c1e12af5a0839de312903e9ee56a96ebdc978833a0483881efe3eb3275118",
+        "smartapply/offers/analyzer_input.py": "3512eeeda1d568795daa53f1b884f33540e890f56cb7f3bfbde319c2c37b81c1",
     }
     for path, signature in signatures.items():
         assert hashlib.sha256((root / path).read_bytes()).hexdigest() == signature

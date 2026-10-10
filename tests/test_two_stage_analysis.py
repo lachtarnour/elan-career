@@ -77,7 +77,7 @@ def insert_job():
         job = Job(
             external_id="two-stage-offer",
             title="Data Scientist",
-            company="Example",
+            source_company="Example",
             location="Metadata City",
             description=BODY,
             source="manual",

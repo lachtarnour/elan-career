@@ -216,7 +216,9 @@ def test_adapter_produces_letter_after_final_cv_and_review() -> None:
 
 
 def test_adapter_keeps_three_final_projects_in_llm_order() -> None:
-    profile = get_profile()
+    profile = get_profile().model_copy(deep=True)
+    if "Neo4j" not in profile.skills.allowed_skills:
+        profile.skills.categories[0].skills.append("Neo4j")
     chosen = [project.id for project in reversed(profile.projects[:3])]
     personalization = CVSelection(
         cv_title="Data Scientist",
@@ -240,11 +242,15 @@ def test_adapter_keeps_three_final_projects_in_llm_order() -> None:
         )
 
     adapted = adapter.adapt(
-        _sample_analysis(), job_title="Data Scientist NLP", job_company="Example"
+        _sample_analysis(), job_title="Data Scientist NLP", job_company="Example",
+        job_description="Missions : construire un graphe de connaissances avec Neo4j.",
     )
 
     assert "professional_summary" not in adapted.model_dump()
     assert adapted.selected_project_ids == chosen
+    assert "Neo4j" in {
+        skill for block in adapted.selected_skills for skill in block.skills
+    }
 
 
 @pytest.mark.parametrize("available_count", [0, 1, 2, 5])
@@ -563,15 +569,15 @@ def test_letter_renderer_uses_adapted_headline_and_fallback() -> None:
     ("job_company", "extracted_company_name", "language", "expected"),
     [
         ("Acme", "Acme", "fr", "Acme"),
-        ("Acme", "", "fr", "Entreprise non communiquée"),
-        ("Agence", "Entreprise non communiquée", "fr", "Entreprise non communiquée"),
+        ("Acme", "", "fr", ""),
+        ("Agence", "Entreprise non communiquée", "fr", ""),
         (
             "l'entreprise est inconnue ne pretends pas savoir le nom",
             "",
             "fr",
-            "Entreprise non communiquée",
+            "",
         ),
-        ("Recruiter", "Unknown company", "en", "Company not disclosed"),
+        ("Recruiter", "Unknown company", "en", ""),
     ],
 )
 def test_document_company_label_hides_anonymous_placeholders(

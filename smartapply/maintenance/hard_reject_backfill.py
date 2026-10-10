@@ -342,7 +342,10 @@ def _record_query(connection: sqlite3.Connection, where: str) -> str:
     score_columns = _table_columns(connection, "job_scores")
     if not job_columns or not score_columns:
         raise BackfillError("Required jobs/job_scores tables are missing")
-    projections = [f'j."{name}" AS "job__{name}"' for name in job_columns]
+    projections = [
+        f'j."{name}" AS "job__{("company" if name == "source_company" else name)}"'
+        for name in job_columns
+    ]
     projections.extend(f's."{name}" AS "score__{name}"' for name in score_columns)
     projections.extend(
         (

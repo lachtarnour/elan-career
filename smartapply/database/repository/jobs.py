@@ -32,6 +32,10 @@ _ACTIVE_REJECTION_KEYS = frozenset(
 
 def upsert_job(session: Session, *, external_id: str, **fields: Any) -> Job:
     """Insert or update a job by external_id. Returns the persisted instance."""
+    if "company" in fields:
+        if "source_company" in fields:
+            raise ValueError("Specify only source_company or legacy company")
+        fields["source_company"] = fields.pop("company")
     job = session.execute(select(Job).where(Job.external_id == external_id)).scalar_one_or_none()
     if job is None:
         job = Job(external_id=external_id, **fields)

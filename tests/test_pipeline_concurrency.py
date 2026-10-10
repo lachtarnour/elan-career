@@ -27,7 +27,7 @@ def offer_result():
 
 def insert_job(*, analyzed=False):
     with session_scope() as session:
-        job = Job(external_id="concurrent", title="AI Engineer", company="Acme",
+        job = Job(external_id="concurrent", title="AI Engineer", source_company="Acme",
                   description="Build Python models.", source="manual", location="Paris")
         if analyzed:
             job.analyzed_at = datetime.now(timezone.utc)

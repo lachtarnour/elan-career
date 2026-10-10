@@ -1595,7 +1595,7 @@ def visual_item(item, name):
 init_db()
 now = datetime.now(timezone.utc)
 with session_scope() as session:
-    jobs = [Job(external_id=f"qml-mock-{i}", title="Machine Learning Engineer", company="Example AI",
+    jobs = [Job(external_id=f"qml-mock-{i}", title="Machine Learning Engineer", source_company="Example AI",
         location="Paris", description="Build machine learning systems using Python.", source="manual",
         status=JobStatus.FILTERED, filtered_at=now,
         score=JobScore(components={"filter_disposition": "pending_relevance",
@@ -1606,7 +1606,7 @@ with session_scope() as session:
     session.flush()
     for job in jobs[:2]:
         session.add(AnalysisBatchItem(run_id="mock-run", job_id=job.id, job_snapshot="mock-snapshot",
-            title=job.title, company=job.company, analyzer_input={}, state="evaluation_pending"))
+            title=job.title, company=job.source_company, analyzer_input={}, state="evaluation_pending"))
     session.add_all([
         AnalysisBatchWave(id="mock-screening", run_id="mock-run", phase="screening", state="imported",
             provider_batch_id="scope-1", provider_data={"status": "completed", "total": 2, "completed": 2, "failed": 0}),

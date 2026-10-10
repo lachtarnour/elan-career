@@ -260,7 +260,7 @@ def test_upsert_job_inserts_then_updates() -> None:
         )
         assert job.id == first_id
         assert job.title == "Data Scientist Senior"
-        assert job.company == "Acme"
+        assert job.source_company == "Acme"
 
 
 def test_application_document_and_tracking_flow() -> None:

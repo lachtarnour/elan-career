@@ -55,7 +55,7 @@ def _job(external_id: str, *, components: dict | None = None) -> Job:
     return Job(
         external_id=external_id,
         title="Chargé de comptes pour logiciel IA",
-        company="Example Software",
+        source_company="Example Software",
         description=BODY,
         source="test_search",
         filtered_at=datetime.now(timezone.utc),

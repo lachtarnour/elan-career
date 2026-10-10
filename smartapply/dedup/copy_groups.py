@@ -13,7 +13,7 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
-from smartapply.company_identity import is_anonymous_company
+from smartapply.company_identity import is_anonymous_company, source_company_of
 from smartapply.dedup.deduplicator import (
     DUPLICATE_TIME_WINDOW,
     _precise_location,
@@ -34,13 +34,13 @@ def strict_copy_fingerprint(job: Any) -> str | None:
     """
 
     title = _literal_text(getattr(job, "title", None))
-    company = _literal_text(getattr(job, "company", None))
+    company = _literal_text(source_company_of(job))
     contract = _literal_text(getattr(job, "contract_type", None))
     description = _literal_text(getattr(job, "description", None))
     if (
         not title
         or not company
-        or is_anonymous_company(getattr(job, "company", None))
+        or is_anonymous_company(source_company_of(job))
         or not contract
         or len(description) < MIN_STRICT_COPY_DESCRIPTION_CHARS
     ):

@@ -243,7 +243,7 @@ def test_full_pipeline_on_realistic_sample(tmp_path: Path) -> None:
             ).order_by(JobAnalysis.fit_score.desc(), Job.id.asc()).limit(2)
         ))
         top_ids = [j.id for j in top]
-        top_companies = [j.company for j in top]
+        top_companies = [j.source_company for j in top]
 
     assert top_ids
     # The Sales Director should NOT be in the top

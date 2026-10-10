@@ -23,7 +23,7 @@ from smartapply.pipeline.process.filter_state import is_current_hard_reject_surv
 
 
 def _job(session, key="offer"):
-    job = Job(external_id=key, title="ML Engineer", company="Fixture", source="manual",
+    job = Job(external_id=key, title="ML Engineer", source_company="Fixture", source="manual",
               description="Python ML", status="filtered", filtered_at=datetime.now(timezone.utc))
     job.score = JobScore(components={
         "filter_disposition": "pending_relevance",

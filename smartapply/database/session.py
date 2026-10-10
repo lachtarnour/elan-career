@@ -76,13 +76,18 @@ def get_session_factory() -> sessionmaker[Session]:
 
 
 def init_db(*, run_maintenance: bool = True) -> None:
-    """Create all tables, then add any new columns the models gained.
+    """Migrate legacy job identity, create tables, then add new columns.
 
     The auto-migration step (``auto_migrate``) handles the dev workflow
     where the user added fields to a model after the DB was first created.
-    It only does ``ALTER TABLE ADD COLUMN`` — drops/renames/type changes
-    still require Alembic.
+    It only does ``ALTER TABLE ADD COLUMN``; the source-company rename is an
+    explicit, backed-up migration before that generic step.
     """
+    from smartapply.database.source_company_migration import migrate_source_company
+
+    backup = migrate_source_company(get_engine())
+    if backup is not None:
+        logger.warning("Source company migration backup: %s", backup)
     Base.metadata.create_all(get_engine())
     from smartapply.database.match_score_migration import remove_match_score
 
@@ -209,6 +214,9 @@ def auto_migrate() -> list[str]:
     no-op single inspect() call.
     """
     engine = get_engine()
+    from smartapply.database.source_company_migration import migrate_source_company
+
+    migrate_source_company(engine)
     inspector = inspect(engine)
     executed: list[str] = []
 
@@ -448,7 +456,7 @@ def _plan_duplicate_reviews(jobs: list[Job], *, stop_requested=None) -> set[int]
         if stop_requested and stop_requested():
             raise _MaintenanceInterrupted()
         review_status = job.duplicate_review_status or JobDuplicateStatus.NONE
-        company_key = normalize_company(job.company)
+        company_key = normalize_company(job.source_company)
         previous_candidates = candidates_by_company.get(company_key, ())
         if review_status == JobDuplicateStatus.NONE:
             candidate = matcher.find_probable_duplicate(

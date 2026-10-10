@@ -183,7 +183,7 @@ def test_releasing_bad_edge_does_not_invalidate_remaining_chain(isolated_db):
         middle.published_date = at + timedelta(days=20)
         middle.location = "Lyon"
         later = upsert_job(session, external_id="linkedin:third", title=middle.title,
-                           company=middle.company, description=middle.description,
+                           company=middle.source_company, description=middle.description,
                            location="Lyon", source="linkedin")
         later.published_date = at + timedelta(days=40)
         later.possible_duplicate_of_id = middle_id
@@ -216,7 +216,7 @@ def test_full_group_time_window_cannot_be_bridged(isolated_db):
         reference.published_date = at
         alias.published_date = at + timedelta(days=20)
         later = upsert_job(session, external_id="linkedin:third", title=alias.title,
-                           company=alias.company, description=alias.description,
+                           company=alias.source_company, description=alias.description,
                            location="Paris", source="linkedin")
         later.published_date = at + timedelta(days=40)
         later.possible_duplicate_of_id = alias_id

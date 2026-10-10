@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from smartapply.company_identity import source_company_of
 from smartapply.offers.source_metadata import build_analyzer_source_metadata
 from smartapply.offers.sources import get_offer_source_adapter
 
@@ -28,7 +29,7 @@ def build_analyzer_input(job: Any) -> AnalyzerInput:
     offer_body = _build_offer_body(job, source)
     return AnalyzerInput(
         title=str(getattr(job, "title", "") or ""),
-        company=str(getattr(job, "company", "") or ""),
+        company=str(source_company_of(job) or ""),
         location=getattr(job, "location", None),
         application_url=getattr(job, "application_url", None),
         offer_body=offer_body,

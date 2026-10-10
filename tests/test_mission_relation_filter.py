@@ -22,7 +22,7 @@ def test_mission_relation_filters_before_pagination_and_keeps_missing_history(is
             job = Job(
                 external_id=f"mission-{index}",
                 title=f"Offer {index}",
-                company="Fixture",
+                source_company="Fixture",
                 source="fixture",
                 description="ML",
                 status=JobStatus.ANALYZED,

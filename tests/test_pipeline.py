@@ -211,7 +211,7 @@ def test_manual_offer_reuses_existing_url_for_regeneration() -> None:
     with session_scope() as s:
         job = s.get(Job, job_id)
         assert job is not None
-        assert job.company == "Old Company"
+        assert job.source_company == "Old Company"
         assert job.location == "Remote Europe"
         assert job.analyzed_at is None
         assert job.status == JobStatus.SCRAPED
@@ -248,8 +248,8 @@ def test_manual_offers_with_shared_url_keep_separate_job_rows() -> None:
     assert first.job_ids and second.job_ids
     assert first.job_ids != second.job_ids
     with session_scope() as s:
-        assert s.get(Job, first.job_ids[0]).company == "Example Vision"
-        assert s.get(Job, second.job_ids[0]).company == "Exemple Systèmes"
+        assert s.get(Job, first.job_ids[0]).source_company == "Example Vision"
+        assert s.get(Job, second.job_ids[0]).source_company == "Exemple Systèmes"
 
 
 def test_ingestor_keeps_paid_serpapi_boolean_query_atomic(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -645,7 +645,7 @@ def test_analysis_failure_is_returned_in_report(monkeypatch: pytest.MonkeyPatch)
     ]
 
 
-def test_analysis_replaces_job_board_company_with_extracted_employer() -> None:
+def test_analysis_preserves_source_company_when_extraction_differs() -> None:
     MockLLMProvider.clear()
     MockLLMProvider.register(
         "job_offer_extraction",
@@ -691,7 +691,8 @@ def test_analysis_replaces_job_board_company_with_extracted_employer() -> None:
     with session_scope() as s:
         job = s.get(Job, ingested.job_ids[0])
         assert job is not None
-        assert job.company == "EXAMPLE INDUSTRY"
+        assert job.source_company == "Forums Talents Handicap"
+        assert job.analysis.raw_response["extracted_company_name"] == "EXAMPLE INDUSTRY"
 
 
 def test_filter_pending_archives_internships_before_llm() -> None:
@@ -796,13 +797,13 @@ def test_full_pipeline_with_mocked_dependencies() -> None:
     assert process.kept_after_filter == 1  # sales should be filtered out
     assert process.analyzed == 1
     with session_scope() as session:
-        sales = session.scalar(select(Job).where(Job.company == "BetaSales"))
+        sales = session.scalar(select(Job).where(Job.source_company == "BetaSales"))
         assert sales.status == JobStatus.ARCHIVED
         assert sales.archived_at is not None
 
     # Apply
     with session_scope() as s:
-        analyzed = s.scalar(select(Job).where(Job.company == "Acme AI"))
+        analyzed = s.scalar(select(Job).where(Job.source_company == "Acme AI"))
         assert analyzed is not None and analyzed.analysis is not None
         assert analyzed.ranked_at is None
         raw = analyzed.analysis.raw_response

@@ -12,7 +12,6 @@ from smartapply.pipeline.process import (
     LocalFilterMixin,
     ShortlistMixin,
     _is_anonymous_company,
-    _should_replace_job_company,
     _should_replace_job_location,
 )
 from smartapply.pipeline.reports import ProcessReport
@@ -78,6 +77,5 @@ class Processor(AnalysisMixin, LocalFilterMixin, ShortlistMixin):
 __all__ = [
     "Processor",
     "_is_anonymous_company",
-    "_should_replace_job_company",
     "_should_replace_job_location",
 ]

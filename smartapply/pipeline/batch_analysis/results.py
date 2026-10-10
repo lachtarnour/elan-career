@@ -107,7 +107,7 @@ def new_item(
         job_id=job.id,
         job_snapshot=job_snapshot_key(job),
         title=job.title,
-        company=job.company,
+        company=job.source_company,
         analyzer_input=asdict(analyzer_input),
         state=(
             "filtered_after_screening"

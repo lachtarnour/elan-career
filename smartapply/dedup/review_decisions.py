@@ -13,7 +13,7 @@ from itertools import combinations
 from types import SimpleNamespace
 from typing import Any
 
-from smartapply.company_identity import is_anonymous_company
+from smartapply.company_identity import is_anonymous_company, source_company_of
 from smartapply.dedup.automatic_copies import (
     choose_copy_keeper,
     copy_alias_can_be_archived,
@@ -52,7 +52,7 @@ def metadata_contradicts(left: Any, right: Any) -> bool:
         a, b = literal_label(getattr(left, field, None)), literal_label(getattr(right, field, None))
         if a and b and a != b:
             return True
-    left_company, right_company = getattr(left, "company", None), getattr(right, "company", None)
+    left_company, right_company = source_company_of(left), source_company_of(right)
     return bool(
         not is_anonymous_company(left_company) and not is_anonymous_company(right_company)
         and normalize_company(left_company) and normalize_company(right_company)
@@ -178,7 +178,10 @@ def plan_pending_review_decisions(jobs: Sequence[Any]) -> tuple[ReviewDecision, 
               "contract_type", "remote_policy", "description", "cleaned_description",
               "application", "analysis", "score", "filtered_at", "ranked_at", "analyzed_at",
               "shortlisted_at", "shortlist_origin")
-    shadow = [SimpleNamespace(**{field: getattr(job, field, None) for field in fields}) for job in jobs]
+    shadow = [SimpleNamespace(**{
+        field: source_company_of(job) if field == "company" else getattr(job, field, None)
+        for field in fields
+    }) for job in jobs]
     by_id = {int(job.id): job for job in shadow}
     evidence_groups = _confirmed_groups(by_id)
     identities = {job.id: strong_identity_keys(job) for job in shadow}

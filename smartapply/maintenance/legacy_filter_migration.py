@@ -310,7 +310,7 @@ def _load_records(
     connection: sqlite3.Connection, where: str, parameters: tuple[Any, ...],
 ) -> list[dict[str, Any]]:
     projections = [
-        f'{alias}."{row[1]}" AS "{prefix}__{row[1]}"'
+        f'{alias}."{row[1]}" AS "{prefix}__{("company" if prefix == "job" and row[1] == "source_company" else row[1])}"'
         for table, alias, prefix in (("jobs", "j", "job"), ("job_scores", "s", "score"))
         for row in connection.execute(f'PRAGMA table_info("{table}")')
     ]

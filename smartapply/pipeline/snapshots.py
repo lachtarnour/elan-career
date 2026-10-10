@@ -69,14 +69,16 @@ def _digest(value: Any) -> str:
 
 def job_snapshot_key(job: Job) -> str:
     """Fingerprint source content, identity and workflow decisions."""
-    return _digest({field: getattr(job, field) for field in (
-        "external_id", "title", "company", "location", "contract_type", "remote_policy",
+    payload = {field: getattr(job, field) for field in (
+        "external_id", "title", "location", "contract_type", "remote_policy",
         "description", "cleaned_description", "application_url", "apply_options", "source",
         "source_data", "published_date", "canonical_job_id", "possible_duplicate_of_id",
         "duplicate_review_status", "duplicate_match_type", "duplicate_confidence", "status",
         "filtered_at", "ranked_at", "analyzed_at", "archived_at", "shortlisted_at",
         "shortlist_origin",
-    )})
+    )}
+    payload["company"] = job.source_company
+    return _digest(payload)
 
 
 def job_is_active(job: Job) -> bool:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from smartapply.config import get_llm_settings
 from smartapply.cv.assembly import assemble_cv
 from smartapply.cv.certificate_selection import certificate_policy_errors
@@ -114,7 +116,9 @@ class CvAdapter:
                     "honest transferable relevance. Never invent a direct specialty match."
                 )
         adapted = assemble_cv(personalization, self.profile)
-        adapted = self._ensure_supported_offer_skills(adapted, analysis)
+        adapted = self._ensure_supported_offer_skills(
+            adapted, analysis, job_description=job_description
+        )
         adapted = self._apply_role_family_contract(adapted, analysis, job_title)
         return adapted
 
@@ -177,8 +181,10 @@ class CvAdapter:
         self,
         adapted: AssembledCV,
         analysis: JobAnalysis,
+        *,
+        job_description: str = "",
     ) -> AssembledCV:
-        """Deterministically keep supported offer-required skills visible.
+        """Keep explicitly mentioned, supported offer skills visible.
 
         The LLM decides the section, but this guard fixes a common miss:
         offers often phrase skills as "Python programming" or "Experience
@@ -205,17 +211,32 @@ class CvAdapter:
             block.category_id: list(block.skills) for block in adapted.selected_skills
         }
         category_order = [block.category_id for block in adapted.selected_skills]
+        selected_skills_lower = {
+            skill.lower() for skills in selected_by_category.values() for skill in skills
+        }
 
-        for term in list(analysis.required_skills) + list(analysis.cv_keywords_to_include):
-            for skill_key in self._matched_allowed_skill_keys(term, canonical_by_skill):
-                category_id = category_by_skill[skill_key]
-                canonical = canonical_by_skill[skill_key]
-                if category_id not in selected_by_category:
-                    selected_by_category[category_id] = []
-                    category_order.append(category_id)
-                existing = {skill.lower() for skill in selected_by_category[category_id]}
-                if canonical.lower() not in existing:
-                    selected_by_category[category_id].append(canonical)
+        offer_skill_keys = [
+            skill_key
+            for term in (
+                list(analysis.required_skills)
+                + list(analysis.cv_keywords_to_include)
+                + list(analysis.nice_to_have)
+            )
+            for skill_key in self._matched_allowed_skill_keys(term, canonical_by_skill)
+        ]
+        offer_skill_keys.extend(
+            self._matched_description_skill_keys(job_description, canonical_by_skill)
+        )
+        for skill_key in offer_skill_keys:
+            if skill_key in selected_skills_lower:
+                continue
+            category_id = category_by_skill[skill_key]
+            canonical = canonical_by_skill[skill_key]
+            if category_id not in selected_by_category:
+                selected_by_category[category_id] = []
+                category_order.append(category_id)
+            selected_by_category[category_id].append(canonical)
+            selected_skills_lower.add(skill_key)
 
         if not selected_by_category:
             return adapted
@@ -293,3 +314,39 @@ class CvAdapter:
             if skill_key not in filtered:
                 filtered.append(skill_key)
         return filtered
+
+    @staticmethod
+    def _matched_description_skill_keys(
+        description: str,
+        canonical_by_skill: dict[str, str],
+    ) -> list[str]:
+        """Find complete catalogue names in the source offer, preferring longer names."""
+        text = normalize_skill_term(description)
+        if not text:
+            return []
+
+        matches: list[tuple[str, int, int]] = []
+        for skill_key in canonical_by_skill:
+            skill = normalize_skill_term(skill_key)
+            # A bare "R" in prose is too ambiguous; require programming context.
+            if len(skill) <= 2 and (
+                skill != "r" or not re.search(
+                    r"\b(?:langage\s+r|r\s+(?:language|programming|packages?|scripts?)"
+                    r"|(?:python|sql)\s*[,/;&+]\s*r|r\s*[,/;&+]\s*(?:python|sql))\b",
+                    text,
+                )
+            ):
+                continue
+            for match in re.finditer(
+                rf"(?<![\w+#]){re.escape(skill)}(?![\w+#])", text
+            ):
+                matches.append((skill_key, match.start(), match.end()))
+
+        chosen: list[tuple[str, int, int]] = []
+        for candidate in sorted(matches, key=lambda item: item[2] - item[1], reverse=True):
+            if not any(
+                candidate[1] < end and start < candidate[2]
+                for _, start, end in chosen
+            ):
+                chosen.append(candidate)
+        return list(dict.fromkeys(skill_key for skill_key, _, _ in chosen))

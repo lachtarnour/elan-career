@@ -6,7 +6,7 @@ import re
 from datetime import date
 from typing import Any
 
-from smartapply.company_identity import is_anonymous_company
+from smartapply.company_identity import document_company_name
 from smartapply.config import get_llm_settings
 from smartapply.cv.letter_writer import OBJECTIVE_TEXT_WARNING_PREFIXES, ApplicationTextWriter
 from smartapply.cv.motivation_validator import normalize_french_elisions
@@ -90,19 +90,13 @@ def _norm(text: str | None) -> str:
     return " ".join((text or "").lower().replace("’", "'").split())
 
 
-def _is_anonymous_company(name: str | None) -> bool:
-    return is_anonymous_company(name)
-
-
 def _document_company_label(
     _job_company: str | None,
     extracted_company_name: str | None,
     language: str,
 ) -> str:
-    """Use only the hiring entity confirmed by offer analysis."""
-    if not _is_anonymous_company(extracted_company_name):
-        return (extracted_company_name or "").strip()
-    return "Entreprise non communiquée" if language == "fr" else "Company not disclosed"
+    """Keep the legacy call shape while sharing the document-only decision."""
+    return document_company_name(extracted_company_name)
 
 
 def _word_anchors(text: str) -> set[str]:

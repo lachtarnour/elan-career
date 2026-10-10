@@ -41,7 +41,7 @@ def ready_offer(external_id="target"):
         job = Job(
             external_id=external_id,
             title="Data Scientist",
-            company="Acme",
+            source_company="Acme",
             description="Python ML",
             source="manual",
             status=JobStatus.READY_FOR_FORM_SUBMISSION,
@@ -77,7 +77,7 @@ def test_delete_offer_documents_results_usage_copies_and_completed_batch(isolate
         copy = Job(
             external_id="copy",
             title="Copy",
-            company="Acme",
+            source_company="Acme",
             description="copy",
             source="manual",
             canonical_job_id=job_id,
@@ -87,7 +87,7 @@ def test_delete_offer_documents_results_usage_copies_and_completed_batch(isolate
         candidate = Job(
             external_id="pending",
             title="Candidate",
-            company="Acme",
+            source_company="Acme",
             description="maybe",
             source="manual",
             possible_duplicate_of_id=job_id,

@@ -386,7 +386,7 @@ class Ingestor:
                                 session,
                                 external_id=(current.external_id if current is not None
                                              and source == "manual" else raw.external_id),
-                                title=raw.title, company=raw.company, location=raw.location,
+                                title=raw.title, source_company=raw.company, location=raw.location,
                                 contract_type=raw.contract_type, remote_policy=raw.remote_policy,
                                 description=raw.description,
                                 cleaned_description=clean_description(raw.description),
@@ -606,7 +606,7 @@ def _matching_known_job(raw: RawJob, known_jobs) -> object | None:  # noqa: ANN0
         for job in known_jobs
         if (
             raw_url == _normalize_application_url(job.application_url)
-            and _same_offer_label(raw.company, job.company)
+            and _same_offer_label(raw.company, job.source_company)
             and _same_offer_label(raw.title, job.title)
             and offers_within_duplicate_group_time_window(
                 raw,

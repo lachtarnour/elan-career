@@ -45,7 +45,7 @@ def _job(external_id: str, **changes) -> Job:
     values = {
         "external_id": external_id,
         "title": "Machine Learning Engineer",
-        "company": "Example AI",
+        "source_company": "Example AI",
         "description": "Build machine learning models with Python.",
         "source": "manual",
         "location": "Paris",
@@ -463,7 +463,7 @@ def test_available_queue_excludes_reserved_batch_items_without_blocking_own_resu
                 job_id=reserved.id,
                 job_snapshot="0" * 64,
                 title=reserved.title,
-                company=reserved.company,
+                company=reserved.source_company,
                 analyzer_input={},
             )
         )

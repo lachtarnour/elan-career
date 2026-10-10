@@ -180,7 +180,7 @@ def prepare_rescore_plan(
         reserved = reserved_analysis_job_ids(session)
         jobs = _load(session, None if all_active else list(dict.fromkeys(job_ids)))
         for job in jobs:
-            entry = {"job_id": job.id, "title": job.title, "company": job.company}
+            entry = {"job_id": job.id, "title": job.title, "company": job.source_company}
             reason = eligibility_reason(session, job, reserved)
             if reason:
                 entries.append({**entry, "operation": "excluded", "reason": reason})

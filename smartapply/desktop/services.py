@@ -19,6 +19,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import joinedload, load_only
 from sqlalchemy.orm.attributes import set_committed_value
 
+from smartapply.company_identity import document_company_name
 from smartapply.concurrency import TaskConflictError, job_operation
 from smartapply.config import ENV_FILE, get_llm_settings, get_settings, get_source_settings
 from smartapply.database import init_db, session_scope, write_session_scope
@@ -145,6 +146,15 @@ def _text_list(value: Any) -> tuple[str, ...]:
     if isinstance(value, str):
         return (value,)
     return tuple(str(item) for item in value if str(item).strip())
+
+
+def _extracted_company(analysis: JobAnalysis | None) -> str:
+    raw = analysis.raw_response if analysis is not None else None
+    return str(raw.get("extracted_company_name") or "").strip() if isinstance(raw, dict) else ""
+
+
+def _display_company(job: Job) -> str:
+    return document_company_name(_extracted_company(job.analysis)) or job.source_company
 
 
 def _desktop_next_action(status: str, updated_at: datetime | None) -> str:
@@ -276,6 +286,9 @@ class JobRow:
     fit_status_label: str = ""
     candidacy_status: str = ""
     candidacy_label: str = ""
+    source_company: str = ""
+    extracted_company_name: str = ""
+    document_company: str = ""
 
 
 @dataclass(frozen=True)
@@ -326,6 +339,7 @@ class ApplicationDetail:
     match_reasons: tuple[str, ...] = ()
     risks: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    source_company: str = ""
 
     @property
     def output_directory(self) -> str:
@@ -537,7 +551,9 @@ class DesktopService(AnalysisServiceMixin):
                             Application.id, Application.job_id,
                             Application.status, Application.updated_at,
                         ),
-                        joinedload(Application.job).load_only(Job.id, Job.company, Job.title),
+                        joinedload(Application.job).load_only(
+                            Job.id, Job.source_company, Job.title
+                        ).joinedload(Job.analysis).load_only(JobAnalysis.raw_response),
                     )
                     .order_by(Application.updated_at.desc())
                     .limit(8)
@@ -548,7 +564,7 @@ class DesktopService(AnalysisServiceMixin):
             recent = tuple(
                 DashboardApplication(
                     id=app.id,
-                    company=app.job.company if app.job else "Entreprise inconnue",
+                    company=_display_company(app.job) if app.job else "Entreprise inconnue",
                     title=app.job.title if app.job else "Offre supprimée",
                     status=visible_status(app.status),
                     status_label=self._desktop_status_label(app.status),
@@ -625,7 +641,7 @@ class DesktopService(AnalysisServiceMixin):
                 load_only(
                     Job.id,
                     Job.title,
-                    Job.company,
+                    Job.source_company,
                     Job.location,
                     Job.contract_type,
                     Job.remote_policy,
@@ -646,6 +662,7 @@ class DesktopService(AnalysisServiceMixin):
                 joinedload(Job.score).load_only(JobScore.components),
                 joinedload(Job.analysis).load_only(
                     JobAnalysis.fit_score, JobAnalysis.seniority, JobAnalysis.created_at,
+                    JobAnalysis.raw_response,
                 ),
                 joinedload(Job.application).load_only(
                     Application.id,
@@ -785,7 +802,10 @@ class DesktopService(AnalysisServiceMixin):
             stmt = stmt.where(
                 or_(
                     Job.title.ilike(term),
-                    Job.company.ilike(term),
+                    Job.source_company.ilike(term),
+                    func.json_extract(
+                        JobAnalysis.raw_response, "$.extracted_company_name"
+                    ).ilike(term),
                     Job.location.ilike(term),
                     Job.source.ilike(term),
                 )
@@ -822,7 +842,11 @@ class DesktopService(AnalysisServiceMixin):
                 ),
                 else_=2,
             ),
-            "company": Job.company,
+            "company": func.coalesce(
+                func.nullif(func.json_extract(
+                    JobAnalysis.raw_response, "$.extracted_company_name"
+                ), ""), Job.source_company,
+            ),
             "title": Job.title,
             "published_date": Job.published_date,
             "analyzed_at": func.coalesce(Job.analyzed_at, JobAnalysis.created_at),
@@ -1027,7 +1051,7 @@ class DesktopService(AnalysisServiceMixin):
             if archived and job.canonical_job_id is not None:
                 reference = canonical_job(session, job.id)
                 raw_archive_reasons = [
-                    f"duplicate_reference:{reference.title} — {reference.company} (n° {reference.id})"
+                    f"duplicate_reference:{reference.title} — {reference.source_company} (n° {reference.id})"
                     if reference is not None
                     else f"duplicate_of:{job.canonical_job_id}"
                 ]
@@ -1073,7 +1097,8 @@ class DesktopService(AnalysisServiceMixin):
         return ApplicationDetail(
             id=app.id,
             job_id=app.job_id,
-            company=app.job.company,
+            company=_display_company(app.job),
+            source_company=app.job.source_company,
             title=app.job.title,
             status=visible_status(app.status),
             status_label=DesktopService._desktop_status_label(app.status),
@@ -1131,7 +1156,10 @@ class DesktopService(AnalysisServiceMixin):
         display_status = state.status
         return JobRow(
             id=job.id,
-            company=job.company,
+            company=_display_company(job),
+            source_company=job.source_company,
+            extracted_company_name=_extracted_company(job.analysis),
+            document_company=document_company_name(_extracted_company(job.analysis)),
             title=job.title,
             location=job.location or "",
             source=job.source,
@@ -1209,7 +1237,7 @@ class DesktopService(AnalysisServiceMixin):
         application = session.get(Application, application_id) if application_id is not None else None
         return DuplicateReviewDetail(
             id=int(candidate.id),
-            company=candidate.company,
+            company=candidate.source_company,
             title=candidate.title,
             location=candidate.location or "",
             source=candidate.source,
@@ -1826,7 +1854,7 @@ class DesktopService(AnalysisServiceMixin):
                         ):
                             report["skipped"] += 1
                             continue
-                        title, company, analyzed = job.title, job.company, bool(job.analyzed_at)
+                        title, company, analyzed = job.title, job.source_company, bool(job.analyzed_at)
                     if progress:
                         progress(f"Création de la candidature {index}/{total}…")
                     if not analyzed:

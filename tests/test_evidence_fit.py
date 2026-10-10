@@ -203,7 +203,7 @@ def test_frozen_plan_skips_changes_and_never_adds_new_offers(isolated_db, change
             Job(
                 external_id="new-after-plan",
                 title="New",
-                company="New",
+                source_company="New",
                 description="New offer",
                 source="manual",
             )
@@ -449,7 +449,7 @@ def test_default_selection_includes_ready_and_canonical_but_excludes_history(iso
             job = Job(
                 external_id=f"excluded-{index}",
                 title="History",
-                company="Example",
+                source_company="Example",
                 source="manual",
                 description="Old job",
                 status=status,
@@ -461,7 +461,7 @@ def test_default_selection_includes_ready_and_canonical_but_excludes_history(iso
         secondary = Job(
             external_id="secondary",
             title="Duplicate",
-            company="Example",
+            source_company="Example",
             source="manual",
             description="Duplicate offer",
             canonical_job_id=canonical_id,
@@ -471,7 +471,7 @@ def test_default_selection_includes_ready_and_canonical_but_excludes_history(iso
         pending = Job(
             external_id="pending",
             title="Review pending",
-            company="Example",
+            source_company="Example",
             source="manual",
             description="Review pending offer",
             duplicate_review_status="pending",
@@ -480,7 +480,7 @@ def test_default_selection_includes_ready_and_canonical_but_excludes_history(iso
         submitted = Job(
             external_id="submitted",
             title="Submitted",
-            company="Example",
+            source_company="Example",
             source="manual",
             description="Submitted offer",
             analysis=SavedAnalysis(**copy.deepcopy(analysis_data)),

@@ -85,7 +85,7 @@ def test_actual_apply_path_resolves_document_language_without_changing_extractio
     raw = {"offer_language": extracted_language, "extracted_company_name": "Example"}
     with session_scope() as session:
         job = Job(
-            external_id="document-language", title="Software Engineer", company="Example",
+            external_id="document-language", title="Software Engineer", source_company="Example",
             description=body, source="manual", status=JobStatus.ANALYZED,
             analysis=StoredAnalysis(role_type="Software Engineer", seniority="", raw_response=raw),
         )

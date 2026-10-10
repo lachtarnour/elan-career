@@ -347,7 +347,7 @@ def analysis_workspace() -> dict:
                     load_only(
                         Job.id,
                         Job.title,
-                        Job.company,
+                        Job.source_company,
                         Job.location,
                         Job.source,
                         Job.display_metadata,
@@ -382,7 +382,7 @@ def analysis_workspace() -> dict:
             {
                 "id": job.id,
                 "title": job.title,
-                "company": job.company,
+                "company": job.source_company,
                 "location": job.location or "",
                 "experience": _experience(job),
                 "source": job.source,
