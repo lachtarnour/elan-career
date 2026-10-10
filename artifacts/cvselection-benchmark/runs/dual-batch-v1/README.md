@@ -29,3 +29,7 @@ Pour reprendre la lecture des deux lots, sans nouvelle soumission :
 ```sh
 PYTHONPATH="$PWD" .venv/bin/python artifacts/cvselection-benchmark/runs/dual-batch-v1/run.py poll
 ```
+
+Pour recalculer `results.jsonl` et `summary.json` uniquement à partir des
+réponses locales, sans appel réseau : remplacer `poll` par `summarize`.
+`REPORT.md` résume les deux Batchs terminés et distingue coût estimé et facture.

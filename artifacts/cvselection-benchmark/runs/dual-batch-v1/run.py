@@ -1,6 +1,6 @@
 """Run the frozen 40-offer CVSelection comparison through provider Batch APIs.
 
-Usage: PYTHONPATH=. .venv/bin/python .../run.py prepare|submit-openai|submit-anthropic|poll
+Usage: PYTHONPATH=. .venv/bin/python .../run.py prepare|submit-openai|submit-anthropic|poll|summarize
 No command retries a Batch submission with an unknown outcome.
 """
 
@@ -407,6 +407,26 @@ def collect(manifest: dict, state: dict) -> None:
                              "errors": sum(r["provider"] == provider and r["error"] not in (None, "pending_or_missing_result") for r in all_results),
                              "cost_usd_estimated": round(sum(r["estimated_batch_cost_usd"] or 0 for r in all_results if r["provider"] == provider), 8)}
                   for provider in MODELS}
+        usage_totals = {}
+        for provider in MODELS:
+            provider_results = [r for r in all_results if r["provider"] == provider]
+            if not provider_results:
+                continue
+            if provider == "openai":
+                usage_totals[provider] = {
+                    "prompt_tokens": sum((r["usage"] or {}).get("prompt_tokens", 0) for r in provider_results),
+                    "cached_prompt_tokens": sum(((r["usage"] or {}).get("prompt_tokens_details") or {}).get("cached_tokens", 0) for r in provider_results),
+                    "output_tokens": sum((r["usage"] or {}).get("completion_tokens", 0) for r in provider_results),
+                    "reasoning_tokens": sum(((r["usage"] or {}).get("completion_tokens_details") or {}).get("reasoning_tokens", 0) for r in provider_results),
+                }
+            else:
+                usage_totals[provider] = {
+                    "input_tokens": sum((r["usage"] or {}).get("input_tokens", 0) for r in provider_results),
+                    "cache_read_input_tokens": sum((r["usage"] or {}).get("cache_read_input_tokens", 0) for r in provider_results),
+                    "cache_creation_input_tokens": sum((r["usage"] or {}).get("cache_creation_input_tokens", 0) for r in provider_results),
+                    "output_tokens": sum((r["usage"] or {}).get("output_tokens", 0) for r in provider_results),
+                    "thinking_tokens": sum(((r["usage"] or {}).get("output_tokens_details") or {}).get("thinking_tokens", 0) for r in provider_results),
+                }
         batch_latencies = {}
         for provider in MODELS:
             path = RAW / f"{provider}_snapshot.json"
@@ -427,6 +447,14 @@ def collect(manifest: dict, state: dict) -> None:
                     if start and end else None
                 )
         write_json(HERE / "summary.json", {"updated_at": now(), "counts": counts,
+                                           "usage_totals": usage_totals,
+                                           "returned_models": {provider: sorted({r.get("model_returned") for r in all_results if r["provider"] == provider and r.get("model_returned")}) for provider in MODELS},
+                                           "raw_result_sha256": {
+                                               provider: sha((RAW / filename).read_bytes())
+                                               for provider, filename in (("openai", "openai_output.jsonl"),
+                                                                          ("anthropic", "anthropic_results.jsonl"))
+                                               if (RAW / filename).exists()
+                                           },
                                            "result_file_sha256": sha(content),
                                            "batch_latency_seconds": batch_latencies,
                                            "batch_statuses": {p: state["providers"][p]["status"] for p in MODELS}})
@@ -442,5 +470,7 @@ if __name__ == "__main__":
         submit("anthropic")
     elif command == "poll":
         poll()
+    elif command == "summarize":
+        collect(*checked_state())
     else:
-        raise SystemExit("Expected prepare, submit-openai, submit-anthropic, or poll")
+        raise SystemExit("Expected prepare, submit-openai, submit-anthropic, poll, or summarize")
