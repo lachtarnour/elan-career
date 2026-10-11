@@ -87,7 +87,8 @@ def test_annotations_never_refresh_usable_cache_or_trigger_another_call(
         user=build_fit_user(context, facts),
         schema_name="JobFitDecisionEvaluation",
         extra=request_cache_extra(
-            JobFitDecisionEvaluation, context["temperature"], context.get("effort")
+            JobFitDecisionEvaluation, context["temperature"], context.get("effort"),
+            context["max_completion_tokens"],
         ),
     )
     with session_scope() as session:

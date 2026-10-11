@@ -102,10 +102,13 @@ class NativeClaudeClient:
             custom_id, params = request["custom_id"], request["params"]
             original_id = custom_id.partition("_")[2]
             if outcome == "succeeded":
+                user = params["messages"][0]["content"]
+                if isinstance(user, list):
+                    user = "".join(block["text"] for block in user)
                 answer = answers.get(original_id) or (
                     __import__("smartapply.llm.schemas", fromlist=["JobScopeScreening"]).JobScopeScreening.model_validate({"mission_screen": {"mission_relation": "unknown", "mission_evidence": "insufficient"}}) if original_id.startswith("screening-")
                     else extraction_offer() if original_id.startswith("extraction-")
-                    else evaluation_from_user(params["messages"][0]["content"])
+                    else evaluation_from_user(user)
                 )
                 content = answer if isinstance(answer, str) else answer.model_dump_json()
                 result = {"type": "succeeded", "message": {

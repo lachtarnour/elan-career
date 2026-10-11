@@ -57,7 +57,8 @@ def test_claude_batch_cache_matches_immediate_and_isolated_from_openai():
     built = request()
     params = dict(model="claude-haiku-4-5", system="Extraire seulement les faits.",
                   user="Ingénieur IA", schema_name="Extraction",
-                  extra={"temperature": 0.2, "schema": Extraction.model_json_schema()})
+                  extra={"temperature": 0.2, "schema": Extraction.model_json_schema(),
+                         "max_completion_tokens": 6000})
     assert built.cache_key == make_cache_key(**params, provider="anthropic")
     assert built.cache_key != make_cache_key(**params, provider="openai")
 

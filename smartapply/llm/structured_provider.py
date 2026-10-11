@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from abc import abstractmethod
+from concurrent.futures import Future
+from threading import Lock
 
-from smartapply.config import get_llm_settings
+from smartapply.config import get_llm_settings, get_settings
 from smartapply.database import write_session_scope
 from smartapply.database.repository import cache_get, cache_set, purge_expired_cache, record_usage
 from smartapply.llm.cache import make_cache_key
@@ -25,6 +27,8 @@ from smartapply.llm_policy import (
 from smartapply.logging_setup import get_logger
 
 logger = get_logger(__name__)
+_inflight_lock = Lock()
+_inflight: dict[tuple[str, str, bool], Future] = {}
 
 
 class StructuredProvider(LLMProvider):
@@ -110,8 +114,95 @@ class StructuredProvider(LLMProvider):
             system=system,
             user=user,
             schema_name=schema.__name__,
-            extra=request_cache_extra(schema, temperature, effort),
+            extra=request_cache_extra(schema, temperature, effort, max_completion_tokens),
         )
+        request = dict(
+            system=system,
+            user=user,
+            schema=schema,
+            model_name=model_name,
+            temperature=temperature,
+            purpose=purpose,
+            job_id=job_id,
+            use_cache=use_cache,
+            refresh_cache=refresh_cache,
+            max_completion_tokens=max_completion_tokens,
+            effort=effort,
+            key=key,
+        )
+        if not use_cache:
+            result, _ = self._complete_json_once(**request)
+            return result
+
+        # Scope the reservation to this database and the refresh mode. Only
+        # the leader touches the provider; waiters do not hold a SQLite session.
+        flight_key = (get_settings().database_url, key, refresh_cache)
+        with _inflight_lock:
+            future = _inflight.get(flight_key)
+            leader = future is None
+            if leader:
+                future = Future()
+                _inflight[flight_key] = future
+        if not leader:
+            result, tokens = future.result()
+            self._record_cached_usage(
+                purpose=purpose,
+                model_name=model_name,
+                effort=effort,
+                job_id=job_id,
+                key=key,
+                tokens=tokens,
+            )
+            return result
+        try:
+            result, tokens = self._complete_json_once(**request)
+        except BaseException as exc:
+            future.set_exception(exc)
+            raise
+        else:
+            future.set_result((result, tokens))
+            return result
+        finally:
+            with _inflight_lock:
+                del _inflight[flight_key]
+
+    def _record_cached_usage(self, *, purpose, model_name, effort, job_id, key, tokens):
+        # A telemetry failure cannot turn a shared result into another paid call.
+        try:
+            with write_session_scope(notify=False) as session:
+                self._usage_writer(
+                    session,
+                    provider=self.name,
+                    purpose=purpose,
+                    model=model_name,
+                    requested_model=model_name,
+                    reasoning_effort=effort,
+                    prompt_tokens=tokens[0],
+                    completion_tokens=tokens[1],
+                    cost_usd=0.0,
+                    cached=True,
+                    job_id=job_id,
+                    cache_key=key,
+                )
+        except Exception as exc:
+            logger.warning("Cache-hit usage recording failed (continuing): %s", exc)
+
+    def _complete_json_once(
+        self,
+        *,
+        system,
+        user,
+        schema,
+        model_name,
+        temperature,
+        purpose,
+        job_id,
+        use_cache,
+        refresh_cache,
+        max_completion_tokens,
+        effort,
+        key,
+    ):
         cached_result = None
         cached_tokens = None
         if use_cache:
@@ -132,27 +223,15 @@ class StructuredProvider(LLMProvider):
             except Exception as exc:
                 logger.warning("Cache lookup failed (continuing): %s", exc)
         if cached_result is not None and cached_tokens is not None:
-            # A usage/database error cannot convert this successful zero-cost
-            # read into an additional provider request.
-            try:
-                with write_session_scope(notify=False) as session:
-                    self._usage_writer(
-                        session,
-                        provider=self.name,
-                        purpose=purpose,
-                        model=model_name,
-                        requested_model=model_name,
-                        reasoning_effort=effort,
-                        prompt_tokens=cached_tokens[0],
-                        completion_tokens=cached_tokens[1],
-                        cost_usd=0.0,
-                        cached=True,
-                        job_id=job_id,
-                        cache_key=key,
-                    )
-            except Exception as exc:
-                logger.warning("Cache-hit usage recording failed (continuing): %s", exc)
-            return cached_result
+            self._record_cached_usage(
+                purpose=purpose,
+                model_name=model_name,
+                effort=effort,
+                job_id=job_id,
+                key=key,
+                tokens=cached_tokens,
+            )
+            return cached_result, cached_tokens
 
         body = request_body(
             system=system,
@@ -210,4 +289,4 @@ class StructuredProvider(LLMProvider):
                     )
             except Exception as exc:
                 logger.warning("Cache write failed (continuing): %s", exc)
-        return result
+        return result, (completion.prompt_tokens, completion.completion_tokens)

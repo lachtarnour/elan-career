@@ -79,6 +79,8 @@ def _leaf_response(body, provider_name, fixtures, calls):
         schema_name = body["output_config"]["format"]["schema"]["title"]
         system = body["system"][0]["text"]
         user = body["messages"][0]["content"]
+        if isinstance(user, list):
+            user = "".join(block["text"] for block in user)
         output_limit = body["max_tokens"]
     purpose = _PURPOSE[schema_name]
     calls.append(

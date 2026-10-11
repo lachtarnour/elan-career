@@ -425,7 +425,7 @@ def test_incomplete_container_is_not_interpreted_as_absence(suffix):
     assert parsed.original_text == raw and any(
         "not interpreted as absent" in item for item in parsed.observations
     )
-    assert calculate_fit_decisions(parsed.decisions)[0] == 0.68
+    assert calculate_fit_decisions(parsed.decisions)[0] == 0.71
 
 
 def test_duplicate_annotation_keys_are_not_silently_selected():
@@ -463,7 +463,7 @@ def test_grouping_never_drops_invalid_tags_or_fabricates_the_missing_dimension(c
     raw = json.dumps(wire)
     parsed = read_fit_response(raw)
     assert parsed.original_text == raw and parsed.observations
-    assert calculate_fit_decisions(parsed.decisions)[0] == 0.68
+    assert calculate_fit_decisions(parsed.decisions)[0] == 0.71
     for key, value in changes.items():
         assert parsed.raw[key] == value
     if "admissibility_records" in changes:

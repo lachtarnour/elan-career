@@ -5,8 +5,8 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from pydantic import Field
@@ -149,11 +149,45 @@ class Settings(BaseSettings):
             )
 
 
-@lru_cache(maxsize=1)
+_SETTINGS_LOCK = RLock()
+_SETTINGS_SNAPSHOT: Settings | None = None
+_PINNED_RUNTIME_FIELDS = {"database_url", "profile_dir", "output_dir", "cache_dir"}
+
+
 def get_settings() -> Settings:
-    s = Settings()
-    s.ensure_dirs()
-    return s
+    """Return the active runtime snapshot, shared until an explicit settings save."""
+    global _SETTINGS_SNAPSHOT
+    with _SETTINGS_LOCK:
+        if _SETTINGS_SNAPSHOT is None:
+            settings = Settings(_env_file=str(ENV_FILE))
+            settings.ensure_dirs()
+            _SETTINGS_SNAPSHOT = settings
+        return _SETTINGS_SNAPSHOT
+
+
+def reload_runtime_settings() -> Settings:
+    """Capture new options while retaining this session's database and paths.
+
+    Replace the snapshot instead of editing it, so operations that already
+    hold settings keep their original values. Paths require a runtime restart.
+    """
+    global _SETTINGS_SNAPSHOT
+    with _SETTINGS_LOCK:
+        pinned = get_settings().model_dump(include=_PINNED_RUNTIME_FIELDS)
+        settings = Settings(_env_file=str(ENV_FILE), **pinned)
+        _SETTINGS_SNAPSHOT = settings
+        return settings
+
+
+def _clear_settings_cache() -> None:
+    """Start a fresh runtime, including its paths, for explicit caller resets."""
+    global _SETTINGS_SNAPSHOT
+    with _SETTINGS_LOCK:
+        _SETTINGS_SNAPSHOT = None
+
+
+# Keep the existing explicit reset API used by isolated runtime callers.
+get_settings.cache_clear = _clear_settings_cache
 
 
 def get_source_settings() -> Settings:

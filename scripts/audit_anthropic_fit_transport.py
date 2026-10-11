@@ -99,7 +99,10 @@ def main():
         assert params["output_config"]["effort"] == "high"
         assert not {"tools", "tool_choice", "thinking"}.intersection(params)
         assert params["system"][0]["text"] == body["messages"][0]["content"]
-        assert params["messages"][0]["content"] == body["messages"][1]["content"]
+        user = params["messages"][0]["content"]
+        if isinstance(user, list):
+            user = "".join(block["text"] for block in user)
+        assert user == body["messages"][1]["content"]
         prepared.append({"custom_id": request["custom_id"], "params": params})
         prompt_checks.append(request["custom_id"])
     new = prepared[0]["params"]

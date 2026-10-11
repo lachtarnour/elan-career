@@ -172,9 +172,16 @@ def test_extraction_checkpoints_remain_isolated_by_provider(isolated_db):
     with session_scope() as session:
         job = session.get(Job, job_id)
         source = build_analyzer_input(job)
-        openai_key = extraction_key(source, "shared-model-alias", provider="openai")
-        claude_key = extraction_key(source, "shared-model-alias", provider="anthropic")
+        openai_key = extraction_key(
+            source, "shared-model-alias", max_completion_tokens=6000, provider="openai"
+        )
+        claude_key = extraction_key(
+            source, "shared-model-alias", max_completion_tokens=6000, provider="anthropic"
+        )
         assert claude_key != openai_key
+        assert openai_key != extraction_key(
+            source, "shared-model-alias", max_completion_tokens=16000, provider="openai"
+        )
         save_extraction(session, job, openai_key, extraction_offer())
         assert load_extraction(session, job, openai_key) is not None
         assert load_extraction(session, job, claude_key) is None

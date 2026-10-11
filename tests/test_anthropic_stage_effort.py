@@ -160,7 +160,8 @@ def test_immediate_extraction_checkpoint_is_reused_by_the_identical_batch(isolat
         job = session.get(Job, job_id)
         checkpoint = session.get(AnalysisCheckpoint, job_id)
         assert checkpoint.extraction_key == extraction_key(
-            build_analyzer_input(job), "claude-haiku-5-5", provider="anthropic", effort="high"
+            build_analyzer_input(job), "claude-haiku-5-5",
+            max_completion_tokens=32768, provider="anthropic", effort="high",
         )
     native = NativeClaudeClient()
     coordinator = BatchAnalysisCoordinator(

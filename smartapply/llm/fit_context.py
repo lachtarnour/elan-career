@@ -206,7 +206,7 @@ def build_fit_context(
     from smartapply.llm.request_options import stage_effort
     from smartapply.llm.structured import to_strict_schema
 
-    runtime_settings = get_settings()
+    runtime_settings = settings or get_settings()
     transport_settings = settings or get_llm_settings()
     if provider is None:
         from smartapply.llm_policy import CallConfigurationError

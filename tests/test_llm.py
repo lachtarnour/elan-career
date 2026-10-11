@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from threading import Barrier, Event
 from types import SimpleNamespace
 
 import pytest
@@ -419,6 +421,40 @@ def test_cache_key_is_deterministic_and_collision_resistant() -> None:
     assert len(k1) == 64  # sha256 hex
 
 
+def test_output_budget_change_bypasses_old_exact_response(isolated_db, monkeypatch, tmp_path):
+    from smartapply.llm.openai_provider import OpenAIProvider
+    from tests.llm_config_helpers import change_call, configure_calls
+
+    config_path = configure_calls(monkeypatch, tmp_path, application_texts={
+        "provider": "openai", "model": "gpt-5.4", "reasoning": "none",
+        "max_output_tokens": 6000,
+    })
+    calls = []
+
+    def fake_call(**kwargs):
+        limit = kwargs["max_completion_tokens"]
+        calls.append(limit)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(
+                content=f'{{"value":"limit-{limit}"}}'
+            ))],
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
+        )
+
+    def request():
+        provider = OpenAIProvider(model="gpt-5.4")
+        monkeypatch.setattr(provider, "_call_openai", fake_call)
+        return provider.complete_json(
+            system="same prompt", user="same input", schema=_TinyAnswer,
+            purpose="application_texts",
+        ).value
+
+    assert request() == request() == "limit-6000"
+    change_call(config_path, "application_texts", max_output_tokens=16000)
+    assert request() == request() == "limit-16000"
+    assert calls == [6000, 16000]
+
+
 # ---------------- Usage / pricing ----------------
 
 
@@ -533,6 +569,7 @@ def test_invalid_exact_cache_is_replaced_once_instead_of_repeatedly_paid(
             "temperature": 0.2,
             "schema": _TinyAnswer.model_json_schema(),
             "effort": "none",
+            "max_completion_tokens": 6000,
         },
     )
     with session_scope() as session:
@@ -607,6 +644,7 @@ def test_refresh_cache_bypasses_old_response_and_replaces_it(
             "temperature": 0.2,
             "schema": _TinyAnswer.model_json_schema(),
             "effort": "none",
+            "max_completion_tokens": 6000,
         },
     )
     with session_scope() as session:
@@ -656,6 +694,125 @@ def test_refresh_cache_bypasses_old_response_and_replaces_it(
 
     assert refreshed.value == reused.value == "fresh"
     assert calls == 1
+
+
+@pytest.mark.parametrize("fail_first", [False, True])
+def test_concurrent_exact_miss_shares_result_or_error_and_allows_retry(
+    isolated_db, monkeypatch, tmp_path, fail_first,
+) -> None:
+    from sqlalchemy import select
+
+    from smartapply.database import session_scope
+    from smartapply.database.models import LLMUsage
+    from smartapply.llm import structured_provider
+    from smartapply.llm.openai_provider import OpenAIProvider
+    from smartapply.llm.provider import LLMError
+    from smartapply.llm.structured import Completion
+    from tests.llm_config_helpers import configure_calls
+
+    configure_calls(monkeypatch, tmp_path, application_texts={
+        "provider": "openai", "model": "gpt-5.4", "reasoning": "none",
+        "max_output_tokens": 6000,
+    })
+
+    entered = Event()
+    release = Event()
+    waiter_joined = Event()
+    calls = 0
+
+    class TrackedFuture(Future):
+        def result(self, *args, **kwargs):
+            waiter_joined.set()
+            return super().result(*args, **kwargs)
+
+    monkeypatch.setattr(structured_provider, "Future", TrackedFuture)
+
+    def generate(_body):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            assert release.wait(5), "leader was not released"
+            if fail_first:
+                raise LLMError("provider failed")
+        return Completion(
+            content='{"value":"fresh"}', model="gpt-5.4",
+            prompt_tokens=12, completion_tokens=3,
+        )
+
+    providers = [OpenAIProvider(model="gpt-5.4") for _ in range(2)]
+    for provider in providers:
+        monkeypatch.setattr(provider, "_generate", generate)
+
+    def request(provider, job_id):
+        return provider.complete_json(
+            system="stable", user="dynamic", schema=_TinyAnswer,
+            purpose="application_texts", job_id=job_id,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(request, providers[0], None)
+        assert entered.wait(5), "provider call did not start"
+        second = pool.submit(request, providers[1], None)
+        try:
+            assert waiter_joined.wait(5), "second request did not join the flight"
+            assert calls == 1
+        finally:
+            release.set()
+        if fail_first:
+            with pytest.raises(LLMError, match="provider failed"):
+                first.result(timeout=5)
+            with pytest.raises(LLMError, match="provider failed"):
+                second.result(timeout=5)
+        else:
+            assert first.result(timeout=5).value == "fresh"
+            assert second.result(timeout=5).value == "fresh"
+
+    if fail_first:
+        assert request(providers[0], None).value == "fresh"
+        assert calls == 2
+    else:
+        assert calls == 1
+    with session_scope() as session:
+        usages = list(session.scalars(select(LLMUsage)))
+    assert len(usages) == (1 if fail_first else 2)
+    assert sum(not usage.cached for usage in usages) == 1
+    if not fail_first:
+        assert sum(usage.cached for usage in usages) == 1
+        assert next(usage for usage in usages if usage.cached).cost_usd == 0
+
+
+def test_concurrent_calls_without_exact_cache_remain_independent(
+    isolated_db, monkeypatch, tmp_path,
+) -> None:
+    from smartapply.llm.openai_provider import OpenAIProvider
+    from smartapply.llm.structured import Completion
+    from tests.llm_config_helpers import configure_calls
+
+    configure_calls(monkeypatch, tmp_path, application_texts={
+        "provider": "openai", "model": "gpt-5.4", "reasoning": "none",
+        "max_output_tokens": 6000,
+    })
+    rendezvous = Barrier(2, timeout=5)
+    calls = 0
+
+    def generate(_body):
+        nonlocal calls
+        rendezvous.wait()
+        calls += 1
+        return Completion(content='{"value":"fresh"}', model="gpt-5.4")
+
+    providers = [OpenAIProvider(model="gpt-5.4") for _ in range(2)]
+    for provider in providers:
+        monkeypatch.setattr(provider, "_generate", generate)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(
+            provider.complete_json,
+            system="stable", user="dynamic", schema=_TinyAnswer,
+            purpose="application_texts", use_cache=False,
+        ) for provider in providers]
+        assert [future.result(timeout=5).value for future in futures] == ["fresh", "fresh"]
+    assert calls == 2
 
 
 def test_purge_expired_cache_deletes_only_entries_older_than_15_days(
@@ -719,6 +876,7 @@ def test_cache_hit_telemetry_failure_never_triggers_a_paid_call(
             "temperature": 0.2,
             "schema": _TinyAnswer.model_json_schema(),
             "effort": "none",
+            "max_completion_tokens": 6000,
         },
     )
     with session_scope() as session:

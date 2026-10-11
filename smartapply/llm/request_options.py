@@ -1,8 +1,4 @@
-"""Versioned transport options shared by immediate requests and frozen journals.
-
-Effort changes how the model responds, so it belongs to the exact-cache identity.
-No prompt, schema, scoring decision or annotation validation depends on it.
-"""
+"""Versioned transport options shared by immediate requests and frozen journals."""
 
 from __future__ import annotations
 
@@ -28,9 +24,14 @@ def request_cache_extra(
     schema: type[BaseModel],
     temperature: float,
     effort: RequestEffort | None,
+    max_completion_tokens: int,
 ) -> dict:
-    """Keep historical identities intact when no effort was explicitly sent."""
-    extra = {"temperature": temperature, "schema": schema.model_json_schema()}
+    """Include every response-affecting option in the exact-cache identity."""
+    extra = {
+        "temperature": temperature,
+        "schema": schema.model_json_schema(),
+        "max_completion_tokens": max_completion_tokens,
+    }
     if effort is not None:
         extra["effort"] = effort
     return extra

@@ -150,7 +150,7 @@ def test_new_batch_requests_and_checkpoints_use_the_closed_contract(isolated_db)
         request = item_request(item, run, "extraction", 6000)
         assert_closed_request(request.body)
         assert request.cache_key == extraction_key(
-            build_analyzer_input(job), model, effort="medium"
+            build_analyzer_input(job), model, max_completion_tokens=6000, effort="medium"
         )
         assert validate_request_response(request.body, output().model_dump_json()) == output()
         with pytest.raises(LLMValidationError):
