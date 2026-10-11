@@ -277,6 +277,184 @@ def test_confirmation_with_two_dossiers_preserves_both_and_stays_pending(isolate
         assert session.get(Job, duplicate_id).duplicate_review_status == JobDuplicateStatus.PENDING
 
 
+def test_republication_inherits_archive_origin_without_rejecting_new_offer(isolated_db) -> None:
+    source_id, winner_id = _create_review_pair()
+    archived_at = datetime(2025, 1, 2, tzinfo=timezone.utc)
+    submitted_at = archived_at - timedelta(days=1)
+    computed_at = archived_at + timedelta(days=1)
+    winner_components = {
+        "filter_disposition": "pending_relevance",
+        "reasons": ["offer_language:fr", "role_title_veto:candidate_ai_mission"],
+        "hard_reject": {
+            "rejected": False,
+            "gates": [{"gate": "role", "status": "clear", "reason_codes": []}],
+        },
+        "final": 88,
+    }
+    with session_scope() as session:
+        source = session.get(Job, source_id)
+        source.archived_at = archived_at
+        source.status = JobStatus.ARCHIVED
+        set_score(session, source_id, components={
+            "rejection_stage": "manual",
+            "rejection_reasons": ["manual_archive", "role_title_veto:candidate_ai_mission"],
+        })
+        set_score(session, winner_id, components=winner_components, computed_at=computed_at)
+        application = create_or_get_application(session, source_id)
+        application.status = JobStatus.ARCHIVED
+        application.updated_at = archived_at
+        application.form_submitted_at = submitted_at
+        application.cv_docx_path = "/documents/original/CV.docx"
+        application.notes = "Dossier archivé après envoi"
+        application_id = application.id
+
+    service = DesktopService()
+    assert service.resolve_duplicate(winner_id, same_offer=True)
+
+    with session_scope() as session:
+        winner = session.get(Job, winner_id)
+        application = session.get(Application, application_id)
+        components = winner.score.components
+        assert components == {
+            **winner_components,
+            "archive_origin": "manual",
+            "archive_inheritance": {
+                "schema_version": 1,
+                "source_job_id": source_id,
+                "source_title": "Data Scientist",
+                "source_company": "Acme SAS",
+                "source_archived_at": archived_at.replace(tzinfo=None).isoformat(),
+                "application_id": application_id,
+                "origin": "manual",
+                "rejection_stage": "manual",
+                "rejection_reasons": ["manual_archive"],
+            },
+        }
+        assert winner.score.computed_at.replace(tzinfo=timezone.utc) == computed_at
+        assert winner.status == JobStatus.ARCHIVED
+        assert winner.archived_at is not None
+        assert "rejection_reasons" not in components
+        assert application.job_id == winner_id
+        assert application.status == JobStatus.ARCHIVED
+        assert application.updated_at.replace(tzinfo=timezone.utc) == archived_at
+        assert application.form_submitted_at.replace(tzinfo=timezone.utc) == submitted_at
+        assert application.cv_docx_path == "/documents/original/CV.docx"
+        assert application.notes == "Dossier archivé après envoi"
+
+    detail = service.get_job(winner_id)
+    assert detail.archive_sub_label == "Archivage manuel"
+    assert detail.archive_reasons == (
+        f"Archivage conservé après regroupement d’un doublon : dossier n° {application_id}, "
+        f"annonce d’origine « Data Scientist — Acme SAS » (n° {source_id})",
+        "Motif d’origine : Archivée manuellement",
+    )
+    assert [row.id for row in service.list_jobs(
+        status=JobStatus.ARCHIVED, archive_origin="manual",
+    )] == [winner_id]
+    assert [row.id for row in service.list_jobs(
+        status=JobStatus.ARCHIVED, archive_origin="confirmed_duplicate",
+    )] == [source_id]
+
+
+@pytest.mark.parametrize("source_origin", [None, ["manual"], {"origin": "manual"}])
+def test_unknown_inherited_origin_removes_stale_winner_category(isolated_db, source_origin) -> None:
+    source_id, winner_id = _create_review_pair()
+    archived_at = datetime(2025, 1, 2, tzinfo=timezone.utc)
+    positive_components = {
+        "filter_disposition": "pending_relevance",
+        "reasons": ["role_title_veto:candidate_ai_mission"],
+        "hard_reject": {"rejected": False, "gates": [{"gate": "role", "status": "clear"}]},
+    }
+    with session_scope() as session:
+        source = session.get(Job, source_id)
+        source.status = JobStatus.ARCHIVED
+        source.archived_at = archived_at
+        set_score(session, source_id, components={
+            "archive_origin": source_origin,
+            "reasons": ["role_title_veto:candidate_ai_mission"],
+            "hard_reject": {"rejected": False, "gates": [{"gate": "role", "status": "clear"}]},
+        })
+        set_score(session, winner_id, components={**positive_components, "archive_origin": "manual"})
+        application = create_or_get_application(session, source_id)
+        application.status = JobStatus.ARCHIVED
+        application_id = application.id
+
+    service = DesktopService()
+    assert service.resolve_duplicate(winner_id, same_offer=True)
+    with session_scope() as session:
+        components = session.get(Job, winner_id).score.components
+        inheritance = components["archive_inheritance"]
+        assert "archive_origin" not in components
+        assert "origin" not in inheritance
+        assert inheritance["source_job_id"] == source_id
+        assert inheritance["application_id"] == application_id
+        assert inheritance["rejection_reasons"] == []
+        assert {key: value for key, value in components.items() if key != "archive_inheritance"} == positive_components
+
+    detail = service.get_job(winner_id)
+    assert detail.archive_sub_label == ""
+    assert detail.archive_reasons[-1] == (
+        "Motif d’origine : Raison d’archivage d’origine non enregistrée"
+    )
+    assert service.list_jobs(status=JobStatus.ARCHIVED, archive_origin="manual") == []
+
+
+def test_successive_republications_preserve_original_archive_evidence(isolated_db) -> None:
+    source_id, middle_id, winner_id = _create_review_triplet()
+    archived_at = datetime(2025, 1, 2, tzinfo=timezone.utc)
+    with session_scope() as session:
+        source = session.get(Job, source_id)
+        source.archived_at = archived_at
+        source.status = JobStatus.ARCHIVED
+        set_score(session, source_id, components={
+            "archive_origin": "manual",
+            "rejection_stage": "manual",
+            "rejection_reasons": ["manual_archive"],
+        })
+        application = create_or_get_application(session, source_id)
+        application.status = JobStatus.ARCHIVED
+        application.updated_at = archived_at
+        application_id = application.id
+
+    service = DesktopService()
+    assert service.resolve_duplicate(middle_id, same_offer=True)
+    with session_scope() as session:
+        middle = session.get(Job, middle_id)
+        origin = dict(middle.score.components["archive_inheritance"])
+        # A later archive timestamp on this intermediary is not the source event.
+        middle.archived_at = archived_at + timedelta(days=10)
+
+    assert service.resolve_duplicate(winner_id, same_offer=True)
+    with session_scope() as session:
+        winner = session.get(Job, winner_id)
+        assert winner.score.components["archive_inheritance"] == origin
+        assert winner.score.components["archive_origin"] == "manual"
+        assert winner.score.components["archive_inheritance"]["source_job_id"] == source_id
+        assert session.get(Application, application_id).job_id == winner_id
+        assert session.get(Application, application_id).updated_at.replace(tzinfo=timezone.utc) == archived_at
+        assert session.query(Application).count() == 1
+
+
+def test_archived_dossier_already_on_winner_does_not_invent_inheritance(isolated_db) -> None:
+    source_id, winner_id = _create_review_pair()
+    components = {"archive_origin": "manual", "rejection_reasons": ["manual_archive"]}
+    with session_scope() as session:
+        application = create_or_get_application(session, winner_id)
+        application.status = JobStatus.ARCHIVED
+        # The older offer is archived too, so the latest publication remains winner.
+        for job_id in (source_id, winner_id):
+            job = session.get(Job, job_id)
+            job.status = JobStatus.ARCHIVED
+            job.archived_at = datetime(2025, 1, 2, tzinfo=timezone.utc)
+        set_score(session, winner_id, components=components)
+        application_id = application.id
+
+    assert DesktopService().resolve_duplicate(winner_id, same_offer=True)
+    with session_scope() as session:
+        assert session.get(Application, application_id).job_id == winner_id
+        assert session.get(Job, winner_id).score.components == components
+
+
 @pytest.mark.parametrize("tracking_status", [JobStatus.SENT, JobStatus.INTERVIEW])
 def test_republication_keeps_sent_dossier_and_archived_history(isolated_db, tracking_status) -> None:
     from smartapply.database.repository import add_document

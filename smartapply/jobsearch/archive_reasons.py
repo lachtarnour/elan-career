@@ -25,6 +25,12 @@ _AUTOMATIC_ARCHIVE_STAGES = frozenset({
 _NON_DECISIVE_REASON_PREFIXES = {
     "contract_ok",
     "contract_structured_uncorroborated",
+    "contract_conflict_non_decisive",
+    "contract_exception",
+    "experience_evidence_conflict",
+    "manual_filter_bypass",
+    "manual_keep_override",
+    "Manual override",
     "offer_language",
     "positive_title",
     "remote_ok",
@@ -33,6 +39,8 @@ _NON_DECISIVE_REASON_PREFIXES = {
     "role_evidence",
     "role_relevance",
     "role_relevance_score",
+    "role_title_veto",
+    "qualification_satisfied",
     "rome_context",
     "search_context",
     "target_role",
@@ -77,10 +85,73 @@ def decisive_rejection_reasons(reasons: Iterable[object]) -> list[str]:
         if not value:
             continue
         prefix = value.split(":", 1)[0]
-        if prefix in _NON_DECISIVE_REASON_PREFIXES or prefix.startswith("experience_structured_"):
+        if (
+            prefix in _NON_DECISIVE_REASON_PREFIXES
+            or prefix.startswith("experience_structured_")
+            or prefix.endswith("_conflict")
+        ):
             continue
         decisive.append(value)
     return decisive
+
+
+def archive_rejection_reasons(components: Mapping[str, object] | None) -> list[str]:
+    """Read documented causes without turning filter diagnostics into an archive."""
+    details = components if isinstance(components, Mapping) else {}
+    origin = details.get("archive_origin")
+    stage = details.get("rejection_stage")
+    known_origin = isinstance(origin, str) and origin in ARCHIVE_ORIGINS
+    if origin == "manual" or (not known_origin and stage == "manual"):
+        return ["manual_archive"]
+    if origin == "mission_screen" or (
+        not known_origin and stage == "extraction_screening"
+    ):
+        return ["mission_clearly_outside"]
+    explicit = details.get("rejection_reasons")
+    if isinstance(explicit, (list, tuple)):
+        return decisive_rejection_reasons(explicit)
+    audit = details.get("hard_reject")
+    if isinstance(audit, Mapping):
+        gates = audit.get("gates")
+        return decisive_rejection_reasons(
+            reason
+            for gate in (gates if isinstance(gates, (list, tuple)) else ())
+            if isinstance(gate, Mapping) and gate.get("status") == "blocked"
+            for reason in (
+                gate["reason_codes"]
+                if isinstance(gate.get("reason_codes"), (list, tuple)) else ()
+            )
+        )
+    # Older filters stored causes and diagnostics in the same list. Only a
+    # recorded rejection allows using those legacy values as archive causes.
+    if (
+        details.get("filter_disposition") == "rejected"
+        or (isinstance(stage, str) and stage in _AUTOMATIC_ARCHIVE_STAGES)
+    ):
+        reasons = details.get("reasons")
+        if isinstance(reasons, (list, tuple)):
+            return decisive_rejection_reasons(reasons)
+    return []
+
+
+def archive_origin_from_components(
+    components: Mapping[str, object] | None,
+) -> ArchiveOrigin | None:
+    """Resolve an archive category from its recorded cause, never its diagnostics."""
+    details = components if isinstance(components, Mapping) else {}
+    origin = details.get("archive_origin")
+    if isinstance(origin, str) and origin in ARCHIVE_ORIGINS:
+        return origin
+    stage = details.get("rejection_stage")
+    raw_reasons = details.get("rejection_reasons")
+    reasons = raw_reasons if isinstance(raw_reasons, (list, tuple)) else ()
+    if stage == "manual" or "manual_archive" in reasons:
+        return "manual"
+    if stage == "extraction_screening" or "mission_clearly_outside" in reasons:
+        return "mission_screen"
+    if isinstance(stage, str) and stage in _AUTOMATIC_ARCHIVE_STAGES:
+        return "automatic_filter"
+    return None
 
 
 def archive_sub_label(
@@ -94,20 +165,8 @@ def archive_sub_label(
         return ""
     if confirmed_duplicate:
         return "Doublon confirmé"
-    details = components if isinstance(components, Mapping) else {}
-    origin = details.get("archive_origin")
-    if isinstance(origin, str) and origin in ARCHIVE_ORIGIN_LABELS:
-        return ARCHIVE_ORIGIN_LABELS[origin]
-    stage = details.get("rejection_stage")
-    reasons = details.get("rejection_reasons")
-    reason_codes = reasons if isinstance(reasons, (list, tuple)) else ()
-    if stage == "manual" or "manual_archive" in reason_codes:
-        return "Archivage manuel"
-    if stage == "extraction_screening" or "mission_clearly_outside" in reason_codes:
-        return "Missions hors cible"
-    if isinstance(stage, str) and stage in _AUTOMATIC_ARCHIVE_STAGES:
-        return "Filtre automatique"
-    return ""
+    origin = archive_origin_from_components(components)
+    return ARCHIVE_ORIGIN_LABELS.get(origin, "")
 
 
 def archive_reason_labels(
@@ -115,8 +174,13 @@ def archive_reason_labels(
     *,
     stage: str | None = None,
     archived: bool = False,
+    origin: ArchiveOrigin | None = None,
 ) -> tuple[str, ...]:
     """Return concise French labels for the offer detail panel."""
+    if archived and origin == "manual":
+        return ("Archivée manuellement",)
+    if archived and origin == "mission_screen":
+        return ("Missions de l’annonce clairement hors du périmètre Data/IA",)
     values = decisive_rejection_reasons(reasons)
     if any(value.startswith("duplicate_reference:") for value in values):
         values = [value for value in values if not value.startswith("duplicate_of:")]
@@ -131,13 +195,34 @@ def archive_reason_labels(
         return tuple(labels)
     if not archived:
         return ()
+    if origin == "automatic_filter":
+        return ("Offre écartée par les critères de sélection",)
     if stage == "manual":
         return ("Archivée manuellement",)
     if stage == "extraction_screening":
         return ("Missions de l’annonce clairement hors du périmètre Data/IA",)
     if isinstance(stage, str) and stage in _AUTOMATIC_ARCHIVE_STAGES:
         return ("Offre écartée par les critères de sélection",)
-    return ()
+    return ("Raison d’archivage non enregistrée",)
+
+
+def inherited_archive_reason_labels(inheritance: Mapping[str, object]) -> tuple[str, ...]:
+    """Explain an archived dossier carried over by a confirmed duplicate merge."""
+    source = f"{inheritance['source_title']} — {inheritance['source_company']}"
+    origin = inheritance.get("origin")
+    labels = archive_reason_labels(
+        archive_rejection_reasons(inheritance),
+        stage=str(inheritance.get("rejection_stage") or ""),
+        archived=True,
+        origin=origin if isinstance(origin, str) and origin in ARCHIVE_ORIGINS else None,
+    )
+    if labels == ("Raison d’archivage non enregistrée",):
+        labels = ("Raison d’archivage d’origine non enregistrée",)
+    return (
+        f"Archivage conservé après regroupement d’un doublon : dossier n° {inheritance['application_id']}, "
+        f"annonce d’origine « {source} » (n° {inheritance['source_job_id']})",
+        *(f"Motif d’origine : {label}" for label in labels),
+    )
 
 
 def _archive_reason_label(reason: str) -> str:

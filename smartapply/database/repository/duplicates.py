@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from smartapply.database.models import Application, Job, JobDuplicateStatus, JobScore, JobStatus
+from smartapply.jobsearch.archive_reasons import (
+    ARCHIVE_ORIGINS,
+    archive_origin_from_components,
+    archive_rejection_reasons,
+)
 
 
 def canonical_job(session: Session, job_id: int) -> Job | None:
@@ -30,49 +36,112 @@ def canonical_job(session: Session, job_id: int) -> Job | None:
 
 def duplicate_group_ids(session: Session, job_id: int) -> set[int]:
     """Return the canonical row, its aliases and a pending review row."""
-    job = session.get(Job, job_id)
+    relations = _related_offer_rows(session, [job_id], include_pending=True)
+    job = relations.get(job_id)
     if job is None:
         return set()
-
-    root = canonical_job(session, job_id)
-    root_id = int(root.id if root is not None else job.id)
-    ids = set(
-        int(value)
-        for value in session.scalars(
-            select(Job.id).where(
-                or_(Job.id == root_id, Job.canonical_job_id == root_id)
-            )
-        )
-    )
+    root_id = _canonical_relation_id(relations, job_id)
+    ids = _direct_alias_ids(relations, root_id)
     root_ids = {root_id}
     if job.duplicate_review_status == JobDuplicateStatus.PENDING:
-        ids.add(int(job.id))
+        ids.add(job.id)
         if job.possible_duplicate_of_id is not None:
-            possible_root = canonical_job(session, int(job.possible_duplicate_of_id))
-            if possible_root is not None:
-                root_ids.add(int(possible_root.id))
-                ids.update(
-                    int(value)
-                    for value in session.scalars(
-                        select(Job.id).where(
-                            or_(
-                                Job.id == int(possible_root.id),
-                                Job.canonical_job_id == int(possible_root.id),
-                            )
-                        )
-                    )
-                )
+            possible_root_id = _canonical_relation_id(relations, job.possible_duplicate_of_id)
+            if possible_root_id is not None:
+                root_ids.add(possible_root_id)
+                ids.update(_direct_alias_ids(relations, possible_root_id))
 
     # A root must also be protected while another review row points to it. In
     # particular, this catches an already archived application attached to a
     # later source row before the user has confirmed the alias.
-    for other in session.scalars(select(Job)).all():
+    for other in relations.values():
         if other.duplicate_review_status != JobDuplicateStatus.PENDING:
             continue
-        reference_root = _pending_reference_root(session, other)
-        if reference_root is not None and int(reference_root.id) in root_ids:
-            ids.add(int(other.id))
+        if _pending_relation_root_id(relations, other.id) in root_ids:
+            ids.add(other.id)
     return ids
+
+
+class _OfferRelations(NamedTuple):
+    id: int
+    canonical_job_id: int | None
+    possible_duplicate_of_id: int | None
+    duplicate_review_status: str | None
+
+
+def _related_offer_rows(
+    session: Session, job_ids: list[int], *, include_pending: bool = False,
+) -> dict[int, _OfferRelations]:
+    """Read only identity columns in the requested connected components.
+
+    Each recursive branch uses the indexed relation columns. UNION, rather
+    than UNION ALL, also terminates on legacy cycles. Missing target IDs stay
+    in the traversal, so aliases sharing a missing parent remain connected.
+    """
+    related = select(Job.id).where(or_(
+        Job.id.in_(job_ids), Job.canonical_job_id.in_(job_ids),
+    )).cte("related_offer_ids", recursive=True)
+    branches = [
+        select(Job.canonical_job_id).join(related, Job.id == related.c.id).where(
+            Job.canonical_job_id.is_not(None),
+        ),
+        select(Job.id).join(related, Job.canonical_job_id == related.c.id),
+    ]
+    if include_pending:
+        branches.extend([
+            select(Job.possible_duplicate_of_id).join(related, Job.id == related.c.id).where(
+                Job.duplicate_review_status == JobDuplicateStatus.PENDING,
+                Job.possible_duplicate_of_id.is_not(None),
+            ),
+            select(Job.id).join(related, Job.possible_duplicate_of_id == related.c.id).where(
+                Job.duplicate_review_status == JobDuplicateStatus.PENDING,
+            ),
+        ])
+    related = related.union(*branches)
+    return {
+        row.id: _OfferRelations(*row)
+        for row in session.execute(select(
+            Job.id, Job.canonical_job_id, Job.possible_duplicate_of_id,
+            Job.duplicate_review_status,
+        ).where(Job.id.in_(select(related.c.id))))
+    }
+
+
+def _canonical_relation_id(relations: dict[int, _OfferRelations], job_id: int) -> int | None:
+    """Match canonical_job, including cycles and absent target rows."""
+    current = relations.get(job_id)
+    if current is None:
+        return None
+    seen: set[int] = set()
+    while current.canonical_job_id is not None and current.id not in seen:
+        seen.add(current.id)
+        next_row = relations.get(current.canonical_job_id)
+        if next_row is None:
+            break
+        current = next_row
+    return current.id
+
+
+def _direct_alias_ids(relations: dict[int, _OfferRelations], root_id: int | None) -> set[int]:
+    if root_id is None:
+        return set()
+    return {row.id for row in relations.values()
+            if row.id == root_id or row.canonical_job_id == root_id}
+
+
+def _pending_relation_root_id(relations: dict[int, _OfferRelations], job_id: int) -> int | None:
+    current = relations[job_id]
+    seen: set[int] = set()
+    while current.id not in seen:
+        seen.add(current.id)
+        if (current.duplicate_review_status == JobDuplicateStatus.PENDING
+                and current.possible_duplicate_of_id is not None):
+            next_row = relations.get(current.possible_duplicate_of_id)
+            if next_row is not None:
+                current = next_row
+                continue
+        return _canonical_relation_id(relations, current.id)
+    return None
 
 
 def _pending_reference_root(session: Session, job: Job) -> Job | None:
@@ -129,11 +198,9 @@ def application_ids_for_confirmed_groups(session: Session, job_ids: list[int]) -
     """Find existing dossiers for a batch without treating pending matches as confirmed."""
     if not job_ids:
         return {}
-    parents = dict(
-        session.execute(
-            select(Job.id, Job.canonical_job_id).where(Job.canonical_job_id.is_not(None))
-        ).all()
-    )
+    relations = _related_offer_rows(session, job_ids)
+    parents = {row.id: row.canonical_job_id for row in relations.values()
+               if row.canonical_job_id is not None}
 
     def root_id(job_id: int) -> int:
         seen: set[int] = set()
@@ -144,7 +211,10 @@ def application_ids_for_confirmed_groups(session: Session, job_ids: list[int]) -
 
     applications_by_root: dict[int, int] = {}
     for application_id, owner_id in session.execute(
-        select(Application.id, Application.job_id).order_by(
+        select(Application.id, Application.job_id).where(
+            Application.job_id.in_(set(relations) | set(job_ids)
+                                   | {root_id(job_id) for job_id in job_ids}),
+        ).order_by(
             *_application_priority()
         )
     ):
@@ -168,19 +238,19 @@ def pending_duplicate_job(session: Session, job_id: int) -> Job | None:
 
 def pending_duplicate_for_group(session: Session, job_id: int) -> Job | None:
     """Return an unresolved review on the canonical row or a related offer."""
-    root = canonical_job(session, job_id)
-    if root is None:
+    relations = _related_offer_rows(session, [job_id], include_pending=True)
+    root_id = _canonical_relation_id(relations, job_id)
+    if root_id is None:
         return None
-    if root.duplicate_review_status == JobDuplicateStatus.PENDING:
-        return root
-    for job in session.scalars(
-        select(Job).where(Job.duplicate_review_status == JobDuplicateStatus.PENDING)
-    ):
-        if int(job.id) == int(job_id):
+    if relations[root_id].duplicate_review_status == JobDuplicateStatus.PENDING:
+        return session.get(Job, root_id)
+    for other_id in sorted(relations):
+        if other_id == job_id:
             continue
-        reference_root = _pending_reference_root(session, job)
-        if reference_root is not None and int(reference_root.id) == int(root.id):
-            return job
+        other = relations[other_id]
+        if (other.duplicate_review_status == JobDuplicateStatus.PENDING
+                and _pending_relation_root_id(relations, other_id) == root_id):
+            return session.get(Job, other_id)
     return None
 
 
@@ -205,6 +275,79 @@ def _clear_restored_review_route(session: Session, resolved_job_id: int) -> None
                 key: value for key, value in rescue.items() if key != "duplicate_review_job_id"
             },
         }
+
+
+def _archived_application_origin(source: Job, application: Application) -> dict[str, object]:
+    """Keep the original archive evidence when a dossier changes offer owners."""
+    components = source.score.components if source.score is not None else None
+    components = components if isinstance(components, dict) else {}
+    inherited = components.get("archive_inheritance")
+    if _valid_archive_inheritance(inherited, application_id=int(application.id)):
+        return dict(inherited)
+
+    stage = components.get("rejection_stage")
+    provenance: dict[str, object] = {
+        "schema_version": 1,
+        "source_job_id": int(source.id),
+        "source_title": source.title,
+        "source_company": source.source_company,
+        "source_archived_at": source.archived_at.isoformat() if source.archived_at else None,
+        "application_id": int(application.id),
+        "rejection_stage": stage if isinstance(stage, str) else None,
+        "rejection_reasons": archive_rejection_reasons(components),
+    }
+    origin = archive_origin_from_components(components)
+    if origin is not None:
+        provenance["origin"] = origin
+    return provenance
+
+
+def _valid_archive_inheritance(value: object, *, application_id: int) -> bool:
+    if not isinstance(value, dict) or type(value.get("schema_version")) is not int:
+        return False
+    if value["schema_version"] != 1 or value.get("application_id") != application_id:
+        return False
+    if type(value.get("application_id")) is not int:
+        return False
+    if type(value.get("source_job_id")) is not int or value["source_job_id"] <= 0:
+        return False
+    if not all(isinstance(value.get(field), str) for field in ("source_title", "source_company")):
+        return False
+    if "source_archived_at" not in value or "rejection_stage" not in value:
+        return False
+    archived_at = value["source_archived_at"]
+    if archived_at is not None:
+        if not isinstance(archived_at, str):
+            return False
+        try:
+            datetime.fromisoformat(archived_at)
+        except ValueError:
+            return False
+    if value["rejection_stage"] is not None and not isinstance(value["rejection_stage"], str):
+        return False
+    reasons = value.get("rejection_reasons")
+    if not isinstance(reasons, list) or not all(isinstance(reason, str) for reason in reasons):
+        return False
+    origin = value.get("origin")
+    return origin is None or isinstance(origin, str) and origin in ARCHIVE_ORIGINS
+
+
+def _inherit_archived_application(session: Session, winner: Job, application: Application) -> None:
+    """Persist provenance separately from the winning offer's local filter."""
+    provenance = _archived_application_origin(application.job, application)
+    components = winner.score.components if winner.score is not None else None
+    components = dict(components) if isinstance(components, dict) else {}
+    components["archive_inheritance"] = provenance
+    origin = provenance.get("origin")
+    if origin in ARCHIVE_ORIGINS:
+        components["archive_origin"] = origin
+    else:
+        components.pop("archive_origin", None)
+    if winner.score is None:
+        winner.score = JobScore(components=components)
+        session.add(winner.score)
+    else:
+        winner.score.components = components
 
 
 def confirm_duplicate(session: Session, job_id: int) -> Job | None:
@@ -266,6 +409,8 @@ def confirm_duplicate(session: Session, job_id: int) -> Job | None:
                 "Les deux dossiers ont été conservés ; leur rattachement nécessite un choix."
             )
         if application.job_id != winner.id:
+            if application.status == JobStatus.ARCHIVED:
+                _inherit_archived_application(session, winner, application)
             updated_at = application.updated_at
             application.job = winner
             application.updated_at = updated_at
