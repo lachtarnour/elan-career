@@ -1,4 +1,4 @@
-"""Job titles must remain safe filenames while preserving readable Unicode."""
+"""CV titles must remain safe filenames while preserving readable Unicode."""
 
 from pathlib import Path
 
@@ -27,5 +27,5 @@ def test_long_unicode_offer_titles_fit_all_document_extensions():
 
 def test_empty_or_unsafe_components_do_not_create_an_empty_name():
     assert application_document_stems(" \n ", "../../") == (
-        "CV - Candidate - Poste", "Motivation - Candidate - Poste"
+        "CV - Candidate - CV", "Motivation - Candidate - CV"
     )

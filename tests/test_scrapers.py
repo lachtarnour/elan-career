@@ -224,17 +224,28 @@ def test_serpapi_rejects_unbounded_max_results(mocker) -> None:
     get_mock.assert_not_called()
 
 
-def test_serpapi_network_error_is_not_reported_as_zero_results(mocker) -> None:
-    scraper = SerpApiGoogleJobsScraper(api_key="fake", hl="fr")
+def test_serpapi_network_error_is_not_reported_as_zero_results(mocker, caplog) -> None:
+    api_key = "AUDIT_FAKE_API_KEY_123"
+    scraper = SerpApiGoogleJobsScraper(api_key=api_key, hl="fr")
+    response = requests.Response()
+    response.status_code = 401
+    response.reason = "Unauthorized"
+    response.url = f"https://serpapi.com/search.json?q=data&api_key={api_key}"
+    response.request = requests.Request("GET", response.url).prepare()
+    with pytest.raises(requests.HTTPError) as error_info:
+        response.raise_for_status()
     mocker.patch.object(
         scraper,
         "_fetch",
-        side_effect=requests.ConnectionError("SerpAPI offline"),
+        side_effect=error_info.value,
     )
 
-    with pytest.raises(ScraperError, match="ConnectionError") as exc_info:
+    with pytest.raises(ScraperError, match="HTTP 401 Unauthorized") as exc_info:
         list(scraper.search("Data Scientist", location="Paris", max_results=5))
     assert "api_key" not in str(exc_info.value)
+    assert "HTTP 401 Unauthorized" in caplog.text
+    assert api_key not in caplog.text
+    assert "api_key=" not in caplog.text
 
 
 def test_serpapi_invalid_json_is_not_reported_as_zero_results(mocker) -> None:

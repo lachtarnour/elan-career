@@ -97,8 +97,13 @@ def init_db(*, run_maintenance: bool = True) -> None:
     remove_embeddings(get_engine())
     auto_migrate()
     ensure_indexes()
-    from smartapply.pipeline.output_deletion import recover_application_deletions
+    from smartapply.database.ingest_revision import ensure_ingest_revision
 
+    ensure_ingest_revision(get_engine())
+    from smartapply.pipeline.output_deletion import recover_application_deletions
+    from smartapply.pipeline.output_publication import recover_application_publications
+
+    recover_application_publications()
     recover_application_deletions()
     # Retention is periodic housekeeping, not a historical schema repair.
     # Provider calls also purge expired responses, but idle users still need

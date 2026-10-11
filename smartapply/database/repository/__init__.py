@@ -7,7 +7,7 @@ from smartapply.database.repository.applications import (
     list_applications,
     update_application_tracking,
 )
-from smartapply.database.repository.documents import add_document, upsert_document
+from smartapply.database.repository.documents import add_document, delete_document, upsert_document
 from smartapply.database.repository.duplicates import (
     application_for_duplicate_group,
     application_ids_for_confirmed_groups,
@@ -48,6 +48,7 @@ __all__ = [
     "cache_get",
     "cache_set",
     "create_or_get_application",
+    "delete_document",
     "canonical_job",
     "confirm_duplicate",
     "clear_shortlist_for_sent_applications",

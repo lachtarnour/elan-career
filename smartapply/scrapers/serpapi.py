@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 import requests
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from smartapply.config import get_source_settings
 from smartapply.logging_setup import get_logger
@@ -38,6 +38,21 @@ SERPAPI_URL = "https://serpapi.com/search.json"
 
 def _should_stop(stop_requested: Callable[[], bool] | None) -> bool:
     return bool(stop_requested and stop_requested())
+
+
+class _SerpApiSearchCancelled(RuntimeError):
+    """Leave a request/retry without reporting a source failure."""
+
+
+def _wait_for_retry(delay: float, stop_requested: Callable[[], bool] | None) -> None:
+    deadline = time.monotonic() + delay
+    while True:
+        if _should_stop(stop_requested):
+            raise _SerpApiSearchCancelled()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(remaining, 0.1))
 
 
 def _request_error_summary(exc: requests.RequestException) -> str:
@@ -83,16 +98,28 @@ class SerpApiGoogleJobsScraper(Scraper):
     def is_available(self) -> bool:
         return bool(self.api_key)
 
-    @retry(
-        retry=retry_if_exception_type(requests.RequestException),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=8),
-        reraise=True,
-    )
-    def _fetch(self, params: dict[str, Any]) -> dict[str, Any]:
-        response = requests.get(SERPAPI_URL, params=params, timeout=30)
-        response.raise_for_status()
-        return response.json()
+    def _fetch(
+        self,
+        params: dict[str, Any],
+        *,
+        stop_requested: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        # Keep each retry local to this search's cancellation callback. Stop
+        # during HTTP or the backoff must prevent the next quota-bearing GET.
+        for attempt in Retrying(
+            retry=retry_if_exception_type(requests.RequestException),
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=1, max=8),
+            sleep=lambda delay: _wait_for_retry(delay, stop_requested),
+            reraise=True,
+        ):
+            with attempt:
+                if _should_stop(stop_requested):
+                    raise _SerpApiSearchCancelled()
+                response = requests.get(SERPAPI_URL, params=params, timeout=30)
+                response.raise_for_status()
+                return response.json()
+        raise AssertionError("SerpAPI retry completed without a response")
 
     def search(
         self,
@@ -348,8 +375,12 @@ class SerpApiGoogleJobsScraper(Scraper):
                 30,
             )
             try:
-                payload = self._fetch(page_params)
+                payload = self._fetch(page_params, stop_requested=stop_requested)
+            except _SerpApiSearchCancelled:
+                return
             except requests.RequestException as e:
+                if _should_stop(stop_requested):
+                    return
                 summary = _request_error_summary(e)
                 logger.error(
                     "SerpApi request failed: q=%r page=%s elapsed=%.1fs error=%s",
@@ -357,9 +388,10 @@ class SerpApiGoogleJobsScraper(Scraper):
                     pages_fetched + 1,
                     time.monotonic() - request_started,
                     summary,
-                    exc_info=True,
                 )
-                raise ScraperError(f"SerpAPI request failed: {summary}") from e
+                # Desktop logs the propagated exception's traceback too. Do
+                # not retain the HTTPError cause containing the query key.
+                raise ScraperError(f"SerpAPI request failed: {summary}") from None
             except Exception as exc:
                 logger.error(
                     "SerpApi response invalid: q=%r page=%s elapsed=%.1fs error=%s",

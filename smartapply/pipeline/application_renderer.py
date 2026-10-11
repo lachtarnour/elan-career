@@ -7,6 +7,7 @@ available and are surfaced as validation warnings.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,9 +15,10 @@ from smartapply.config import get_settings
 from smartapply.cv import CvDocxRenderer, HtmlApplicationRenderer
 from smartapply.cv.role_contracts import offer_anchored_categories
 from smartapply.cv.skill_display import compact_sparse_secondary_categories
-from smartapply.database.repository import upsert_document
+from smartapply.database.repository import delete_document, upsert_document
 from smartapply.llm import MotivationLetter
 from smartapply.logging_setup import get_logger
+from smartapply.pipeline.errors import TaskCancelledError
 from smartapply.pipeline.output_paths import application_document_stems, application_output_dir
 from smartapply.profile import Profile
 
@@ -47,6 +49,7 @@ class ApplicationDocumentRenderer:
         role_family: str | None = None,
         analysis=None,
         output_dir: Path | None = None,
+        stop_requested: Callable[[], bool] | None = None,
     ) -> None:
         """Generate every artifact and populate the corresponding report fields."""
         out_dir = output_dir or application_output_dir(
@@ -55,7 +58,7 @@ class ApplicationDocumentRenderer:
         )
         cv_stem, letter_stem = application_document_stems(
             self.profile.template_style.filename_candidate_name or self.profile.identity.full_name,
-            job_title,
+            adapted.cv_title,
         )
         display_adapted, skill_merges = compact_sparse_secondary_categories(
             adapted,
@@ -101,7 +104,8 @@ class ApplicationDocumentRenderer:
         cv_pdf_path = out_dir / f"{cv_stem}.pdf"
         letter_pdf_path = out_dir / f"{letter_stem}.pdf"
         try:
-            self.html.save_cv_pdf(display_adapted, cv_pdf_path)
+            render_options = {"stop_requested": stop_requested} if stop_requested else {}
+            self.html.save_cv_pdf(display_adapted, cv_pdf_path, **render_options)
             self.html.save_letter_pdf(
                 letter=letter,
                 job_title=job_title,
@@ -109,6 +113,7 @@ class ApplicationDocumentRenderer:
                 path=letter_pdf_path,
                 language=language,
                 letter_headline=display_adapted.cv_title,
+                **render_options,
             )
             report.cv_pdf_path = str(cv_pdf_path)
             report.letter_pdf_path = str(letter_pdf_path)
@@ -117,6 +122,8 @@ class ApplicationDocumentRenderer:
             letter_pdf_path.unlink(missing_ok=True)
             report.cv_pdf_path = None
             report.letter_pdf_path = None
+            if isinstance(exc, TaskCancelledError):
+                raise
             logger.warning("HTML PDF rendering skipped: %s", exc)
             report.validation_warnings.append(f"pdf_generation_skipped:{exc}")
 
@@ -133,3 +140,5 @@ class ApplicationDocumentRenderer:
         ]:
             if path:
                 upsert_document(session, application_id, doc_type=doc_type, path=path)
+            else:
+                delete_document(session, application_id, doc_type)

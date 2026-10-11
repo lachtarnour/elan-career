@@ -39,8 +39,12 @@ class IngestReport:
     duplicate_review_ids: list[int] = field(default_factory=list)
     # Certain URL matches are retained as archived source aliases.
     aliases_created: int = 0
-    # Actor datasets safely handled by this report. Kept for operational audit.
+    # Actor datasets returned by collection. Their recovery journal stays in
+    # place if skipped_busy is nonzero, so paid results can be replayed.
     completed_source_run_ids: list[str] = field(default_factory=list)
+    # Collected rows whose existing offer or duplicate group is in use. They
+    # do not interrupt persistence of unrelated rows from the same source.
+    skipped_busy: int = 0
 
 
 @dataclass(frozen=True)

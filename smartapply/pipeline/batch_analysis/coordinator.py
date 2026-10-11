@@ -22,6 +22,7 @@ from smartapply.database.analysis_batches import (
     AnalysisBatchRun,
     AnalysisBatchWave,
 )
+from smartapply.database.models import Job
 from smartapply.database.repository.llm_cache import purge_expired_cache
 from smartapply.llm.batch import BatchRequest, encode_requests, get_batch_transport, split_requests
 from smartapply.llm.fit_context import build_fit_context
@@ -39,8 +40,9 @@ from smartapply.pipeline.batch_analysis.results import (
     new_item,
     phase_route,
 )
+from smartapply.pipeline.process.analysis_admission import is_current_analysis_candidate
 from smartapply.pipeline.process.scope_screening import scope_context
-from smartapply.pipeline.snapshots import check_cancelled
+from smartapply.pipeline.snapshots import check_cancelled, job_snapshot_key
 
 logger = get_logger(__name__)
 ACTIVE_RUN_STATES = ACTIVE_ANALYSIS_RUN_STATES
@@ -141,6 +143,26 @@ class BatchAnalysisCoordinator:
                 write_session_scope() as session,
             ):
                 check_cancelled(stop_requested)
+                # Admission was read before acquiring the offer reservations.
+                # Check its source version again before a retained screening
+                # verdict can mutate the live offer, and use attached rows so
+                # concurrent manual choices and workflow history stay current.
+                current_candidates = []
+                for captured in candidates:
+                    current = session.get(Job, captured.id)
+                    if (
+                        current is not None
+                        and job_snapshot_key(current) == job_snapshot_key(captured)
+                        and is_current_analysis_candidate(
+                            session, current, exclude_reserved=True,
+                        )
+                    ):
+                        current_candidates.append(current)
+                if not current_candidates:
+                    raise ValueError(
+                        "Les offres sélectionnées ont changé ou ne sont plus disponibles. "
+                        "Actualisez la sélection."
+                    )
                 run = AnalysisBatchRun(
                     id=run_id,
                     state="active",
@@ -166,7 +188,7 @@ class BatchAnalysisCoordinator:
                 )
                 session.add(run)
                 session.flush()
-                for job in candidates:
+                for job in current_candidates:
                     session.add(
                         new_item(
                             run_id,
@@ -175,20 +197,21 @@ class BatchAnalysisCoordinator:
                             model=run.model,
                             provider=provider,
                             effort=run.extraction_effort,
+                            max_completion_tokens=run.max_completion_tokens,
                             screening_context=run.scope_context,
                         )
                     )
             if stop_requested is not None and stop_requested():
                 with write_session_scope() as session:
                     session.get(AnalysisBatchRun, run_id).cancel_requested = True
-            self._safely_advance(run_id)
+            self._safely_advance(run_id, stop_requested=stop_requested)
             if stop_requested is not None and stop_requested():
                 with write_session_scope() as session:
                     run = session.get(AnalysisBatchRun, run_id)
-                    needs_cancel = run.state in ACTIVE_RUN_STATES and not run.cancel_requested
-                    if needs_cancel:
+                    needs_follow_up = run.state in ACTIVE_RUN_STATES
+                    if needs_follow_up and not run.cancel_requested:
                         run.cancel_requested = True
-                if needs_cancel:
+                if needs_follow_up:
                     self._safely_advance(run_id)
             return run_id
 
@@ -275,9 +298,9 @@ class BatchAnalysisCoordinator:
                 run.updated_at = _now()
             self._safely_advance(run_id)
 
-    def _safely_advance(self, run_id: str) -> None:
+    def _safely_advance(self, run_id: str, *, stop_requested=None) -> None:
         try:
-            self._advance(run_id)
+            self._advance(run_id, stop_requested=stop_requested)
         except Exception as exc:
             logger.exception("Batch follow-up failed for %s", run_id)
             with write_session_scope() as session:
@@ -289,7 +312,7 @@ class BatchAnalysisCoordinator:
                     run.state = "blocked"
                 run.updated_at = _now()
 
-    def _advance(self, run_id: str) -> None:
+    def _advance(self, run_id: str, *, stop_requested=None) -> None:
         # Three dependent phases plus their cached-only transitions.
         # Provider waiting always returns immediately rather than occupying a worker.
         for _ in range(9):
@@ -316,25 +339,14 @@ class BatchAnalysisCoordinator:
                         if cancelling:
                             self._abandon_prepared(wave.id)
                             continue
-                        if not self._submit(wave.id):
+                        if not self._submit(wave.id, stop_requested=stop_requested):
                             with session_scope() as session:
                                 if session.get(AnalysisBatchRun, run_id).state == "blocked":
                                     return
                             continue
-                    try:
-                        refreshed = self._refresh_wave(wave.id, cancelling=cancelling)
-                    except Exception as exc:
-                        if (
-                            wave.phase != "screening"
-                            or cancelling
-                            or (
-                                (wave.state == "submitting" or wave.provider_batch_id)
-                                and phase_route(run, wave.phase)[0] == "anthropic"
-                            )
-                        ):
-                            raise
-                        self._screening_wave_failed(wave.id, exc)
-                        refreshed = True
+                    # A submitted screening wave may already be running remotely.
+                    # Keep it pending when status or output retrieval fails.
+                    refreshed = self._refresh_wave(wave.id, cancelling=cancelling)
                     if not refreshed:
                         waiting = True
                 if waiting:
@@ -446,7 +458,14 @@ class BatchAnalysisCoordinator:
                 wave.state = "imported"
             return records, wave.input_file_id, changed
 
-    def _submit(self, wave_id: str) -> bool:
+    @staticmethod
+    def _record_stop(run, stop_requested) -> bool:
+        if stop_requested is not None and stop_requested():
+            run.cancel_requested = True
+            run.updated_at = _now()
+        return bool(run.cancel_requested)
+
+    def _submit(self, wave_id: str, *, stop_requested=None) -> bool:
         records, input_file_id, _ = self._prune_prepared(wave_id)
         if not records:
             return False
@@ -458,6 +477,12 @@ class BatchAnalysisCoordinator:
             wave = session.get(AnalysisBatchWave, wave_id)
             run = session.get(AnalysisBatchRun, wave.run_id)
             provider, _ = phase_route(run, wave.phase)
+        with write_session_scope() as session:
+            run = session.get(AnalysisBatchRun, wave.run_id)
+            stopping = self._record_stop(run, stop_requested)
+        if stopping:
+            self._abandon_prepared(wave_id)
+            return False
         transport = self._transport(provider)
         if not input_file_id:
             try:
@@ -486,9 +511,17 @@ class BatchAnalysisCoordinator:
             return False
         with write_session_scope() as session:
             wave = session.get(AnalysisBatchWave, wave_id)
-            wave.input_file_id = input_file_id
-            wave.state = "submitting"
-            metadata = {"elan_run_id": wave.run_id, "elan_wave_id": wave.id}
+            run = session.get(AnalysisBatchRun, wave.run_id)
+            if self._record_stop(run, stop_requested):
+                wave.state = "imported"
+                stopping = True
+            else:
+                stopping = False
+                wave.input_file_id = input_file_id
+                wave.state = "submitting"
+                metadata = {"elan_run_id": wave.run_id, "elan_wave_id": wave.id}
+        if stopping:
+            return False
         try:
             snapshot = (
                 transport.create(input_file_id, metadata=metadata, requests=requests)
@@ -499,11 +532,9 @@ class BatchAnalysisCoordinator:
             status_code = getattr(exc, "status_code", None) or getattr(
                 exc.__cause__, "status_code", None
             )
-            if wave.phase == "screening" and (
-                provider != "anthropic" or status_code in {400, 401, 403, 404, 422, 429}
-            ):
-                # Anthropic may have accepted an ambiguous POST. Its journal
-                # must be recovered before this phase can advance.
+            if wave.phase == "screening" and status_code in {400, 401, 403, 404, 422, 429}:
+                # Only an explicit rejection establishes that no screening
+                # batch needs recovery before the next phase can start.
                 self._screening_wave_failed(wave_id, exc)
                 return False
             if status_code in {400, 401, 403, 404, 422, 429}:

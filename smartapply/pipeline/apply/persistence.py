@@ -39,6 +39,7 @@ class ApplicationPersistenceMixin:
         report: ApplyReport,
         *,
         force_regenerate: bool = False,
+        resume_application_id: int | None = None,
     ) -> bool:
         try:
             with write_session_scope() as session:
@@ -73,6 +74,22 @@ class ApplicationPersistenceMixin:
                         group_application.id,
                     )
                 existing = existing or group_application
+                if resume_application_id is not None:
+                    if (
+                        force_regenerate
+                        or existing is None
+                        or existing.id != resume_application_id
+                        or not job_is_active(root)
+                        or existing.status != JobStatus.ANALYZED
+                        or existing.form_submitted_at is not None
+                        or existing.documents
+                        or existing.cv_json
+                        or existing.cv_docx_path
+                        or existing.cv_pdf_path
+                    ):
+                        raise StaleTaskResultError()
+                    report.application_id = existing.id
+                    return False
                 if existing is not None:
                     if not force_regenerate:
                         if not reservation_is_stale(existing):

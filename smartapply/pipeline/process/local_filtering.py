@@ -148,7 +148,9 @@ class LocalFilterMixin:
             mark_archived(session, job.id, origin="automatic_filter")
         return kept
 
-    def filter_pending(self, *, job_ids: list[int] | None = None) -> LocalFilterReport:
+    def filter_pending(
+        self, *, job_ids: list[int] | None = None, cancellable: bool = True,
+    ) -> LocalFilterReport:
         """Apply only deterministic local gates, without ranking or LLM calls.
 
         Used right after fetch in the workflow: internships, alternance and
@@ -157,7 +159,9 @@ class LocalFilterMixin:
         set so a later ``process_pending`` correctly resumes from ranking
         instead of re-filtering or seeing nothing pending.
         """
-        stop_requested = getattr(self, "stop_requested", None)
+        # A completed collection must finish its local bookkeeping even if
+        # the network worker was stopped. This phase never calls a provider.
+        stop_requested = getattr(self, "stop_requested", None) if cancellable else None
         check_cancelled(stop_requested)
         with session_scope() as session:
             pending = list(session.scalars(select(Job).where(

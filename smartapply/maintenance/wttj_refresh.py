@@ -95,7 +95,7 @@ def refresh_wttj_from_audit(
                 "updated_columns": ["contract_type", "source_data"],
             }
             if apply and changes:
-                require_no_table_triggers(connection, tables=("jobs",))
+                revision_guard = require_no_table_triggers(connection, tables=("jobs",))
                 online_backup(database, backup)
                 result = connection.executemany(
                     "UPDATE jobs SET contract_type = ?, source_data = ? WHERE id = ? AND source = 'welcometothejungle'",
@@ -103,6 +103,7 @@ def refresh_wttj_from_audit(
                 )
                 if result.rowcount != len(changes):
                     raise SQLiteSafetyError("WTTJ refresh row count mismatch")
+                revision_guard.verify(connection, job_updates=len(changes))
                 if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                     raise SQLiteSafetyError("WTTJ refresh failed SQLite quick_check")
                 connection.commit()

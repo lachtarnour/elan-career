@@ -11,7 +11,8 @@ from smartapply.llm.request_options import request_cache_extra
 
 
 def extraction_key(
-    analyzer_input, model: str, *, provider: str = "openai", effort: str | None = None
+    analyzer_input, model: str, *, max_completion_tokens: int,
+    provider: str = "openai", effort: str | None = None,
 ) -> str:
     return make_cache_key(
         provider=provider,
@@ -19,7 +20,7 @@ def extraction_key(
         system=job_analysis.build_system_prompt(),
         user=job_analysis.build_user_prompt_from_input(analyzer_input=analyzer_input),
         schema_name=OfferExtractionOutput.__name__,
-        extra=request_cache_extra(OfferExtractionOutput, 0.2, effort),
+        extra=request_cache_extra(OfferExtractionOutput, 0.2, effort, max_completion_tokens),
     )
 
 

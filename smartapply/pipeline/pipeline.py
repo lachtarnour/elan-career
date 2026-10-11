@@ -309,8 +309,8 @@ class Pipeline:
     def analysis_candidates(self, job_ids=None, **kwargs):
         return self._processor.analysis_candidates(job_ids, **kwargs)
 
-    def filter_pending(self, *, job_ids: list[int] | None = None):
-        return self._processor.filter_pending(job_ids=job_ids)
+    def filter_pending(self, *, job_ids: list[int] | None = None, cancellable: bool = True):
+        return self._processor.filter_pending(job_ids=job_ids, cancellable=cancellable)
 
     # =================================================================
     # Phase 3: Apply

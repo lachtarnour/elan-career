@@ -668,7 +668,7 @@ def test_application_renderer_passes_cv_title_to_letter_renderer(
         ("letter_pdf_path", "Motivation", "pdf"),
     ):
         path = Path(getattr(report, field))
-        assert path.name == f"{prefix} - {candidate_name} - Data Scientist.{extension}"
+        assert path.name == f"{prefix} - {candidate_name} - {original_cv_title}.{extension}"
         assert path.parent == tmp_path / "123"
         assert path.is_file()
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from smartapply.database.models import GeneratedDocument
@@ -48,3 +48,13 @@ def upsert_document(
         session.delete(stale)
     session.flush()
     return current
+
+
+def delete_document(session: Session, application_id: int, doc_type: str) -> None:
+    """Remove every previous version of an artifact absent from the new dossier."""
+    session.execute(
+        delete(GeneratedDocument).where(
+            GeneratedDocument.application_id == application_id,
+            GeneratedDocument.doc_type == doc_type,
+        )
+    )

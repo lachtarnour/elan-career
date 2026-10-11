@@ -346,7 +346,11 @@ class AnalysisMixin(AnalysisAdmissionMixin):
                 effort="auto" if getattr(fit_llm, "_settings", None) is not None else None,
             )
             key = extraction_key(
-                analyzer_input, model, provider=provider_name, effort=extraction_effort
+                analyzer_input, model,
+                max_completion_tokens=resolve_route(
+                    provider_settings, "job_offer_extraction"
+                ).max_output_tokens,
+                provider=provider_name, effort=extraction_effort,
             )
             offer = None
             if not force_reanalyze:
@@ -454,7 +458,9 @@ class AnalysisMixin(AnalysisAdmissionMixin):
                 },
                 refresh_cache=force_reanalyze,
             )
-            check_cancelled(stop_requested)
+            # This is the last provider response for this offer. Persist it even
+            # if Stop arrived during the call, after the usual freshness guards;
+            # subsequent offers check cancellation before starting any call.
             analysis = _assemble_analysis(offer_facts, fit)
             with write_session_scope() as session:
                 if context["model"] != fit_llm.cheap_model or not context_is_current(

@@ -954,6 +954,115 @@ def test_force_regenerate_refreshes_the_application_llm_cache() -> None:
         assert ready_at.replace(tzinfo=timezone.utc) >= regeneration_started
 
 
+def test_regeneration_without_pdf_removes_old_pdf_references(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _register_llm_responses()
+
+    from sqlalchemy import select
+
+    from smartapply.database import session_scope
+    from smartapply.database.models import Application, GeneratedDocument
+    from smartapply.desktop.services import DesktopService
+    from smartapply.pipeline import Pipeline
+
+    pipeline = Pipeline(llm=MockLLMProvider())
+    ingested = pipeline.ingest_text(
+        text="Build RAG pipelines with Python and PyTorch for a product team.",
+        title="Machine Learning Engineer",
+        company="PdfFallbackCo",
+        location="Paris",
+        application_url="https://example.com/jobs/pdf-fallback",
+    )
+    job_id = ingested.job_ids[0]
+    pipeline.process_pending(top_k_analyze=1, job_ids=[job_id])
+    first = pipeline.apply_to(job_id)
+    assert Path(first.cv_pdf_path).is_file()
+    assert Path(first.letter_pdf_path).is_file()
+
+    def fail_pdf(*_args, **_kwargs):
+        raise RuntimeError("PDF renderer unavailable")
+
+    monkeypatch.setattr("smartapply.cv.html_renderer.html_to_pdf", fail_pdf)
+    second = pipeline.apply_to(job_id, force_regenerate=True)
+
+    assert second.application_id == first.application_id
+    assert second.cv_pdf_path is None and second.letter_pdf_path is None
+    assert Path(second.docx_path).is_file()
+    assert Path(second.cv_html_path).is_file()
+    assert Path(second.letter_html_path).is_file()
+    assert not Path(first.cv_pdf_path).exists()
+    assert not Path(first.letter_pdf_path).exists()
+    with session_scope() as session:
+        application = session.get(Application, first.application_id)
+        assert application.cv_pdf_path is None
+        types = set(session.scalars(select(GeneratedDocument.doc_type).where(
+            GeneratedDocument.application_id == first.application_id,
+        )))
+        assert "cv_pdf" not in types
+        assert "motivation_letter_pdf" not in types
+        assert {"cv_docx", "cv_html", "motivation_letter_html"} <= types
+    detail = DesktopService().get_job(job_id).application
+    assert detail.cv_pdf_path == ""
+    assert detail.letter_pdf_path == ""
+
+
+def test_failed_regeneration_restores_pdf_rows_after_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _register_llm_responses()
+
+    from sqlalchemy import select
+
+    from smartapply.database import session_scope
+    from smartapply.database.models import Application, GeneratedDocument
+    from smartapply.pipeline import Pipeline
+
+    pipeline = Pipeline(llm=MockLLMProvider())
+    ingested = pipeline.ingest_text(
+        text="Build RAG pipelines with Python and PyTorch for a product team.",
+        title="Machine Learning Engineer",
+        company="PdfRollbackCo",
+        location="Paris",
+        application_url="https://example.com/jobs/pdf-rollback",
+    )
+    job_id = ingested.job_ids[0]
+    pipeline.process_pending(top_k_analyze=1, job_ids=[job_id])
+    first = pipeline.apply_to(job_id)
+    assert Path(first.cv_pdf_path).is_file()
+    assert Path(first.letter_pdf_path).is_file()
+
+    def fail_pdf(*_args, **_kwargs):
+        raise RuntimeError("PDF renderer unavailable")
+
+    monkeypatch.setattr("smartapply.cv.html_renderer.html_to_pdf", fail_pdf)
+    add_rows = pipeline.renderer.add_document_rows
+
+    def fail_after_reconciliation(session, application_id, report):
+        add_rows(session, application_id, report)
+        raise RuntimeError("database publication interrupted")
+
+    monkeypatch.setattr(pipeline.renderer, "add_document_rows", fail_after_reconciliation)
+    with pytest.raises(RuntimeError, match="database publication interrupted"):
+        pipeline.apply_to(job_id, force_regenerate=True)
+
+    with session_scope() as session:
+        application = session.get(Application, first.application_id)
+        assert application.cv_pdf_path == first.cv_pdf_path
+        pdf_paths = dict(session.execute(select(
+            GeneratedDocument.doc_type, GeneratedDocument.path,
+        ).where(
+            GeneratedDocument.application_id == first.application_id,
+            GeneratedDocument.doc_type.in_(("cv_pdf", "motivation_letter_pdf")),
+        )).all())
+        assert pdf_paths == {
+            "cv_pdf": first.cv_pdf_path,
+            "motivation_letter_pdf": first.letter_pdf_path,
+        }
+    assert Path(first.cv_pdf_path).is_file()
+    assert Path(first.letter_pdf_path).is_file()
+
+
 def test_application_selects_cv_then_generates_summary_and_letter_then_persists_review() -> None:
     _register_llm_responses()
 

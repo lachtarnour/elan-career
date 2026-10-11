@@ -55,7 +55,7 @@ class ApplicationTextWriter:
     def __init__(self, profile: Profile, llm: LLMProvider, *, reference_date: date | None = None):
         self.profile = profile
         self.llm = llm
-        self.reference_date = reference_date or date.today()
+        self.reference_date = reference_date or getattr(llm, "reference_date", None) or date.today()
         self.cv_validator = CvValidator(profile)
         self.letter_validator = MotivationLetterValidator(profile)
 

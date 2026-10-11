@@ -53,10 +53,12 @@ class CancellableProvider:
     def complete_json(self, **kwargs):
         check_cancelled(self._stop_requested)
         result = self._provider.complete_json(**kwargs)
-        # A validated extraction is an unfinished processing checkpoint. Its
-        # caller stores it before checking cancellation, without publishing an
-        # analysis or starting the evaluation. This avoids buying it again.
-        if kwargs.get("purpose") not in {"job_offer_extraction", "job_scope_screening"}:
+        # Analysis callers commit validated responses before honouring Stop:
+        # scope/extraction are checkpoints, and fit is the final analysis.
+        # Their source/profile/admission guards still decide publication.
+        if kwargs.get("purpose") not in {
+            "job_offer_extraction", "job_scope_screening", "job_fit_assessment",
+        }:
             check_cancelled(self._stop_requested)
         return result
 

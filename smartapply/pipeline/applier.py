@@ -58,6 +58,9 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
         form_url: str | None = None,
         force_regenerate: bool = False,
         artifact_dir: Path | None = None,
+        resume_application_id: int | None = None,
+        reservation_callback: Callable[[ApplyReport], None] | None = None,
+        publication_callback: Callable | None = None,
     ) -> ApplyReport:
         """Generate the CV and motivation letter for one analyzed offer."""
         check_cancelled(self.stop_requested)
@@ -68,20 +71,26 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
             created_reservation = self._reserve_application_id(
                 report,
                 force_regenerate=force_regenerate,
+                resume_application_id=resume_application_id,
             )
             owns_publication = False
+            retained = False
             try:
                 with application_publication(report.job_id, report.application_id):
                     owns_publication = True
+                    if reservation_callback is not None:
+                        reservation_callback(report)
+                        retained = True
                     check_cancelled(self.stop_requested)
                     return self._do_apply(
                         report=report,
                         form_url=form_url,
                         refresh_cache=force_regenerate,
                         artifact_dir=artifact_dir,
+                        publication_callback=publication_callback,
                     )
             except Exception:
-                if created_reservation and owns_publication:
+                if created_reservation and owns_publication and not retained:
                     self._release_application_reservation(report)
                 raise
 
@@ -96,6 +105,7 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
         form_url: str | None = None,
         refresh_cache: bool = False,
         artifact_dir: Path | None = None,
+        publication_callback: Callable | None = None,
     ) -> ApplyReport:
         job_id = report.job_id
         job, analysis = self._load_job_analysis(job_id)
@@ -162,9 +172,11 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
                 role_family=classify(analysis, title=job.title),
                 analysis=analysis,
                 output_dir=artifacts.staging_dir,
+                stop_requested=self.stop_requested,
             )
 
             check_cancelled(self.stop_requested)
+            artifacts.prepare(report)
             # Availability and validation are independent: keep every diagnostic
             # and review decision, but never withhold a rendered dossier because
             # its text needs checking. Invalid edits remain rejected by the reviewer.
@@ -184,6 +196,9 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
                     status=status,
                     session=session,
                 )
+                if publication_callback is not None:
+                    publication_callback(report, session)
+                artifacts.mark_committed(session)
 
         except Exception:
             artifacts.rollback()
