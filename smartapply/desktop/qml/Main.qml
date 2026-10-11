@@ -26,13 +26,18 @@ ApplicationWindow {
     font.family: Theme.fontFamily
     Component.onCompleted: AppBridge.setActiveRoute(currentRoute)
     onCurrentRouteChanged: {
-        if (currentRoute !== "jobs" || jobsFilterStatus !== "scraped")
+        if (currentRoute !== "tracking" && (currentRoute !== "jobs" || jobsFilterStatus !== "scraped"))
             AppBridge.setActiveRoute(currentRoute)
     }
     onClosing: function(event) {
         event.accepted = AppBridge.shutdownReady
         if (!event.accepted) AppBridge.requestShutdown()
     }
+
+    readonly property real notificationTop: Math.max(32, window.SafeArea.margins.top + 8)
+    readonly property real notificationReservedHeight:
+        (busyPill.visible ? busyPill.height + 12 : 0)
+        + (toast.visible ? toast.height + 12 : 0)
 
     property string currentRoute: "dashboard"
     property string pendingRoute: "dashboard"
@@ -48,6 +53,7 @@ ApplicationWindow {
     property bool manualLoaded: false
     property bool profileLoaded: false
     property bool settingsLoaded: false
+    property bool trackingLoaded: false
     // Keep the rail compact on a 14-inch display so the working area remains
     // wide enough for the list/detail layouts.
     readonly property bool expandedNavigation: width >= 1560
@@ -56,6 +62,7 @@ ApplicationWindow {
         {title: "Recherche", icon: Theme.icon("search"), route: "search"},
         {title: "Doublons", icon: Theme.icon("files"), route: "duplicates"},
         {title: "Offres", icon: Theme.icon("briefcase"), route: "jobs"},
+        {title: "Suivi", icon: Theme.icon("analysis"), route: "tracking"},
         {title: "Entreprises", icon: Theme.icon("database"), route: "companies"},
         {title: "Nouvelle offre", icon: Theme.icon("plus"), route: "manual"},
         {title: "Profil", icon: Theme.icon("user"), route: "profile"},
@@ -63,7 +70,7 @@ ApplicationWindow {
     ]
 
     function routeIndex(route) {
-        var routes = ["dashboard", "search", "duplicates", "jobs", "companies", "manual", "profile", "settings"]
+        var routes = ["dashboard", "search", "duplicates", "jobs", "companies", "manual", "profile", "settings", "tracking"]
         var value = routes.indexOf(routePage(route))
         return value < 0 ? 0 : value
     }
@@ -97,6 +104,7 @@ ApplicationWindow {
         }
         if (page === "profile") AppBridge.refreshProfile()
         if (page === "settings" || page === "search") AppBridge.refreshDiagnosticsIfStale()
+        if (page === "tracking") AppBridge.setActiveRoute("tracking")
     }
 
     function ensureRouteLoaded(route) {
@@ -109,6 +117,7 @@ ApplicationWindow {
         else if (page === "manual") manualLoaded = true
         else if (page === "profile") profileLoaded = true
         else if (page === "settings") settingsLoaded = true
+        else if (page === "tracking") trackingLoaded = true
     }
 
     function navigate(route, selectedId) {
@@ -186,6 +195,7 @@ ApplicationWindow {
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Recherche"; compactText: "Recherche"; iconSource: Theme.icon("search"); selected: window.currentRoute === "search"; onClicked: window.navigate("search") }
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Doublons"; compactText: "Doublons"; iconSource: Theme.icon("files"); selected: window.currentRoute === "duplicates"; onClicked: window.navigate("duplicates") }
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Offres"; compactText: "Offres"; iconSource: Theme.icon("briefcase"); selected: window.currentRoute === "jobs"; onClicked: window.navigate("jobs") }
+                RailItem { objectName: "trackingNavigationAction"; Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Suivi"; compactText: "Suivi"; iconSource: Theme.icon("analysis"); selected: window.currentRoute === "tracking"; onClicked: window.navigate("tracking") }
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Entreprises"; compactText: "Sociétés"; iconSource: Theme.icon("database"); selected: window.currentRoute === "companies"; onClicked: window.navigate("companies") }
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Nouvelle offre"; compactText: "Nouvelle"; iconSource: Theme.icon("plus"); selected: window.currentRoute === "manual"; onClicked: window.navigate("manual") }
 
@@ -262,8 +272,8 @@ ApplicationWindow {
                     // Offers uses the space above its toolbar for the IA
                     // threshold. Its inner top inset keeps the toolbar in
                     // the same window position as the other pages.
-                    anchors.topMargin: Math.max(32, window.SafeArea.margins.top + 8)
-                        - (window.currentRoute === "jobs" ? 28 : 0)
+                    anchors.topMargin: window.notificationTop + window.notificationReservedHeight
+                        - (window.currentRoute === "jobs" && window.notificationReservedHeight === 0 ? 28 : 0)
                     anchors.bottomMargin: 28
                     transform: Translate { x: window.pageOffset }
                     currentIndex: 0
@@ -320,10 +330,16 @@ ApplicationWindow {
                         asynchronous: true
                         sourceComponent: Component { SettingsPage { onNavigateRequested: function(route) { window.navigate(route) } } }
                     }
+                    Loader {
+                        objectName: "trackingLoader"
+                        active: window.trackingLoaded
+                        asynchronous: true
+                        sourceComponent: Component { TrackingPage { } }
+                    }
                 }
 
-                // Notifications float above the page so their appearance
-                // never changes the geometry of the current workspace.
+                // Reserve a band above every page: persistent progress and
+                // transient notifications must never cover workspace actions.
                 Rectangle {
                     id: toast
                     objectName: "toast"
@@ -333,7 +349,7 @@ ApplicationWindow {
                     property string messageText: ""
                     anchors.top: parent.top
                     anchors.right: parent.right
-                    anchors.topMargin: Math.max(32, window.SafeArea.margins.top + 8)
+                    anchors.topMargin: window.notificationTop + (busyPill.visible ? busyPill.height + 12 : 0)
                     anchors.rightMargin: 28
                     width: Math.min(390, Math.max(260, parent.width - 56))
                     height: implicitHeight
@@ -549,62 +565,101 @@ ApplicationWindow {
     Rectangle {
         id: busyPill
         objectName: "busyTaskNotification"
+        parent: contentHost
+        readonly property var taskStates: AppBridge.longTaskStates || []
+        readonly property bool showFallback: AppBridge.shutdownRequested || AppBridge.maintenanceFailed || taskStates.length === 0
         z: 50
         visible: opacity > 0
-        opacity: AppBridge.busy || AppBridge.shutdownRequested || AppBridge.queuedTaskCount > 0 || AppBridge.maintenanceFailed ? 1 : 0
+        opacity: AppBridge.busy || AppBridge.shutdownRequested || taskStates.length > 0 || AppBridge.maintenanceFailed ? 1 : 0
         anchors.right: parent.right
         anchors.rightMargin: 28
-        anchors.bottom: parent.bottom
-        anchors.bottomMargin: 24
-        width: Math.min(430, Math.max(220, busyRow.implicitWidth + 34))
-        height: 44
+        anchors.top: parent.top
+        anchors.topMargin: window.notificationTop
+        width: Math.min(430, parent.width - 56)
+        height: Math.max(44, busyRows.implicitHeight + 24)
         radius: 15
         color: Theme.surfaceRaised
         border.color: Theme.accentLine
-        RowLayout {
-            id: busyRow
+        ColumnLayout {
+            id: busyRows
             anchors.fill: parent
             anchors.margins: 12
             spacing: 10
-            Item {
-                Layout.preferredWidth: 18; Layout.preferredHeight: 18
-                Rectangle { width: 6; height: 6; radius: 3; color: Theme.accentBright; anchors.top: parent.top; anchors.horizontalCenter: parent.horizontalCenter }
-                RotationAnimation on rotation { running: AppBridge.busy || AppBridge.shutdownRequested; from: 0; to: 360; duration: 850; loops: Animation.Infinite }
+            Repeater {
+                model: AppBridge.shutdownRequested ? [] : busyPill.taskStates
+                delegate: RowLayout {
+                    required property var modelData
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Item {
+                        Layout.preferredWidth: 18; Layout.preferredHeight: 18
+                        Rectangle { width: 6; height: 6; radius: 3; color: Theme.accentBright; anchors.top: parent.top; anchors.horizontalCenter: parent.horizontalCenter }
+                        RotationAnimation on rotation { running: busyPill.visible; from: 0; to: 360; duration: 850; loops: Animation.Infinite }
+                    }
+                    Text {
+                        objectName: "taskLaneProgress-" + modelData.lane
+                        Layout.fillWidth: true
+                        text: String(modelData.label || "Traitement en cours…")
+                            + (Number(modelData.queued || 0) > 0 ? " · " + modelData.queued + " en attente" : "")
+                        color: Theme.inkSoft
+                        font.pixelSize: 12
+                        font.weight: Font.DemiBold
+                        elide: Text.ElideRight
+                    }
+                    AppButton {
+                        objectName: "cancelTaskLane-" + modelData.lane
+                        visible: Boolean(modelData.cancellable)
+                        text: "Arrêter"
+                        quiet: true
+                        implicitHeight: 28
+                        Accessible.name: "Arrêter " + String(modelData.label || "ce traitement")
+                        onClicked: AppBridge.cancelTaskLane(String(modelData.lane))
+                    }
+                }
             }
-            Text {
+            RowLayout {
+                visible: busyPill.showFallback
                 Layout.fillWidth: true
-                text: AppBridge.shutdownRequested ? "Fermeture en cours…"
-                    : AppBridge.maintenanceFailed ? "Vérification des offres à reprendre"
-                    : (AppBridge.busyLabel || "Traitement en cours…")
-                        + (AppBridge.queuedTaskCount > 0 ? " · " + AppBridge.queuedTaskCount + " en attente" : "")
-                color: Theme.inkSoft
-                font.pixelSize: 12
-                font.weight: Font.DemiBold
-                elide: Text.ElideRight
-            }
-            AppButton {
-                objectName: "cancelCurrentTaskAction"
-                visible: AppBridge.canCancel && !AppBridge.shutdownRequested
-                text: "Annuler"
-                quiet: true
-                implicitHeight: 28
-                onClicked: AppBridge.cancelCurrentTask()
-            }
-            AppButton {
-                objectName: "maintenanceRetryAction"
-                visible: AppBridge.maintenanceFailed && !AppBridge.shutdownRequested
-                text: "Réessayer"
-                quiet: true
-                implicitHeight: 28
-                onClicked: AppBridge.retryStartupMaintenance()
-            }
-            AppButton {
-                objectName: "shutdownRetryNotesAction"
-                visible: AppBridge.shutdownRequested
-                text: "Réessayer"
-                quiet: true
-                implicitHeight: 28
-                onClicked: AppBridge.retryNotesSave()
+                spacing: 10
+                Item {
+                    Layout.preferredWidth: 18; Layout.preferredHeight: 18
+                    Rectangle { width: 6; height: 6; radius: 3; color: Theme.accentBright; anchors.top: parent.top; anchors.horizontalCenter: parent.horizontalCenter }
+                    RotationAnimation on rotation { running: AppBridge.shutdownRequested || (AppBridge.busy && busyPill.taskStates.length === 0); from: 0; to: 360; duration: 850; loops: Animation.Infinite }
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: AppBridge.shutdownRequested ? "Fermeture en cours…"
+                        : AppBridge.maintenanceFailed ? "Vérification des offres à reprendre"
+                        : (AppBridge.busyLabel || "Traitement en cours…")
+                    color: Theme.inkSoft
+                    font.pixelSize: 12
+                    font.weight: Font.DemiBold
+                    elide: Text.ElideRight
+                }
+                AppButton {
+                    objectName: "cancelCurrentTaskAction"
+                    visible: AppBridge.canCancel && !AppBridge.shutdownRequested && busyPill.taskStates.length === 0
+                    text: "Annuler"
+                    quiet: true
+                    implicitHeight: 28
+                    onClicked: AppBridge.cancelCurrentTask()
+                }
+                AppButton {
+                    objectName: "maintenanceRetryAction"
+                    visible: AppBridge.maintenanceFailed && !AppBridge.shutdownRequested
+                    text: "Réessayer"
+                    quiet: true
+                    implicitHeight: 28
+                    onClicked: AppBridge.retryStartupMaintenance()
+                }
+                AppButton {
+                    objectName: "shutdownRetryNotesAction"
+                    visible: AppBridge.shutdownRequested
+                    text: "Réessayer"
+                    quiet: true
+                    implicitHeight: 28
+                    onClicked: AppBridge.retryNotesSave()
+                }
             }
         }
         Behavior on opacity { NumberAnimation { duration: 180 } }

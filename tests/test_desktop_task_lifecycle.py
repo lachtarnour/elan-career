@@ -77,6 +77,8 @@ def bridge(monkeypatch):
     value._mutation_pool = ControlledPool()
     value._read_pool = ControlledPool()
     yield value
+    value._busy_jobs_controller.stop()
+    assert value._busy_jobs_controller._pool.waitForDone(3_000)
     value._unsubscribe_resources()
     value._unsubscribe_database()
     value._workflow_refresh_timer.stop()
@@ -415,6 +417,33 @@ def test_refresh_of_loaded_query_keeps_content_visible_even_when_empty(bridge, r
     assert not bridge.jobsLoading and bridge.jobs == displayed
 
 
+def test_passive_refresh_keeps_requested_page_navigation(bridge):
+    pages = []
+
+    def read(**kwargs):
+        page = kwargs["page"]
+        pages.append(page)
+        return {"rows": [{"id": page + 1, "title": f"page {page}"}],
+                "total": 200, "page": page}
+
+    bridge.service.list_jobs_page = read
+    bridge._selected_job_id = 999
+    bridge.loadJobs("", "analyzed", "title", True, "", 0)
+    bridge._read_pool.finish_next()
+    assert bridge.jobsPage == 0
+
+    bridge.loadJobs("", "analyzed", "title", True, "", 1)
+    assert bridge.jobsPage == 0 and bridge._requested_jobs_page == 1
+    bridge.refreshJobs()
+    bridge._read_pool.finish_next()
+
+    assert pages == [0, 1]
+    assert bridge.jobsPage == 1 and bridge.jobs[0]["title"] == "page 1"
+    bridge.refreshJobs()
+    bridge._read_pool.finish_next()
+    assert pages == [0, 1, 1] and bridge.jobsPage == 1
+
+
 @pytest.mark.parametrize(
     "changed",
     [
@@ -595,3 +624,101 @@ def test_passive_detail_refresh_preserves_pending_application_navigation(bridge,
         bridge._read_pool.finish_next()
     assert routes == [("jobs?status=sent", 2)]
     assert bridge.currentJob["id"] == 2 and not bridge.jobDetailLoading
+
+
+@pytest.mark.parametrize("action", ["archiveJob", "markJobSent", "archiveApplication", "deleteReadyOffer"])
+@pytest.mark.parametrize("ids,removed,expected", [
+    (list(range(1, 103)), {100}, 101),
+    ([99, 100], {100}, 99),
+    ([100], {100}, 0),
+    ([100, 101, 102], {100, 101}, 102),
+    ([100, 101], set(), 101),
+])
+def test_offer_action_advances_in_global_order(bridge, monkeypatch, action, ids, removed, expected):
+    from smartapply.desktop.offer_deletion import OfferDeletionResult
+
+    current = list(ids)
+    filters = []
+    bridge._selected_job_id = 100
+    bridge._current_job = {"id": 100, "application": {"id": 7}}
+    bridge._job_search = "engineer"
+    bridge._job_sort_key = "llm_score"
+    bridge._job_sort_ascending = False
+    bridge._job_archive_origin = "manual"
+    bridge._job_mission_relation = "direct"
+
+    def listing(**kwargs):
+        filters.append(kwargs)
+        return list(current)
+
+    def mutate(_):
+        current[:] = [i for i in current if i not in removed]
+        if action == "deleteReadyOffer":
+            return OfferDeletionResult(tuple(removed), (7,), True)
+        return True
+
+    bridge.service.list_jobs = listing
+    for name in ("archive_job", "mark_job_sent", "archive_application", "delete_ready_offer"):
+        setattr(bridge.service, name, mutate)
+    selections = []
+    monkeypatch.setattr(bridge, "_refresh_workflow", lambda: None)
+    monkeypatch.setattr(bridge, "_refresh_selected", lambda _: None)
+    monkeypatch.setattr(bridge, "selectJob", selections.append)
+    getattr(bridge, action)(7 if action == "archiveApplication" else 100)
+    assert selections == []
+    bridge._mutation_pool.finish_next()
+    assert selections[-1] == expected
+    assert len(filters) == 2 and filters[0] == filters[1]
+    assert filters[0]["ids_only"] and filters[0]["search"] == "engineer"
+    assert filters[0]["archive_origin"] == "manual"
+    assert filters[0]["mission_relation"] == "direct"
+
+
+@pytest.mark.parametrize("change", ["selection", "revision", "query", "route", "failure", "exception"])
+def test_offer_action_does_not_override_navigation_or_advance_on_failure(bridge, monkeypatch, change):
+    bridge._selected_job_id = 100
+    bridge._requested_jobs_query = ("initial",)
+    bridge.service.list_jobs = lambda **_: [100, 101]
+
+    def mutate(_):
+        if change == "exception":
+            raise ValueError("refused")
+        return change != "failure"
+
+    bridge.service.mark_job_sent = mutate
+    selections = []
+    monkeypatch.setattr(bridge, "_refresh_workflow", lambda: None)
+    monkeypatch.setattr(bridge, "_refresh_selected", lambda _: None)
+    monkeypatch.setattr(bridge, "selectJob", selections.append)
+    bridge.markJobSent(100)
+    if change == "selection":
+        bridge._selected_job_id = 102
+    elif change == "revision":
+        bridge._selection_revision = 2
+    elif change == "query":
+        bridge._requested_jobs_query = ("new",)
+    elif change == "route":
+        bridge._active_route = "home"
+    bridge._mutation_pool.finish_next()
+    assert selections == []
+
+
+def test_next_offer_lookup_failure_keeps_successful_mutation(bridge, monkeypatch):
+    bridge._selected_job_id = 100
+    reads = []
+    writes = []
+    notifications = []
+
+    def listing(**_):
+        reads.append(True)
+        if len(reads) == 2:
+            raise RuntimeError("temporarily unavailable")
+        return [100, 101]
+
+    bridge.service.list_jobs = listing
+    bridge.service.mark_job_sent = lambda job_id: writes.append(job_id) or True
+    monkeypatch.setattr(bridge, "_job_action_done", lambda *args: notifications.append(args))
+    monkeypatch.setattr(bridge, "selectJob", lambda _: pytest.fail("lookup failed"))
+    bridge.markJobSent(100)
+    bridge._mutation_pool.finish_next()
+    assert writes == [100] and len(notifications) == 1

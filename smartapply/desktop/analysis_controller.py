@@ -5,10 +5,12 @@ from __future__ import annotations
 from PySide6.QtCore import QObject, QThreadPool, QTimer, Signal
 
 from smartapply.desktop.workers import TaskWorker
+from smartapply.desktop.workspace_view_state import WorkspaceViewState
 
 
-class AnalysisController(QObject):
+class AnalysisController(QObject, WorkspaceViewState):
     changed = Signal()
+    candidatesChanged = Signal()
     loadingChanged = Signal()
     errorChanged = Signal()
     operationChanged = Signal()
@@ -16,6 +18,7 @@ class AnalysisController(QObject):
     def __init__(self, bridge):
         super().__init__(bridge)
         self.bridge = bridge
+        self._init_view("analysis")
         self.workspace = {"candidates": [], "runs": [], "active_run_id": ""}
         self.loading = False
         self.error = ""
@@ -44,6 +47,8 @@ class AnalysisController(QObject):
             self._pending_read = self._pending_read or not sync
             return
         method = "sync_analysis_batches" if sync else "analysis_workspace"
+        if hasattr(self.bridge.service, method + "_view"):
+            method += "_view"
         if hasattr(self.bridge.service, method):
             self._execute(getattr(self.bridge.service, method), operation="refresh")
 
@@ -101,6 +106,9 @@ class AnalysisController(QObject):
             return
         if self._immediate_worker is not None and operation in {"immediate", "start"}:
             return
+        if operation == "start" and hasattr(self.bridge.service, "analysis_workspace_view"):
+            self._view["selected_run_id"] = ""
+            self._view_revision += 1
         if not immediate:
             self._control_busy = True
         self.loading = True
@@ -109,12 +117,17 @@ class AnalysisController(QObject):
         self.loadingChanged.emit()
         self.operationChanged.emit()
         self.errorChanged.emit()
-        worker = TaskWorker(fn, *args, with_cancel=cancellable)
+        kwargs = {}
+        if hasattr(self.bridge.service, "analysis_workspace_view"):
+            options = self._view_options()
+            kwargs = options if operation == "refresh" else {"view": options}
+        worker = TaskWorker(fn, *args, with_cancel=cancellable, **kwargs)
         if operation == "immediate":
             self._immediate_worker = worker
         elif operation == "start":
             self._batch_start_worker = worker
         self.bridge._workers.add(worker)
+        self.bridge.busyChanged.emit()
         worker.signals.result.connect(on_result or self._loaded)
         worker.signals.error.connect(self._failed)
 
@@ -158,7 +171,7 @@ class AnalysisController(QObject):
         worker = self._batch_start_worker
         if worker is not None and worker.cancel_requested:
             run_id = workspace.get("started_run_id")
-            run = next((run for run in workspace.get("runs", []) if run.get("id") == run_id), None)
+            run = next((run for run in self._observed_runs(workspace) if run.get("id") == run_id), None)
             if run and run.get("can_cancel"):
                 self._cancel_started_run_id = run_id
         self._loaded(workspace)
@@ -166,13 +179,13 @@ class AnalysisController(QObject):
     def _cancel_loaded(self, workspace, run_id):
         already_cancelling = any(
             run.get("id") == run_id and run.get("status") == "cancelling"
-            for run in self.workspace.get("runs", [])
+            for run in self._observed_runs(self.workspace)
         )
         self._loaded(workspace)
         if (
             not already_cancelling
             and not self.bridge.shutdownRequested
-            and not any(run.get("id") == run_id for run in workspace.get("runs", []))
+            and not any(run.get("id") == run_id for run in self._observed_runs(workspace))
         ):
             self.bridge.toastRequested.emit(
                 "Batch annulé",
@@ -205,8 +218,11 @@ class AnalysisController(QObject):
     def _loaded(self, workspace):
         if self.bridge.shutdownRequested:
             return
-        previous = {str(run["id"]): run for run in self.workspace.get("runs", [])}
-        remaining_ids = {str(run["id"]) for run in workspace.get("runs", [])}
+        workspace = self._accept_view(workspace)
+        if workspace is None:
+            return
+        previous = {str(run["id"]): run for run in self._observed_runs(self.workspace)}
+        remaining_ids = {str(run["id"]) for run in self._observed_runs(workspace)}
         for run_id, old in previous.items():
             if run_id not in remaining_ids and old.get("status") == "cancelling":
                 self.bridge.toastRequested.emit(
@@ -218,11 +234,14 @@ class AnalysisController(QObject):
         if workspace != self.workspace:
             self.workspace = workspace
             self.changed.emit()
-        if any(run.get("is_active") for run in workspace.get("runs", [])):
+        if self._candidate_notify:
+            self._candidate_notify = False
+            self.candidatesChanged.emit()
+        if workspace.get("polling_run_count", any(run.get("is_active") for run in workspace.get("runs", []))):
             self._timer.start()
         else:
             self._timer.stop()
-        for run in workspace.get("runs", []):
+        for run in self._observed_runs(workspace):
             old = previous.get(str(run["id"]))
             if (
                 old
@@ -230,6 +249,12 @@ class AnalysisController(QObject):
                 and not run.get("is_active")
                 and run.get("status") in {"completed", "partial", "failed", "cancelled"}
             ):
+                if run.get("status") == "cancelled":
+                    self.bridge.toastRequested.emit(
+                        "Batch annulé", "Les offres restantes sont à nouveau disponibles.", "info",
+                    )
+                    self.bridge._refresh_workflow()
+                    continue
                 count = int(run.get("analyzed", 0))
                 failed = int(run.get("failed", 0))
                 message = f"{count} analyses enregistrées."
@@ -245,5 +270,5 @@ class AnalysisController(QObject):
         self.error = message
         self.errorChanged.emit()
         # Keep checking existing runs after transient connectivity failures.
-        if any(run.get("is_active") for run in self.workspace.get("runs", [])):
+        if self.workspace.get("polling_run_count", any(run.get("is_active") for run in self.workspace.get("runs", []))):
             self._timer.start()

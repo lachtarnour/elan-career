@@ -16,7 +16,7 @@ Item {
     readonly property color markerColor: issue ? Theme.warning
         : complete ? Theme.success : current ? Theme.accentBright : Theme.lineStrong
 
-    implicitHeight: 82
+    implicitHeight: phase.label ? 100 : 82
 
     function statusLabel(value) {
         var labels = {
@@ -25,7 +25,8 @@ Item {
             finalizing: "Finalisation", importing: "Enregistrement",
             completed: "Terminé", partial: "À reprendre", failed: "Échec",
             expired: "Délai dépassé", cancelling: "Annulation",
-            cancelled: "Annulé", attention: "À vérifier", blocked: "Connexion à rétablir"
+            cancelled: "Annulé", attention: "À vérifier", blocked: "Connexion à rétablir",
+            paused: "Arrêté · reprise possible", interrupted: "Reprise possible"
         }
         return value === "waiting" ? labels.waiting
             : String(phase.status_label || labels[value] || value)
@@ -33,6 +34,8 @@ Item {
 
     function countLabel() {
         var singular = total === 1
+        if (phase.execution_kind === "python")
+            return completed + " / " + total + (singular ? " offre traitée" : " offres traitées")
         if (state === "blocked")
             return total + (singular ? " demande conservée" : " demandes conservées")
         if (["preparing", "prepared", "submitting"].indexOf(state) >= 0)
@@ -108,14 +111,19 @@ Item {
         anchors.right: parent.right
         spacing: 2
         Text {
+            objectName: "analysisPhaseTitle_" + root.number
             Layout.fillWidth: true
             horizontalAlignment: Text.AlignHCenter
             text: !root.phase.phase ? "Bilan"
+                : root.phase.label ? String(root.phase.label)
+                    + (Number(root.phase.batch_count || 0) > 0 ? " · " + root.phase.batch_count + " Batch" : "")
                 : (root.phase.phase === "screening" ? "Préfiltre" : root.phase.phase === "extraction" ? "Extraction" : "Évaluation") + " · "
                     + Number(root.phase.batch_count || 0) + " Batch"
             color: root.started ? Theme.ink : Theme.inkFaint
             font.pixelSize: 11
             font.weight: Font.DemiBold
+            maximumLineCount: root.phase.label ? 2 : 1
+            wrapMode: root.phase.label ? Text.WordWrap : Text.NoWrap
             elide: Text.ElideRight
         }
         Text {

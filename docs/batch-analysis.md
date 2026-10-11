@@ -2,7 +2,7 @@
 
 [Accueil de la documentation](README.md) · [Parcours d'une offre](parcours-offre.md) · [Fournisseurs IA](llm-providers.md#batch-et-suivi)
 
-La page **Analyse**, après **Doublons**, regroupe les offres actives à classer. Sélectionnez des lignes ou toutes les lignes affichées, puis lancez **Analyse par Batch** (mode économique) ou **Analyse immédiate** pour cette sélection. Les deux modes appliquent le filtre déterministe et les mêmes contrats d'extraction et d'évaluation. Une offre déjà analysée, dotée d'une candidature ou liée à un doublon non résolu n'entre pas dans la file courante. Aucun classement numérique ni ancien « Top 25 » ne limite le nombre d'offres analysables.
+Le filtre **Nouvelle** de la page **Offres** regroupe les offres actives à classer. Sélectionnez les offres, puis lancez **Analyse par Batch** (mode économique) ou **Analyse immédiate** pour cette sélection. Les deux modes appliquent le filtre déterministe et les mêmes contrats d'extraction et d'évaluation. Une offre déjà analysée, dotée d'une candidature ou liée à un doublon non résolu n'entre pas dans la file courante. Aucun classement numérique ni ancien « Top 25 » ne limite le nombre d'offres analysables.
 
 L'analyse comprend trois étapes structurées :
 
@@ -20,7 +20,9 @@ La zone de suivi montre le parcours sélectionné, son état, le nombre de lots 
 
 ## Suivi, reprise et annulation
 
-Élan vérifie les parcours actifs toutes les deux minutes, même lorsque la page n'est pas visible. **Actualiser** déclenche une vérification immédiate. Les lots déjà soumis continuent chez le fournisseur lorsque l'application est fermée ; l'import local et le lancement de l'étape suivante reprennent à la réouverture, sans service supplémentaire installé en arrière-plan.
+**Suivi**, dans la navigation principale, permet de consulter les analyses Batch et les créations après réouverture, indépendamment du filtre des offres. Le journal local est affiché avant la synchronisation avec le fournisseur et reste consultable si cette synchronisation échoue. Élan vérifie les parcours actifs toutes les deux minutes, même lorsque la page n'est pas visible. **Actualiser** déclenche une vérification immédiate. Les lots déjà soumis continuent chez le fournisseur lorsque l'application est fermée ; l'import local et le lancement de l'étape suivante reprennent à la réouverture, sans service supplémentaire installé en arrière-plan. Fermer l'application n'annule pas un Batch ; un envoi initial encore en cours est enregistré avant la fermeture.
+
+La fermeture arrête l'analyse immédiate : aucune nouvelle étape d'analyse ne commence après la demande d'arrêt. Élan attend le retour des appels déjà en cours pour enregistrer leurs résultats valides, puis ferme. Les analyses complètes, le préfiltre et les extractions intermédiaires restent sauvegardés. Les résultats devenus obsolètes restent soumis aux contrôles de source et de profil.
 
 **Reprendre** renvoie uniquement les requêtes en échec. Une extraction valide survit à une interruption pendant l'évaluation. **Arrêter** avant l'envoi ne crée pas de lot ; après l'envoi, Élan demande l'annulation au fournisseur et attend sa confirmation. Les analyses et résultats partiels déjà importés sont conservés. Une annulation empêche la soumission d'une nouvelle étape pour ce parcours et n'affecte pas les autres parcours.
 

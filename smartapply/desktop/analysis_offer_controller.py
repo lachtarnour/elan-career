@@ -23,6 +23,8 @@ class AnalysisOfferController(QObject):
             return
         self.selected_id = job_id
         self.offer = {}
+        self.loading = True
+        self.changed.emit()
         self.refresh()
 
     def refresh(self):
@@ -30,17 +32,22 @@ class AnalysisOfferController(QObject):
             return
         # Existing content stays readable during a passive refresh. The shared
         # read scheduler discards stale results and queues only the latest ID.
-        self.loading = not bool(self.offer)
-        self.changed.emit()
+        loading = not bool(self.offer)
+        if loading != self.loading:
+            self.loading = loading
+            self.changed.emit()
         self.bridge._start_read(
             "analysis_offer", self.bridge.service.get_job, self.selected_id,
             on_success=self._loaded, on_finished=self._finished,
         )
 
     def _loaded(self, value):
-        self.offer = self.serialize(value) if value else {}
-        self.changed.emit()
+        offer = self.serialize(value) if value else {}
+        if offer != self.offer:
+            self.offer = offer
+            self.changed.emit()
 
     def _finished(self):
-        self.loading = False
-        self.changed.emit()
+        if self.loading:
+            self.loading = False
+            self.changed.emit()

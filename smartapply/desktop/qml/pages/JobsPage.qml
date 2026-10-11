@@ -25,8 +25,54 @@ Item {
     property bool loadingNoteText: false
     property var noteDrafts: ({})
     readonly property var activeNoteDraft: noteDrafts[String(notesApplicationId)] || ({})
-    readonly property bool selectedJobBusy: (AppBridge.busyJobIds || []).indexOf(Number(selectedId)) >= 0
-    readonly property bool duplicateCandidateBusy: (AppBridge.busyJobIds || []).indexOf(Number((AppBridge.currentJob.duplicate_candidate || {}).id || 0)) >= 0
+    // Materialize once per notification: indexed Qt sequence reads otherwise
+    // call the Python property getter again for every inspected ID.
+    readonly property var busyJobIdsSnapshot: {
+        var ids = AppBridge.busyJobIds || []
+        return ids.slice()
+    }
+    readonly property bool selectedJobBusy: busyJobIdsSnapshot.indexOf(Number(selectedId)) >= 0
+    readonly property bool duplicateCandidateBusy: busyJobIdsSnapshot.indexOf(Number((AppBridge.currentJob.duplicate_candidate || {}).id || 0)) >= 0
+    readonly property var generationWorkspace: AppBridge.generationWorkspace || ({})
+    readonly property var generationReservedIds: generationWorkspace.reserved_job_ids || []
+    readonly property var generationResumableIds: generationWorkspace.resumable_job_ids || []
+    readonly property bool generationLaunchEnabled: !AppBridge.shutdownRequested
+        && !AppBridge.generationWorkspaceLoading
+
+    function canStartGeneration(ids) {
+        return generationLaunchEnabled && ids.length > 0 && ids.every(function(id) {
+            return isGenerationResumable(id)
+                || (!anyJobBusy([id]) && generationReservedIds.indexOf(Number(id)) < 0)
+        })
+    }
+
+    function isGenerationResumable(id) {
+        return generationResumableIds.indexOf(Number(id)) >= 0
+    }
+
+    function canGenerateOffer(row) {
+        return Boolean(row.can_generate) || isGenerationResumable(row.id)
+    }
+
+    function chooseGenerationMode(ids, shortlist, count) {
+        if (shortlist ? !generationLaunchEnabled : !canStartGeneration(ids)) return
+        generationMode.jobIds = ids.slice()
+        generationMode.shortlist = Boolean(shortlist)
+        generationMode.offerCount = shortlist ? Number(count || 0) : ids.length
+        generationMode.open()
+    }
+
+    GenerationModeDialog {
+        id: generationMode
+        controlsEnabled: root.generationLaunchEnabled
+        onModeChosen: function(mode, ids, shortlist) {
+            generationTracking.expanded = true
+            generationTracking.selectedRunId = ""
+            if (shortlist) AppBridge.startShortlistedGeneration(mode)
+            else if (mode === "immediate") AppBridge.startImmediateGeneration(ids)
+            else AppBridge.startGenerationBatch(ids)
+        }
+    }
     ConfirmDialog {
         id: deleteOfferDialog
         objectName: "deleteReadyOfferDialog"
@@ -39,7 +85,7 @@ Item {
             + "\n\nL’offre, ses copies confirmées et son dossier de candidature seront effacés définitivement. Cette action est irréversible."
         confirmText: "Supprimer définitivement"
         kind: "danger"
-        confirmEnabled: !AppBridge.shutdownRequested && (AppBridge.busyJobIds || []).indexOf(targetJobId) < 0
+        confirmEnabled: !AppBridge.shutdownRequested && root.busyJobIdsSnapshot.indexOf(targetJobId) < 0
         onAccepted: AppBridge.deleteReadyOffer(targetJobId)
     }
     readonly property var documentReviewPoints: applicationData.review_points || []
@@ -104,18 +150,8 @@ Item {
     readonly property bool hasFitInsights: AppBridge.currentJob.llm_score !== null
         && AppBridge.currentJob.llm_score !== undefined
     readonly property bool hasAnalysis: Boolean(AppBridge.currentJob.has_analysis)
-    readonly property var standaloneMatchPoints: {
-        var axisPoints = []
-        if (hasAnalysis) {
-            (AppBridge.currentJob.fit_axes || []).forEach(function(axis) {
-                axisPoints = axisPoints.concat(axis.findings || [])
-            })
-        }
-        return (AppBridge.currentJob.match_reasons || []).filter(function(point) {
-            return axisPoints.indexOf(point) < 0
-        })
-    }
-    readonly property bool hasMatchInsights: standaloneMatchPoints.length > 0
+    readonly property var matchInsightPoints: AppBridge.currentJob.match_reasons || []
+    readonly property bool hasMatchInsights: hasAnalysis
     readonly property bool hasClassificationInsight: Boolean(AppBridge.currentJob.classification_summary)
     readonly property bool hasRiskInsights: (AppBridge.currentJob.risks || []).length > 0
     readonly property var orderedRiskPoints: prioritizeRiskPoints(AppBridge.currentJob.risks || [])
@@ -207,7 +243,7 @@ Item {
     }
 
     function anyJobBusy(ids) {
-        var protectedIds = AppBridge.busyJobIds || []
+        var protectedIds = root.busyJobIdsSnapshot
         return ids.some(function(id) { return protectedIds.indexOf(Number(id)) >= 0 })
     }
 
@@ -257,7 +293,10 @@ Item {
     }
     property var selectedIds: selectedRows.map(function(row) { return Number(row.id) })
     property var topLabelIds: selectedRows.filter(function(row) { return row.status !== "archived" && !row.application_id && !row.shortlisted }).map(function(row) { return Number(row.id) })
-    property var generationIds: selectedRows.filter(function(row) { return Boolean(row.can_generate) }).map(function(row) { return Number(row.id) })
+    property var generationIds: selectedRows.filter(function(row) {
+        return root.canGenerateOffer(row) && (root.isGenerationResumable(row.id)
+            || generationReservedIds.indexOf(Number(row.id)) < 0)
+    }).map(function(row) { return Number(row.id) })
     property var rescueIds: selectedRows.filter(function(row) { return row.status === "archived" }).map(function(row) { return Number(row.id) })
     property int selectedCount: selectedIds.length
     readonly property bool allVisibleSelected: {
@@ -530,6 +569,7 @@ Item {
         anchors.fill: parent
         anchors.margins: 10
         anchors.topMargin: 10 + root.topInset
+        anchors.bottomMargin: 10 + (generationTracking.visible ? generationTracking.height + 8 : 0)
         spacing: 0
         visible: !root.isNewOffersFilter
 
@@ -871,6 +911,7 @@ Item {
                         onClicked: AppBridge.rescueJobs(root.rescueIds)
                     }
                     AppButton {
+                        objectName: "offerCreateSelectionAction"
                         visible: root.generationIds.length > 0
                         text: "Créer (" + root.generationIds.length + ")"
                         iconSource: Theme.icon("sparkle")
@@ -879,8 +920,8 @@ Item {
                         iconSize: 13
                         fontPixelSize: 11
                         implicitHeight: 30
-                        enabled: root.generationIds.length > 0 && !AppBridge.shutdownRequested
-                        onClicked: AppBridge.generateApplications(root.generationIds)
+                        enabled: root.canStartGeneration(root.generationIds)
+                        onClicked: root.chooseGenerationMode(root.generationIds, false, 0)
                     }
                 }
             }
@@ -1511,6 +1552,7 @@ Item {
                                     }
                                 }
                                 Rectangle {
+                                    objectName: "offerMatchCard"
                                     visible: root.hasMatchInsights
                                     Layout.fillWidth: true
                                     implicitHeight: matchReasonsContent.implicitHeight + 24
@@ -1548,8 +1590,8 @@ Item {
                                         Repeater {
                                             objectName: "offerMatchPoints"
                                             model: root.matchPointsExpanded
-                                                ? root.standaloneMatchPoints
-                                                : root.standaloneMatchPoints.slice(0, 3)
+                                                ? root.matchInsightPoints
+                                                : root.matchInsightPoints.slice(0, 3)
                                             delegate: RowLayout {
                                                 required property var modelData
                                                 Layout.fillWidth: true
@@ -1569,11 +1611,21 @@ Item {
                                                 }
                                             }
                                         }
+                                        Text {
+                                            objectName: "offerMatchPointsEmpty"
+                                            visible: root.matchInsightPoints.length === 0
+                                            Layout.fillWidth: true
+                                            text: "Aucun point de correspondance renseigné dans cette analyse."
+                                            textFormat: Text.PlainText
+                                            color: Theme.inkMuted
+                                            font.pixelSize: root.detailMetaFontSize
+                                            wrapMode: Text.WordWrap
+                                        }
                                         AppButton {
                                             objectName: "offerMatchPointsToggle"
-                                            visible: root.standaloneMatchPoints.length > 3
+                                            visible: root.matchInsightPoints.length > 3
                                             text: root.matchPointsExpanded ? "Réduire"
-                                                : "Voir les " + (root.standaloneMatchPoints.length - 3) + " autres points"
+                                                : "Voir les " + (root.matchInsightPoints.length - 3) + " autres points"
                                             quiet: true
                                             refined: true
                                             fontPixelSize: root.detailSmallFontSize
@@ -1927,7 +1979,9 @@ Item {
                                 Item { Layout.fillWidth: true }
                             }
                             RowLayout {
-                                visible: !Boolean(root.applicationData.id) && AppBridge.currentJob.status !== "archived"
+                                visible: (!Boolean(root.applicationData.id)
+                                    || root.isGenerationResumable(AppBridge.currentJob.id))
+                                    && AppBridge.currentJob.status !== "archived"
                                 Layout.fillWidth: true
                                 spacing: 6
                                 AppButton {
@@ -1935,6 +1989,7 @@ Item {
                                     Layout.preferredWidth: Math.max(148, implicitWidth)
                                     text: AppBridge.currentJob.status === "duplicate_review" ? "Décision requise"
                                         : AppBridge.currentJob.related_application_id ? "Voir le dossier #" + AppBridge.currentJob.related_application_id
+                                        : root.isGenerationResumable(AppBridge.currentJob.id) ? "Reprendre"
                                         : Boolean(AppBridge.currentJob.can_generate) ? "Créer"
                                         : "Ouvrir l’analyse"
                                     iconSource: Theme.icon("sparkle")
@@ -1943,10 +1998,12 @@ Item {
                                     refined: true
                                     implicitHeight: 34
                                     enabled: !AppBridge.shutdownRequested && AppBridge.currentJob.status !== "duplicate_review"
+                                        && (!root.canGenerateOffer(AppBridge.currentJob)
+                                            || root.canStartGeneration([Number(AppBridge.currentJob.id)]))
                                     onClicked: {
                                         if (AppBridge.currentJob.status === "duplicate_review") return
                                         if (AppBridge.currentJob.related_application_id) AppBridge.openApplication(AppBridge.currentJob.related_application_id)
-                                        else if (AppBridge.currentJob.can_generate) AppBridge.generateApplication(AppBridge.currentJob.id)
+                                        else if (root.canGenerateOffer(AppBridge.currentJob)) root.chooseGenerationMode([Number(AppBridge.currentJob.id)], false, 0)
                                         else root.navigateRequested("analysis")
                                     }
                                 }
@@ -1971,6 +2028,9 @@ Item {
                                     Layout.minimumWidth: root.detailActionButtonWidth
                                     Layout.preferredWidth: root.detailActionButtonWidth
                                     Layout.maximumWidth: root.detailActionButtonWidth
+                                    property string documentPath: root.applicationData.status === "ready_for_form_submission"
+                                                                  ? (root.applicationData.cv_html_path || "")
+                                                                  : (root.applicationData.cv_pdf_path || "")
                                     text: "CV"
                                     iconSource: Theme.icon("document")
                                     fontPixelSize: root.detailButtonFontSize
@@ -1978,14 +2038,17 @@ Item {
                                     quiet: true
                                     iconSize: 13
                                     implicitHeight: root.detailActionButtonHeight
-                                    enabled: Boolean(root.applicationData.cv_pdf_path)
-                                    onClicked: AppBridge.openPath(root.applicationData.cv_pdf_path)
+                                    enabled: Boolean(documentPath)
+                                    onClicked: AppBridge.openPath(documentPath)
                                 }
                                 AppButton {
                                     visible: Boolean(root.applicationData.id)
                                     Layout.minimumWidth: root.detailActionButtonWidth
                                     Layout.preferredWidth: root.detailActionButtonWidth
                                     Layout.maximumWidth: root.detailActionButtonWidth
+                                    property string documentPath: root.applicationData.status === "ready_for_form_submission"
+                                                                  ? (root.applicationData.letter_html_path || "")
+                                                                  : (root.applicationData.letter_pdf_path || "")
                                     text: "Lettre"
                                     iconSource: Theme.icon("document")
                                     fontPixelSize: root.detailButtonFontSize
@@ -1993,8 +2056,8 @@ Item {
                                     quiet: true
                                     iconSize: 13
                                     implicitHeight: root.detailActionButtonHeight
-                                    enabled: Boolean(root.applicationData.letter_pdf_path)
-                                    onClicked: AppBridge.openPath(root.applicationData.letter_pdf_path)
+                                    enabled: Boolean(documentPath)
+                                    onClicked: AppBridge.openPath(documentPath)
                                 }
                                 AppButton {
                                     visible: Boolean(root.applicationData.id)
@@ -2209,21 +2272,30 @@ Item {
                 }
             }
             Item { Layout.fillWidth: true }
-            AppButton {
-                id: generationAction
-                visible: root.filterStatus === "analyzed"
-                    && (AppBridge.shortlist.ready_to_generate || 0) > 0
-                text: "Générer (" + AppBridge.shortlist.ready_to_generate + ")"
-                iconSource: Theme.icon("sparkle")
-                kind: "primary"
-                refined: true
-                iconSize: 14
-                fontPixelSize: 11
-                implicitHeight: 28
-                enabled: !AppBridge.shutdownRequested
-                onClicked: AppBridge.generateShortlistedApplications()
-            }
         }
+    }
+
+    GenerationTracking {
+        id: generationTracking
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.margins: 10
+        height: implicitHeight
+        visible: !root.isNewOffersFilter && (runs.length > 0 || Boolean(selectedRun.id)
+            || commandRunning || error.length > 0)
+        workspace: root.generationWorkspace
+        loading: AppBridge.generationWorkspaceLoading
+        operation: AppBridge.generationWorkspaceOperation || ""
+        error: AppBridge.generationWorkspaceError || ""
+        controlsEnabled: !AppBridge.shutdownRequested
+        onRefreshRequested: AppBridge.refreshGenerationWorkspace()
+        onStopRequested: AppBridge.cancelImmediateGeneration()
+        onRetryRequested: function(runId) { AppBridge.retryGenerationRun(runId) }
+        onCancelRequested: function(runId) { AppBridge.cancelGenerationRun(runId) }
+        onAbandonRequested: function(runId) { AppBridge.abandonGenerationRun(runId) }
+        onHistoryPageRequested: function(page) { AppBridge.setGenerationHistoryPage(page) }
+        onRunSelected: function(runId) { AppBridge.selectGenerationRun(runId) }
     }
 
     AnalysisPage {

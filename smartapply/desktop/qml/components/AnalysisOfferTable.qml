@@ -10,6 +10,10 @@ Item {
     property int focusedOfferId: 0
     property bool loading: false
     property bool searchActive: false
+    property bool serverSorted: false
+    property var matchingOfferIds: null
+    readonly property var selectableIds: matchingOfferIds !== null ? matchingOfferIds
+        : offers.map(function(row) { return Number(row.id) })
     property string sortKey: "published_date"
     property bool ascending: false
     property alias contentY: candidateList.contentY
@@ -43,6 +47,7 @@ Item {
         - companyWidth - locationWidth))
     readonly property var sortedOffers: {
         var rows = (offers || []).slice()
+        if (serverSorted) return rows
         var key = sortKey
         var direction = ascending ? 1 : -1
         rows.sort(function(a, b) {
@@ -63,11 +68,13 @@ Item {
     signal selectionToggled(int jobId, bool checked)
     signal visibleSelectionToggled(bool checked)
     signal offerOpened(int jobId, string status)
+    signal viewSortRequested(string key, bool ascending)
 
     function selected(jobId) { return Boolean(selectedOffers[String(jobId)]) }
     function sortBy(key) {
         if (sortKey === key) ascending = !ascending
         else { sortKey = key; ascending = true }
+        if (serverSorted) viewSortRequested(sortKey, ascending)
     }
     function dateLabel(value) {
         if (!value) return "—"
@@ -104,13 +111,14 @@ Item {
                         objectName: "analysisSelectVisible"
                         anchors.centerIn: parent
                         visible: root.selectionEnabled
-                        checked: root.offers.length > 0 && root.offers.every(function(row) {
-                            return root.selected(row.id)
+                        checked: root.selectableIds.length > 0 && root.selectableIds.every(function(jobId) {
+                            return root.selected(jobId)
                         })
-                        partial: root.offers.some(function(row) { return root.selected(row.id) })
+                        partial: root.selectableIds.some(function(jobId) { return root.selected(jobId) })
                             && !checked
-                        enabled: root.offers.length > 0
-                        Accessible.name: "Sélectionner les offres affichées"
+                        enabled: root.selectableIds.length > 0
+                        Accessible.name: root.serverSorted ? "Sélectionner toutes les offres correspondant à la recherche"
+                            : "Sélectionner les offres affichées"
                         onToggled: function(checked) { root.visibleSelectionToggled(checked) }
                     }
                 }

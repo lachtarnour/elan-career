@@ -22,6 +22,7 @@ from smartapply.pipeline.output_deletion import (
     ApplicationOutputDeletion,
     owned_application_directory,
 )
+from smartapply.pipeline.output_publication import recover_application_publication
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,15 @@ def delete_ready_offer(job_id: int) -> OfferDeletionResult:
                 (job.application for job in jobs if job.application), key=lambda app: app.id
             ):
                 locks.enter_context(application_publication(job_id, app.id))
+            application_ids = sorted(job.application.id for job in jobs if job.application)
+        # A committed publication can still retain its backup after a cleanup
+        # error. Resolve its journal before staging the dossier for deletion.
+        for application_id in application_ids:
+            recover_application_publication(application_id)
+        with session_scope() as session:
+            jobs = _load_group(session, job_id)
+            if {job.id for job in jobs} != ids:
+                raise ValueError("Les copies de cette offre ont changé. Actualisez la liste.")
             directories = {
                 job.application.id: owned_application_directory(
                     session, job.application, get_settings().output_dir

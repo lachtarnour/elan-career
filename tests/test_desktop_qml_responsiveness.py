@@ -41,6 +41,7 @@ class Bridge(QObject):
     allMatchingJobsReady = Signal("QVariantList")
     duplicatePendingOnlyChanged = Signal()
     duplicateResolutionFinished = Signal(int, bool)
+    offersDeleted = Signal("QVariantList", "QVariantList")
     loadingChanged = Signal()
     toastRequested = Signal(str, str, str)
     navigationRequested = Signal(str, int)
@@ -52,18 +53,31 @@ class Bridge(QObject):
     analysisArchivingChanged = Signal()
     analysisOffersArchived = Signal("QVariantList")
     analysisWorkspaceChanged = Signal()
+    analysisCandidatesChanged = Signal()
     analysisWorkspaceLoadingChanged = Signal()
     analysisWorkspaceOperationChanged = Signal()
+    generationWorkspaceChanged = Signal()
+    generationWorkspaceLoadingChanged = Signal()
+    generationWorkspaceOperationChanged = Signal()
+    shortlistChanged = Signal()
     profileChanged = Signal()
 
     def __init__(self):
         super().__init__()
         self.job = offer(42, 7)
         self.protected = [99]
+        self.busy_id_reads = 0
         self.closing = self.ready = False
         self.working = True
         self.maintenance_failed = False
         self.queued = self.maintenance_retries = 0
+        self.task_states = []
+        self.lane_cancellations = []
+        self.search_running = False
+        self.search_label = ""
+        self.search_requests = []
+        self.search_cancellations = 0
+        self.diagnostics_data = {"source_ready": {}}
         self.saves = []
         self.routes = []
         self.queries = []
@@ -80,6 +94,13 @@ class Bridge(QObject):
         self.analysis_archiving = False
         self.analysis_archives = []
         self.analysis_workspace = {"candidates": [], "runs": [], "active_run_id": ""}
+        self.analysis_candidates = []
+        self.analysis_candidate_reads = 0
+        self.analysis_candidate_queries = []
+        self.analysis_candidate_sorts = []
+        self.analysis_candidate_pages = []
+        self.analysis_history_pages = []
+        self.analysis_run_selections = []
         self.analysis_loading = False
         self.analysis_operation = ""
         self.analysis_error = ""
@@ -91,9 +112,25 @@ class Bridge(QObject):
         self.analysis_start_cancellations = 0
         self.analysis_retries = []
         self.analysis_cancellations = []
+        self.generation_workspace = {"runs": [], "active_run_id": "", "reserved_job_ids": []}
+        self.generation_loading = False
+        self.generation_operation = ""
+        self.generation_starts = []
+        self.generation_immediate = []
+        self.generation_shortlist = []
+        self.generation_retries = []
+        self.generation_cancellations = []
+        self.generation_abandons = []
+        self.generation_stops = 0
+        self.generation_history_pages = []
+        self.generation_run_selections = []
+        self.shortlist_data = {"ready_to_generate": 0}
 
     currentJob = Property("QVariantMap", lambda self: self.job, notify=currentJobChanged)
-    busyJobIds = Property("QVariantList", lambda self: self.protected, notify=busyJobIdsChanged)
+    @Property("QVariantList", notify=busyJobIdsChanged)
+    def busyJobIds(self):
+        self.busy_id_reads += 1
+        return self.protected
     shutdownRequested = Property(bool, lambda self: self.closing, notify=shutdownRequestedChanged)
     shutdownReady = Property(bool, lambda self: self.ready, notify=shutdownReadyChanged)
     jobs = Property("QVariantList", lambda self: self.rows, notify=jobsChanged)
@@ -110,22 +147,25 @@ class Bridge(QObject):
         {"value": "sent", "label": "Envoyée"},
         {"value": "archived", "label": "Archivées"}
     ], constant=True)
-    shortlist = Property("QVariantMap", lambda self: {"ready_to_generate": 0}, constant=True)
+    shortlist = Property("QVariantMap", lambda self: self.shortlist_data, notify=shortlistChanged)
     busy = Property(bool, lambda self: self.working, notify=busyChanged)
     maintenanceFailed = Property(bool, lambda self: self.maintenance_failed, notify=busyChanged)
     canCancel = Property(bool, lambda self: True, constant=True)
     queuedTaskCount = Property(int, lambda self: self.queued, notify=busyChanged)
+    longTaskStates = Property("QVariantList", lambda self: self.task_states, notify=busyChanged)
+    searchRunning = Property(bool, lambda self: self.search_running, notify=busyChanged)
+    searchLabel = Property(str, lambda self: self.search_label, notify=busyChanged)
     busyLabel = Property(str, lambda self: "Processing A", constant=True)
     jobsLoading = Property(bool, lambda self: self.list_loading, notify=loadingChanged)
     jobDetailLoading = Property(bool, lambda self: self.detail_loading, notify=loadingChanged)
-    shortlistTopK = Property(int, lambda self: 5, constant=True)
     analysisTopK = Property(int, lambda self: 5, constant=True)
+    shortlistTopK = Property(int, lambda self: 5, constant=True)
     duplicatePendingOnly = Property(bool, lambda self: True, notify=duplicatePendingOnlyChanged)
     profile = Property("QVariantMap", lambda self: self.profile_data, notify=profileChanged)
     defaultSearchQuery = Property(str, lambda self: default_search_query(), constant=True)
     dashboard = Property("QVariantMap", lambda self: {}, constant=True)
     activity = Property("QVariantMap", lambda self: {}, constant=True)
-    diagnostics = Property("QVariantMap", lambda self: {"source_ready": {}}, constant=True)
+    diagnostics = Property("QVariantMap", lambda self: self.diagnostics_data, notify=busyChanged)
     companies = Property("QVariantList", lambda self: [], constant=True)
     companiesLoading = Property(bool, lambda self: False, constant=True)
     companiesSaving = Property(bool, lambda self: False, constant=True)
@@ -134,9 +174,89 @@ class Bridge(QObject):
     analysisOfferLoading = Property(bool, lambda self: False, notify=analysisOfferChanged)
     analysisArchiving = Property(bool, lambda self: self.analysis_archiving, notify=analysisArchivingChanged)
     analysisWorkspace = Property("QVariantMap", lambda self: self.analysis_workspace, notify=analysisWorkspaceChanged)
+    @Property("QVariantList", notify=analysisCandidatesChanged)
+    def analysisCandidates(self):
+        self.analysis_candidate_reads += 1
+        return self.analysis_candidates
     analysisWorkspaceLoading = Property(bool, lambda self: self.analysis_loading, notify=analysisWorkspaceLoadingChanged)
     analysisWorkspaceOperation = Property(str, lambda self: self.analysis_operation, notify=analysisWorkspaceOperationChanged)
     analysisWorkspaceError = Property(str, lambda self: self.analysis_error, notify=analysisWorkspaceLoadingChanged)
+    generationWorkspace = Property("QVariantMap", lambda self: self.generation_workspace, notify=generationWorkspaceChanged)
+    generationWorkspaceLoading = Property(bool, lambda self: self.generation_loading, notify=generationWorkspaceLoadingChanged)
+    generationWorkspaceOperation = Property(str, lambda self: self.generation_operation, notify=generationWorkspaceOperationChanged)
+    generationWorkspaceError = Property(str, lambda self: "", constant=True)
+
+    @Slot(str)
+    def setAnalysisCandidateQuery(self, query):
+        self.analysis_candidate_queries.append(query)
+
+    @Slot(str, bool)
+    def setAnalysisCandidateSort(self, key, ascending):
+        self.analysis_candidate_sorts.append((key, ascending))
+
+    @Slot(int)
+    def setAnalysisCandidatePage(self, page):
+        self.analysis_candidate_pages.append(page)
+
+    @Slot(int)
+    def setAnalysisHistoryPage(self, page):
+        self.analysis_history_pages.append(page)
+
+    @Slot(str)
+    def selectAnalysisRun(self, run_id):
+        self.analysis_run_selections.append(run_id)
+
+    @Slot(int)
+    def setGenerationHistoryPage(self, page):
+        self.generation_history_pages.append(page)
+
+    @Slot(str)
+    def selectGenerationRun(self, run_id):
+        self.generation_run_selections.append(run_id)
+
+    @Slot(str)
+    def cancelTaskLane(self, lane):
+        self.lane_cancellations.append(lane)
+
+    @Slot()
+    def cancelSearch(self):
+        self.search_cancellations += 1
+
+    @Slot(str, str, "QVariantList", int, str)
+    def searchJobs(self, query, location, sources, max_results, date_posted):
+        self.search_requests.append((query, location, sources, max_results, date_posted))
+
+    @Slot("QVariantList")
+    def startGenerationBatch(self, job_ids):
+        self.generation_starts.append(job_ids)
+
+    @Slot("QVariantList")
+    def startImmediateGeneration(self, job_ids):
+        self.generation_immediate.append(job_ids)
+
+    @Slot(str)
+    def startShortlistedGeneration(self, mode):
+        self.generation_shortlist.append(mode)
+
+    @Slot(str)
+    def retryGenerationRun(self, run_id):
+        self.generation_retries.append(run_id)
+
+    @Slot(str)
+    def cancelGenerationRun(self, run_id):
+        self.generation_cancellations.append(run_id)
+
+    @Slot(str)
+    def abandonGenerationRun(self, run_id):
+        self.generation_abandons.append(run_id)
+
+    @Slot()
+    def refreshGenerationWorkspace(self):
+        pass
+
+    @Slot()
+    def cancelImmediateGeneration(self):
+        self.generation_stops += 1
 
     @Slot(int)
     def selectAnalysisOffer(self, job_id):
@@ -1536,6 +1656,92 @@ QMetaObject.invokeMethod(retry, "clicked")
 assert bridge.maintenance_retries == 1
 assert retry.property("visible") is False
 """,
+    "search_controls_depend_only_on_the_search_workflow": r"""
+bridge.diagnostics_data = {"source_ready": {"serpapi": True}}
+bridge.analysis_loading = bridge.generation_loading = True
+bridge.analysis_operation = bridge.generation_operation = "immediate"
+bridge.analysisWorkspaceLoadingChanged.emit()
+bridge.generationWorkspaceLoadingChanged.emit()
+bridge.busyChanged.emit()
+search = load_page("SearchPage.qml")
+start = search.findChild(QQuickItem, "searchStartAction")
+cancel = search.findChild(QQuickItem, "searchCancelAction")
+query = search.findChild(QQuickItem, "searchQuery")
+query.setProperty("text", "Custom AI role")
+search.findChild(QQuickItem, "searchLocation").setProperty("text", "Paris")
+assert start.property("enabled") is True
+assert cancel.property("visible") is False
+QMetaObject.invokeMethod(start, "clicked")
+assert len(bridge.search_requests) == 1
+assert bridge.search_requests[0][:3] == ("Custom AI role", "Paris", ["serpapi"])
+bridge.search_running = True
+bridge.search_label = "Recherche France Travail · 20 offres reçues"
+bridge.busyChanged.emit()
+assert start.property("enabled") is False
+assert cancel.property("visible") is True
+assert search.findChild(QQuickItem, "searchTaskProgress").property("text") == bridge.search_label
+invoke(search, "runSearch")
+assert len(bridge.search_requests) == 1
+QMetaObject.invokeMethod(cancel, "clicked")
+assert bridge.search_cancellations == 1 and bridge.lane_cancellations == []
+assert query.property("text") == "Custom AI role"
+bridge.search_running = False
+bridge.busyChanged.emit()
+assert start.property("enabled") is True
+bridge.closing = True
+bridge.shutdownRequestedChanged.emit()
+assert start.property("enabled") is False and cancel.property("visible") is False
+""",
+    "parallel_workflows_show_separate_progress_and_stop_actions": r"""
+bridge.task_states = [
+    {"lane": "search", "label": "Recherche France Travail", "queued": 0, "cancellable": True},
+    {"lane": "analysis", "label": "Analyse de 3 offres", "queued": 0, "cancellable": True},
+    {"lane": "generation", "label": "Création CV et lettre", "queued": 1, "cancellable": True},
+]
+bridge.busyChanged.emit()
+engine.load(QUrl.fromLocalFile(str(qml / "Main.qml")))
+assert engine.rootObjects()
+window = engine.rootObjects()[0]
+notification = window.findChild(QQuickItem, "busyTaskNotification")
+wait_until(lambda: notification.property("opacity") >= 0.99)
+assert notification.height() > 90
+workspace_pages = window.findChild(QQuickItem, "pages")
+assert notification.mapToScene(QPointF()).y() < 100
+bridge.toastRequested.emit("Information", "Un message qui accompagne les traitements en cours.", "warning")
+toast = window.findChild(QQuickItem, "toast")
+wait_until(lambda: toast.property("opacity") >= 0.99)
+for width, height in [(1480, 920), (1320, 820)]:
+    window.setWidth(width)
+    window.setHeight(height)
+    app.processEvents()
+    progress_bottom = notification.mapToScene(QPointF(0, notification.height())).y()
+    toast_top = toast.mapToScene(QPointF()).y()
+    toast_bottom = toast.mapToScene(QPointF(0, toast.height())).y()
+    assert progress_bottom < toast_top
+    assert toast_bottom < workspace_pages.mapToScene(QPointF()).y()
+    assert abs(notification.mapToScene(QPointF(notification.width(), 0)).x() - (width - 28)) < 2
+    assert abs(toast.mapToScene(QPointF(toast.width(), 0)).x() - (width - 28)) < 2
+QMetaObject.invokeMethod(window.findChild(QQuickItem, "toastDismiss"), "clicked")
+wait_until(lambda: not toast.property("visible"))
+assert notification.mapToScene(QPointF(0, notification.height())).y() < workspace_pages.mapToScene(QPointF()).y()
+assert not window.findChild(QQuickItem, "cancelCurrentTaskAction").property("visible")
+for lane in ("search", "analysis", "generation"):
+    text = visual_item(notification, "taskLaneProgress-" + lane)
+    assert text is not None and text.property("visible")
+    assert ("en attente" in text.property("text")) == (lane == "generation")
+    button = visual_item(notification, "cancelTaskLane-" + lane)
+    assert button is not None and button.property("visible")
+QMetaObject.invokeMethod(visual_item(notification, "cancelTaskLane-analysis"), "clicked")
+assert bridge.lane_cancellations == ["analysis"]
+assert visual_item(notification, "cancelTaskLane-search").property("visible")
+assert visual_item(notification, "cancelTaskLane-generation").property("visible")
+if os.environ.get("ELAN_PARALLEL_SCREENSHOT"):
+    window.grabWindow().save(os.environ["ELAN_PARALLEL_SCREENSHOT"])
+bridge.closing = True
+bridge.shutdownRequestedChanged.emit()
+wait_until(lambda: visual_item(notification, "cancelTaskLane-search") is None)
+assert window.findChild(QQuickItem, "shutdownRetryNotesAction").property("visible")
+""",
 }
 
 _SCENARIOS["minimum_ai_score_uses_space_above_toolbar_without_moving_buttons"] = r"""
@@ -1845,7 +2051,20 @@ assert fit.mapToScene(QPointF(0, fit.height())).y() < tasks.mapToScene(QPointF(0
 if summary.property("inlineEvaluation"):
     metadata = summary.findChild(QQuickItem, "offerAnalysisMetadata")
     assert fit.mapToScene(QPointF(fit.width(), 0)).x() <= metadata.mapToScene(QPointF(0, 0)).x()
-assert page.property("standaloneMatchPoints").toVariant() == ["Une autre correspondance utile."]
+assert page.property("matchInsightPoints") == [
+    "Les projets ML appuient les missions.", "Une autre correspondance utile."
+]
+bridge.job["match_reasons"] = ["Les projets ML appuient les missions."]
+bridge.currentJobChanged.emit()
+app.processEvents()
+assert page.findChild(QQuickItem, "offerMatchCard").property("visible")
+assert page.findChild(QQuickItem, "offerMatchPoints").property("count") == 1
+bridge.job["match_reasons"] = []
+bridge.currentJobChanged.emit()
+app.processEvents()
+assert page.findChild(QQuickItem, "offerMatchCard").property("visible")
+assert page.findChild(QQuickItem, "offerMatchPoints").property("count") == 0
+assert visual_item(page, "offerMatchPointsEmpty").property("visible")
 details = summary.findChild(QQuickItem, "offerFitDetails")
 assert not details.property("visible")
 assert QMetaObject.invokeMethod(fit.findChild(QObject, "offerFitDetailsAction"), "clicked")
@@ -1950,6 +2169,7 @@ for axis in ("missions", "essentials", "responsibilities"):
 
 _SCENARIOS["fit_insight_points_are_brief_by_default_and_expand_without_loss"] = r"""
 bridge.job.update({
+    "has_analysis": True, "llm_score": 0.7,
     "match_reasons": ["Point positif " + str(i) + " : " + "preuve détaillée " * 20
                       for i in range(5)],
     "risks": [
@@ -1987,6 +2207,254 @@ assert not page.property("matchPointsExpanded") and not page.property("riskPoint
 """
 
 
+_SCENARIOS["generation_modes_snapshot_selection_and_respect_reservations"] = r"""
+host = QQuickWindow()
+host.resize(1400, 850)
+page.setParentItem(host.contentItem())
+host.show()
+bridge.protected = []
+bridge.rows = [bridge.job, *[
+    {**offer(i, 0), "status": "analyzed", "can_generate": True, "application": {}}
+    for i in (43, 44)
+]]
+bridge.jobsChanged.emit()
+invoke(page, "setSelected", 43, True)
+bulk = page.findChild(QQuickItem, "offerCreateSelectionAction")
+dialog = page.findChild(QObject, "generationModeDialog")
+assert bulk.property("enabled") and bulk.property("text") == "Créer (1)"
+invoke(bulk, "clicked")
+assert dialog.property("jobIds").toVariant() == [43]
+invoke(page, "setSelected", 44, True)
+invoke(dialog, "choose", "batch")
+assert bridge.generation_starts == [[43]]
+assert bridge.job["id"] == 42 and notes.property("text") == "persisted"
+invoke(bulk, "clicked")
+invoke(dialog, "choose", "immediate")
+assert bridge.generation_immediate == [[43, 44]]
+bridge.generation_workspace["reserved_job_ids"] = [43]
+bridge.generationWorkspaceChanged.emit()
+assert page.property("generationIds").toVariant() == [44]
+bridge.protected = [44]
+bridge.busyJobIdsChanged.emit()
+assert not bulk.property("enabled")
+bridge.protected = []
+bridge.busyJobIdsChanged.emit()
+bridge.job = bridge.rows[1]
+bridge.currentJobChanged.emit()
+app.processEvents()
+primary = page.findChild(QQuickItem, "offerPrimaryAction")
+assert primary.property("text") == "Créer" and not primary.property("enabled")
+bridge.generation_workspace["reserved_job_ids"] = []
+bridge.generationWorkspaceChanged.emit()
+assert primary.property("enabled")
+invoke(primary, "clicked")
+assert dialog.property("jobIds").toVariant() == [43]
+invoke(dialog, "choose", "immediate")
+assert bridge.generation_immediate[-1] == [43]
+bridge.shortlist_data = {"ready_to_generate": 2}
+bridge.shortlistChanged.emit()
+top = page.findChild(QQuickItem, "generationAction")
+assert top is None
+assert not bridge.generation_shortlist
+host.hide()
+page.setParentItem(None)
+host.deleteLater()
+"""
+
+_SCENARIOS["generation_resumes_one_offer_in_another_mode_with_empty_reservation"] = r"""
+host = QQuickWindow()
+host.resize(1400, 850)
+page.setParentItem(host.contentItem())
+host.show()
+bridge.job = {**bridge.job, "status": "analyzed", "can_generate": False,
+    "application": {"id": 7, "notes": "persisted"}}
+bridge.rows = [bridge.job, {**offer(43, 0), "status": "analyzed", "can_generate": True,
+    "application": {}}]
+bridge.currentJobChanged.emit()
+bridge.jobsChanged.emit()
+notes.setProperty("text", "Draft preserved during per-offer resume")
+bridge.protected = [42, 43]
+bridge.busyJobIdsChanged.emit()
+bridge.generation_workspace = {"runs": [], "reserved_job_ids": [42, 43],
+    "resumable_job_ids": [42]}
+bridge.generationWorkspaceChanged.emit()
+app.processEvents()
+primary = page.findChild(QQuickItem, "offerPrimaryAction")
+assert primary.property("visible") and primary.property("enabled")
+assert primary.property("text") == "Reprendre"
+dialog = page.findChild(QObject, "generationModeDialog")
+invoke(primary, "clicked")
+invoke(dialog, "choose", "batch")
+assert bridge.generation_starts == [[42]]
+assert bridge.job["id"] == 42 and notes.property("text") == "Draft preserved during per-offer resume"
+invoke(page, "setSelected", 42, True)
+invoke(page, "setSelected", 43, True)
+assert page.property("generationIds").toVariant() == [42]
+bulk = page.findChild(QQuickItem, "offerCreateSelectionAction")
+assert bulk.property("enabled")
+invoke(bulk, "clicked")
+invoke(dialog, "choose", "immediate")
+assert bridge.generation_immediate == [[42]]
+# Once this checkpoint starts advancing again, ordinary durable claims apply.
+bridge.generation_workspace["resumable_job_ids"] = []
+bridge.generationWorkspaceChanged.emit()
+app.processEvents()
+assert page.property("generationIds").toVariant() == []
+assert not primary.property("visible")
+assert notes.property("text") == "Draft preserved during per-offer resume"
+host.hide()
+page.setParentItem(None)
+host.deleteLater()
+"""
+
+_SCENARIOS["generation_tracking_reuses_stages_without_resetting_notes"] = r"""
+host = QQuickWindow()
+host.resize(1400, 850)
+page.setParentItem(host.contentItem())
+host.show()
+notes.setProperty("text", "Local draft retained while generation advances")
+run = {
+    "id": "gen-1", "kind": "generation", "mode": "immediate", "total": 2,
+    "generated": 0, "status": "in_progress", "is_active": True,
+    "phase": "letter", "phase_label": "Rédaction de la lettre", "can_cancel": True,
+    "phase_batches": [
+        {"phase": "cv_selection", "label": "Sélection du CV", "status": "completed", "total": 2, "completed": 2},
+        {"phase": "letter", "label": "Lettre", "status": "in_progress", "total": 2, "completed": 1},
+        {"phase": "render", "label": "Documents", "status": "waiting", "total": 2},
+    ],
+}
+bridge.generation_workspace = {"runs": [run], "active_run_id": "gen-1", "active_run_count": 1}
+bridge.generationWorkspaceChanged.emit()
+tracking = page.findChild(QQuickItem, "generationTrackingBand")
+assert tracking.property("visible")
+invoke(page.findChild(QQuickItem, "generationTrackingToggle"), "clicked")
+invoke(tracking.findChild(QQuickItem, "analysisRunDetailsToggle"), "clicked")
+app.processEvents()
+assert tracking.findChild(QQuickItem, "analysisRunTitle").property("text") == "Création de 2 offres"
+assert visual_item(tracking, "analysisPhaseTitle_1").property("text") == "Sélection du CV"
+assert visual_item(tracking, "analysisPhaseTitle_2").property("text") == "Lettre"
+assert visual_item(tracking, "analysisPhaseMarker_1").property("finished")
+assert visual_item(tracking, "analysisPhaseMarker_2").property("active")
+assert notes.property("text") == "Local draft retained while generation advances"
+assert bridge.job["id"] == 42
+bridge.generation_operation = "immediate"
+bridge.generation_loading = True
+bridge.generationWorkspaceOperationChanged.emit()
+bridge.generationWorkspaceLoadingChanged.emit()
+invoke(page.findChild(QQuickItem, "generationStopImmediateAction"), "clicked")
+assert bridge.generation_stops == 1
+run.update({"status": "paused", "status_label": "Arrêté · reprise possible",
+    "is_active": False, "can_cancel": False, "can_retry": True, "can_abandon": True})
+bridge.generation_operation = "refresh"
+bridge.generation_loading = True
+bridge.generationWorkspaceChanged.emit()
+bridge.generationWorkspaceOperationChanged.emit()
+bridge.generationWorkspaceLoadingChanged.emit()
+app.processEvents()
+retry = tracking.findChild(QQuickItem, "analysisRetryAction")
+assert not retry.property("enabled")
+assert tracking.findChild(QQuickItem, "generationTrackingStatus").property("text") == "Actualisation du suivi…"
+assert tracking.findChild(QQuickItem, "generationAbandonAction").property("enabled")
+bridge.generation_operation = ""
+bridge.generation_loading = False
+bridge.generationWorkspaceOperationChanged.emit()
+bridge.generationWorkspaceLoadingChanged.emit()
+app.processEvents()
+assert retry.property("enabled")
+invoke(tracking.findChild(QQuickItem, "analysisRetryAction"), "clicked")
+assert bridge.generation_retries == ["gen-1"]
+invoke(tracking.findChild(QQuickItem, "generationAbandonAction"), "clicked")
+assert bridge.generation_abandons == []
+invoke(tracking.findChild(QObject, "generationAbandonConfirm"), "accept")
+assert bridge.generation_abandons == ["gen-1"]
+assert notes.property("text") == "Local draft retained while generation advances"
+host.hide()
+page.setParentItem(None)
+host.deleteLater()
+"""
+
+
+_SCENARIOS["busy_id_snapshots_are_materialized_once_and_keep_context"] = r"""
+bridge.job = {**bridge.job, "duplicate_candidate": offer(43, 8)}
+bridge.currentJobChanged.emit()
+bridge.analysis_workspace = {"candidates": [
+    {"id": i, "title": "AI Engineer", "company": "Example"} for i in (101, 102)
+], "runs": []}
+bridge.analysisWorkspaceChanged.emit()
+analysis = page.findChild(QQuickItem, "analysisPage")
+duplicates = load_page("DuplicatesPage.qml")
+bridge.selectAnalysisOffer(101)
+invoke(analysis, "setSelected", 101, True)
+invoke(analysis, "setSelected", 102, True)
+invoke(page, "setSelected", 42, True)
+delete_confirm = page.findChild(QObject, "deleteReadyOfferDialog")
+delete_confirm.setProperty("targetJobId", 42)
+duplicate_confirm = duplicates.findChild(QQuickItem, "duplicateConfirmAction")
+analysis_bulk = analysis.findChild(QQuickItem, "analysisArchiveSelectionAction")
+analysis_single = analysis.findChild(QQuickItem, "analysisArchiveOfferAction")
+notes.setProperty("text", "Draft retained through reservation updates")
+viewport = page.findChild(QQuickItem, "offerDetailViewport")
+viewport.setProperty("contentY", 200)
+context = (bridge.job["id"], page.property("selectedIds").toVariant(),
+    analysis.property("selectedIds").toVariant(), viewport.property("contentY"),
+    list(bridge.queries), list(bridge.selections))
+
+def update_busy(ids):
+    bridge.protected = ids
+    bridge.busy_id_reads = 0
+    bridge.busyJobIdsChanged.emit()
+    app.processEvents()
+    # Jobs, its embedded Analysis page (currently hidden), and Duplicates
+    # each read exactly once. Neither the ID count nor the guards multiply it.
+    assert bridge.busy_id_reads == 3, (len(ids), bridge.busy_id_reads)
+    for consumer in (page, analysis, duplicates):
+        assert consumer.property("busyJobIdsSnapshot").toVariant() == ids
+    assert context == (bridge.job["id"], page.property("selectedIds").toVariant(),
+        analysis.property("selectedIds").toVariant(), viewport.property("contentY"),
+        list(bridge.queries), list(bridge.selections))
+    assert notes.property("text") == "Draft retained through reservation updates"
+
+for count in (0, 1, 100, 600, 2000):
+    update_busy(list(range(10_000, 10_000 + count)))
+    assert not page.property("selectedJobBusy")
+    assert not page.property("duplicateCandidateBusy")
+    assert not duplicates.property("selectedPairBusy")
+    assert delete_confirm.property("confirmEnabled")
+    assert duplicate_confirm.property("enabled")
+    assert analysis_bulk.property("enabled") and analysis_single.property("enabled")
+
+# Repeated actions and selection changes reuse the materialized snapshot.
+bridge.busy_id_reads = 0
+for i in range(20):
+    invoke(page, "anyJobBusy", [42, 43, 100 + i])
+    invoke(page, "canStartGeneration", list(range(100, 200)))
+    invoke(analysis, "canArchive", 100 + i)
+invoke(page, "setSelected", 42, False)
+invoke(page, "setSelected", 42, True)
+invoke(analysis, "setSelected", 102, False)
+invoke(analysis, "setSelected", 102, True)
+assert bridge.busy_id_reads == 0
+
+# In-place backing-list changes cannot alter a snapshot before notification.
+bridge.protected.append(42)
+assert 42 not in page.property("busyJobIdsSnapshot").toVariant()
+assert not page.property("selectedJobBusy")
+update_busy(list(bridge.protected))
+assert page.property("selectedJobBusy") and duplicates.property("selectedPairBusy")
+assert not delete_confirm.property("confirmEnabled")
+assert not duplicate_confirm.property("enabled")
+update_busy([43, 101])
+assert not page.property("selectedJobBusy") and page.property("duplicateCandidateBusy")
+assert duplicates.property("selectedPairBusy")
+assert not analysis_bulk.property("enabled") and not analysis_single.property("enabled")
+update_busy([])
+assert not page.property("selectedJobBusy") and not page.property("duplicateCandidateBusy")
+assert not duplicates.property("selectedPairBusy")
+assert delete_confirm.property("confirmEnabled") and duplicate_confirm.property("enabled")
+assert analysis_bulk.property("enabled") and analysis_single.property("enabled")
+"""
+
+
 @pytest.mark.parametrize("scenario", _SCENARIOS)
 def test_qml_remains_usable_and_preserves_notes(scenario):
     qml = Path(__file__).resolve().parent.parent / "smartapply/desktop/qml"
@@ -2010,7 +2478,7 @@ def test_qml_remains_usable_and_preserves_notes(scenario):
 def test_analysis_qml_uses_real_bridge_with_isolated_runtime():
     """Exercise Qt property/slot wiring using the real service and local journal."""
     qml = Path(__file__).resolve().parent.parent / "smartapply/desktop/qml"
-    script = r'''
+    script = r"""
 import os
 import socket
 import sys
@@ -2082,6 +2550,7 @@ service = DesktopService()
 # The progress fixture is local; the actual controller, worker, presentation and
 # DesktopBridge still run. A remote coordinator cannot touch this fake journal.
 service.sync_analysis_batches = service.analysis_workspace
+service.sync_analysis_batches_view = service.analysis_workspace_view
 bridge = DesktopBridge(service)
 engine = QQmlApplicationEngine()
 warnings = []
@@ -2110,17 +2579,17 @@ def ready():
         and page.property("selectedIds") is not None
         and view is not None and view.property("count") == 29
         and counts is not None and counts.property("text") == "1 / 2 demandes traitées"
-        and not bridge.analysisWorkspaceLoading and len(bridge.analysisWorkspace["candidates"]) == 29)
+        and not bridge.analysisWorkspaceLoading and len(bridge.analysisCandidates) == 29)
 wait_until(ready)
 analysis = window.findChild(QQuickItem, "analysisPage")
 assert analysis.findChild(QQuickItem, "analysisCandidateList").property("count") == 29
-assert len(bridge.analysisWorkspace["runs"][0]["items"]) == 2
+assert len(bridge.analysisWorkspace["selected_run"]["items"]) == 2
 assert analysis.findChild(QQuickItem, "analysisCompanyHeader") is not None
 assert not analysis.findChild(QQuickItem, "analysisStartBatchAction").property("enabled")
 assert analysis.findChild(QQuickItem, "analysisLotTab") is None
 assert analysis.findChild(QQuickItem, "analysisCandidateList").property("count") == 29
 assert not analysis.findChild(QQuickItem, "analysisStartBatchAction").property("enabled")
-first_available = bridge.analysisWorkspace["candidates"][0]["id"]
+first_available = bridge.analysisCandidates[0]["id"]
 analysis.setProperty("selectedOffers", {str(first_available): True})
 app.processEvents()
 wait_until(lambda: analysis.findChild(QQuickItem, "analysisStartBatchAction").property("enabled")
@@ -2148,7 +2617,7 @@ wait_until(lambda: bridge.shutdownReady)
 engine.deleteLater()
 app.sendPostedEvents(None, QEvent.DeferredDelete)
 app.processEvents()
-'''
+"""
     result = subprocess.run(
         [sys.executable, "-c", script, str(qml)],
         cwd=qml.parents[2],

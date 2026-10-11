@@ -153,7 +153,7 @@ def test_analysis_preview_reads_only_latest_offer_without_changing_offers(make_b
     assert not bridge.busy
     bridge._analysis_controller._loaded(workspace(active=True))
     assert bridge.analysisOffer["id"] == 9 and not bridge.analysisOfferLoading
-    bridge._read_pool.finish_next()
+    assert not bridge._read_pool.pending  # Progress alone does not reload the offer body.
     assert bridge.currentJob == original
 
 
@@ -219,7 +219,7 @@ def test_analysis_archive_failure_keeps_selection_and_can_be_retried(make_bridge
     assert bridge.analysisArchiving and len(bridge._mutation_pool.pending) == 1
 
 
-def test_analysis_worker_preserves_offer_browser_and_global_busy(make_bridge):
+def test_analysis_worker_preserves_offer_browser_and_reports_own_activity(make_bridge):
     bridge = make_bridge()
     bridge._selected_job_id = 42
     bridge._current_job = {"id": 42, "notes": "A local draft"}
@@ -230,7 +230,9 @@ def test_analysis_worker_preserves_offer_browser_and_global_busy(make_bridge):
     bridge._jobs_model.modelReset.connect(lambda: resets.append(True))
     bridge.busyChanged.connect(lambda: busy_changes.append(True))
     bridge.startAnalysisBatch([42])
-    assert bridge.analysisWorkspaceLoading and not bridge.busy
+    assert bridge.analysisWorkspaceLoading and bridge.busy
+    assert [state["lane"] for state in bridge.longTaskStates] == ["analysis"]
+    assert not bridge.searchRunning
     assert bridge.analysisWorkspaceOperation == "start"
     assert len(bridge._analysis_controller._pool.pending) == 1
     assert bridge._thread_pool.pending == [] and bridge._read_pool.pending == []
@@ -238,7 +240,8 @@ def test_analysis_worker_preserves_offer_browser_and_global_busy(make_bridge):
     assert bridge.currentJob == original and bridge._selected_job_id == 42
     assert bridge._job_search == "Python"
     assert bridge._jobs_model.rowCount() == 1
-    assert resets == [] and busy_changes == []
+    assert resets == [] and busy_changes
+    assert not bridge.busy and bridge.longTaskStates == []
     assert not bridge.analysisWorkspaceLoading
     assert bridge.analysisWorkspaceOperation == ""
 
@@ -250,11 +253,13 @@ def test_immediate_analysis_uses_its_own_worker_and_reports_completion(make_brid
     bridge._refresh_workflow = lambda: None
     bridge.startImmediateAnalysis([42])
     assert bridge.analysisWorkspaceOperation == "immediate"
-    assert not bridge.busy
+    assert bridge.busy and not bridge.searchRunning
+    assert [state["lane"] for state in bridge.longTaskStates] == ["analysis"]
     bridge.cancelImmediateAnalysis()
     assert bridge._analysis_controller._pool.pending[0].cancel_requested
     bridge._analysis_controller._pool.finish_next()
     assert bridge.analysisWorkspaceOperation == ""
+    assert not bridge.busy
     assert notifications == [("Analyse immédiate terminée", "1 offre analysée.", "success")]
 
 
@@ -284,11 +289,16 @@ def test_stop_during_batch_preparation_cancels_a_run_created_in_the_same_worker(
 def test_startup_resumes_monitoring_without_opening_analysis_page(make_bridge):
     calls = []
     bridge = make_bridge(startup_sync=lambda: calls.append("sync") or workspace(active=True))
+    bridge.service.analysis_workspace = lambda: calls.append("read") or workspace(active=True)
     assert bridge._active_route == "dashboard"
     QCoreApplication.instance().processEvents()
     assert len(bridge._analysis_controller._pool.pending) == 1
     bridge._analysis_controller._pool.finish_next()
-    assert calls == ["sync"] and bridge.analysisWorkspace["active_run_id"] == "run-1"
+    assert calls == ["read"] and bridge.analysisWorkspace["active_run_id"] == "run-1"
+    QCoreApplication.instance().processEvents()
+    assert len(bridge._analysis_controller._pool.pending) == 1
+    bridge._analysis_controller._pool.finish_next()
+    assert calls == ["read", "sync"] and bridge.analysisWorkspace["active_run_id"] == "run-1"
     assert bridge._analysis_controller._timer.interval() == 120_000
     assert bridge._analysis_controller._timer.isActive()
     assert not bridge.busy

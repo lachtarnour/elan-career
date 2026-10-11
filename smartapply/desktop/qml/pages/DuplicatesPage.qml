@@ -23,8 +23,12 @@ Item {
     readonly property int visibleRelationCount: visibleRows.length
     property var selectedOffer: AppBridge.currentJob || ({})
     property var candidate: selectedOffer.duplicate_candidate || ({})
-    readonly property bool selectedPairBusy: (AppBridge.busyJobIds || []).indexOf(Number(selectedId)) >= 0
-        || (AppBridge.busyJobIds || []).indexOf(Number(candidate.id || 0)) >= 0
+    readonly property var busyJobIdsSnapshot: {
+        var ids = AppBridge.busyJobIds || []
+        return ids.slice()
+    }
+    readonly property bool selectedPairBusy: busyJobIdsSnapshot.indexOf(Number(selectedId)) >= 0
+        || busyJobIdsSnapshot.indexOf(Number(candidate.id || 0)) >= 0
     property int displayedJobId: 0
     property bool hasSelection: Boolean(selectedOffer.id) && Boolean(candidate.id)
     property int decisionJobId: 0

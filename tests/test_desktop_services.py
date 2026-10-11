@@ -608,7 +608,7 @@ def test_archived_application_without_offer_marker_still_shows_archive_reason(is
     assert detail is not None
     assert detail.status == JobStatus.ARCHIVED
     assert detail.archive_sub_label == ""
-    assert detail.archive_reasons == ()
+    assert detail.archive_reasons == ("Raison d’archivage non enregistrée",)
 
 
 @pytest.mark.parametrize(
@@ -1910,7 +1910,8 @@ def test_search_collects_sources_in_parallel_then_persists_serially(
                 job_ids=[len(phase_calls)],
             )
 
-        def filter_pending(self, *, job_ids=None):
+        def filter_pending(self, *, job_ids=None, cancellable=True):
+            assert cancellable is False
             phase_calls.append(("filter", list(job_ids or [])))
 
     monkeypatch.setattr("smartapply.pipeline.Pipeline", FakePipeline)
