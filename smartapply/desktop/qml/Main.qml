@@ -25,7 +25,10 @@ ApplicationWindow {
     color: Theme.canvas
     font.family: Theme.fontFamily
     Component.onCompleted: AppBridge.setActiveRoute(currentRoute)
-    onCurrentRouteChanged: AppBridge.setActiveRoute(currentRoute)
+    onCurrentRouteChanged: {
+        if (currentRoute !== "jobs" || jobsFilterStatus !== "scraped")
+            AppBridge.setActiveRoute(currentRoute)
+    }
     onClosing: function(event) {
         event.accepted = AppBridge.shutdownReady
         if (!event.accepted) AppBridge.requestShutdown()
@@ -39,8 +42,8 @@ ApplicationWindow {
     property bool dashboardLoaded: true
     property bool searchLoaded: false
     property bool duplicatesLoaded: false
-    property bool analysisLoaded: false
     property bool jobsLoaded: false
+    property bool jobsRefreshDeferred: false
     property bool companiesLoaded: false
     property bool manualLoaded: false
     property bool profileLoaded: false
@@ -52,16 +55,15 @@ ApplicationWindow {
         {title: "Accueil", icon: Theme.icon("home"), route: "dashboard"},
         {title: "Recherche", icon: Theme.icon("search"), route: "search"},
         {title: "Doublons", icon: Theme.icon("files"), route: "duplicates"},
-        {title: "Analyse", icon: Theme.icon("analysis"), route: "analysis"},
         {title: "Offres", icon: Theme.icon("briefcase"), route: "jobs"},
         {title: "Entreprises", icon: Theme.icon("database"), route: "companies"},
-        {title: "Ajouter une offre", icon: Theme.icon("plus"), route: "manual"},
+        {title: "Nouvelle offre", icon: Theme.icon("plus"), route: "manual"},
         {title: "Profil", icon: Theme.icon("user"), route: "profile"},
         {title: "Réglages", icon: Theme.icon("settings"), route: "settings"}
     ]
 
     function routeIndex(route) {
-        var routes = ["dashboard", "search", "duplicates", "analysis", "jobs", "companies", "manual", "profile", "settings"]
+        var routes = ["dashboard", "search", "duplicates", "jobs", "companies", "manual", "profile", "settings"]
         var value = routes.indexOf(routePage(route))
         return value < 0 ? 0 : value
     }
@@ -83,11 +85,14 @@ ApplicationWindow {
         if (page === "dashboard") AppBridge.refreshDashboard()
         if (page === "companies") AppBridge.loadCompanies()
         if (page === "duplicates") AppBridge.loadJobs("", "duplicate_review", "duplicate_confidence", false)
-        if (page === "analysis") AppBridge.refreshAnalysisWorkspace()
         if (page === "jobs") {
             if (jobsLoader.item) {
+                jobsRefreshDeferred = false
+                AppBridge.setActiveRoute(jobsFilterStatus === "scraped" ? "analysis" : "jobs")
                 jobsLoader.item.refreshOffers(requestedJobId)
                 requestedJobId = 0
+            } else {
+                jobsRefreshDeferred = true
             }
         }
         if (page === "profile") AppBridge.refreshProfile()
@@ -99,7 +104,6 @@ ApplicationWindow {
         if (page === "dashboard") dashboardLoaded = true
         else if (page === "search") searchLoaded = true
         else if (page === "duplicates") duplicatesLoaded = true
-        else if (page === "analysis") analysisLoaded = true
         else if (page === "jobs") jobsLoaded = true
         else if (page === "companies") companiesLoaded = true
         else if (page === "manual") manualLoaded = true
@@ -110,9 +114,14 @@ ApplicationWindow {
     function navigate(route, selectedId) {
         var page = routePage(route)
         var status = routeStatus(route)
-        if (page === "jobs" && status === "scraped") {
-            route = "analysis"
-            page = "analysis"
+        if (page === "analysis") {
+            route = "jobs?status=scraped"
+            page = "jobs"
+            status = "scraped"
+        }
+        if (page === "jobs" && status === "duplicate_review") {
+            route = "duplicates"
+            page = "duplicates"
             status = ""
         }
         requestedJobId = page === "jobs" ? Number(selectedId || 0) : 0
@@ -173,13 +182,12 @@ ApplicationWindow {
                 anchors.bottomMargin: 16
                 spacing: 5
 
-                RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Accueil"; compactText: "Accueil"; iconSource: Theme.icon("home"); selected: window.currentRoute === "dashboard"; onClicked: window.navigate("dashboard") }
+                RailItem { Layout.topMargin: 10; Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Accueil"; compactText: "Accueil"; iconSource: Theme.icon("home"); selected: window.currentRoute === "dashboard"; onClicked: window.navigate("dashboard") }
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Recherche"; compactText: "Recherche"; iconSource: Theme.icon("search"); selected: window.currentRoute === "search"; onClicked: window.navigate("search") }
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Doublons"; compactText: "Doublons"; iconSource: Theme.icon("files"); selected: window.currentRoute === "duplicates"; onClicked: window.navigate("duplicates") }
-                RailItem { objectName: "analysisNavigation"; Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Analyse"; compactText: "Analyse"; iconSource: Theme.icon("analysis"); selected: window.currentRoute === "analysis"; onClicked: window.navigate("analysis") }
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Offres"; compactText: "Offres"; iconSource: Theme.icon("briefcase"); selected: window.currentRoute === "jobs"; onClicked: window.navigate("jobs") }
                 RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Entreprises"; compactText: "Sociétés"; iconSource: Theme.icon("database"); selected: window.currentRoute === "companies"; onClicked: window.navigate("companies") }
-                RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Ajouter une offre"; compactText: "Ajouter"; iconSource: Theme.icon("plus"); selected: window.currentRoute === "manual"; onClicked: window.navigate("manual") }
+                RailItem { Layout.fillWidth: window.expandedNavigation; Layout.alignment: Qt.AlignHCenter; expanded: window.expandedNavigation; text: "Nouvelle offre"; compactText: "Nouvelle"; iconSource: Theme.icon("plus"); selected: window.currentRoute === "manual"; onClicked: window.navigate("manual") }
 
                 Item { Layout.fillHeight: true }
 
@@ -251,10 +259,11 @@ ApplicationWindow {
                     anchors.fill: parent
                     anchors.leftMargin: 28
                     anchors.rightMargin: 28
-                    // Keep the page content below the native macOS titlebar
-                    // and add a small breathing space shared by every page.
-                    // The window background still extends edge-to-edge.
+                    // Offers uses the space above its toolbar for the IA
+                    // threshold. Its inner top inset keeps the toolbar in
+                    // the same window position as the other pages.
                     anchors.topMargin: Math.max(32, window.SafeArea.margins.top + 8)
+                        - (window.currentRoute === "jobs" ? 28 : 0)
                     anchors.bottomMargin: 28
                     transform: Translate { x: window.pageOffset }
                     currentIndex: 0
@@ -266,7 +275,7 @@ ApplicationWindow {
                     Loader {
                         active: window.searchLoaded
                         asynchronous: true
-                        sourceComponent: Component { SearchPage { onNavigateRequested: function(route) { window.navigate(route) } } }
+                        sourceComponent: Component { SearchPage { } }
                     }
                     Loader {
                         active: window.duplicatesLoaded
@@ -274,24 +283,19 @@ ApplicationWindow {
                         sourceComponent: Component { DuplicatesPage { onNavigateRequested: function(route) { window.navigate(route) } } }
                     }
                     Loader {
-                        active: window.analysisLoaded
-                        asynchronous: true
-                        sourceComponent: Component {
-                            AnalysisPage {
-                                onNavigateRequested: function(route, selectedId) { window.navigate(route, selectedId) }
-                            }
-                        }
-                    }
-                    Loader {
                         id: jobsLoader
                         active: window.jobsLoaded
                         asynchronous: true
-                        onLoaded: if (window.currentRoute === "jobs") window.refreshRoute("jobs")
+                        onLoaded: if (window.jobsRefreshDeferred && window.currentRoute === "jobs") window.refreshRoute("jobs")
                         sourceComponent: Component {
                             JobsPage {
+                                topInset: 28
                                 activeView: window.currentRoute === "jobs"
                                 requestedFilter: window.jobsFilterStatus
-                                onFilterChanged: function(status) { window.jobsFilterStatus = status }
+                                onFilterChanged: function(status) {
+                                    window.jobsFilterStatus = status
+                                    AppBridge.setActiveRoute(status === "scraped" ? "analysis" : "jobs")
+                                }
                                 onNavigateRequested: function(route) { window.navigate(route) }
                             }
                         }

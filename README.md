@@ -1,36 +1,45 @@
 # Élan
 
-**A native macOS job-search workspace for AI Engineers.**
+**Espace de recherche d'emploi macOS pour les profils AI Engineer.** Élan réunit la recherche d'offres, leur analyse, la préparation des candidatures et leur suivi dans une application locale construite avec Python, Qt Quick et SQLite.
 
-Find relevant roles, assess your fit, prepare tailored CVs and cover letters, and track applications in one place. Built with Python, Qt Quick, and SQLite.
+Le profil et les règles fournis ciblent les métiers IA et data, principalement de niveau junior à intermédiaire. Pour d'autres métiers, il faut adapter le profil, les termes de recherche et les règles locales ; voir [Personnaliser Élan](#personnaliser-élan).
 
-Élan is primarily designed for **AI Engineer profiles**. Using it for other roles or fields requires adapting the candidate profile, search keywords, static filters, and matching rules, including changes to the source code. See [Make it your own](#make-it-your-own).
-
-[![macOS 13+](https://img.shields.io/badge/macOS-13%2B-111017?logo=apple&logoColor=white)](#getting-started)
+[![macOS 13+](https://img.shields.io/badge/macOS-13%2B-111017?logo=apple&logoColor=white)](#installation)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
+[![Licence MIT](https://img.shields.io/badge/Licence-MIT-55bd92)](LICENSE)
 [![CI](https://github.com/lachtarnour/elan-career/actions/workflows/ci.yml/badge.svg)](https://github.com/lachtarnour/elan-career/actions/workflows/ci.yml)
 
-Copyright © 2026 Lachtar Nour. All rights reserved. This repository is publicly accessible only for consultation, visual demonstration, and technical evaluation. Any use of the code requires explicit authorization from the author; see [LICENSE](LICENSE). The installation, customization, and development instructions below are intended only for people with this authorization.
+## Démonstration
 
-## Demo
-
-45 seconds · silent · French annotations. Fictional data with simulated collection and AI responses.
+45 secondes, sans son, avec des annotations en français. Les données sont fictives ; la collecte et les réponses IA sont simulées.
 
 https://github.com/user-attachments/assets/b357b04e-eba4-49aa-a6ed-851d0a94e167
 
-## What it does
+## Parcours d'une offre
 
-- **Find opportunities** across France Travail, LinkedIn, Welcome to the Jungle, and Google Jobs, or add an offer manually.
-- **Review your fit** with ranked offers, match explanations, and a comparison view for suspected duplicates.
-- **Prepare applications** with CVs and cover letters grounded in your profile.
-- **Track progress** with application statuses, documents, and a dashboard of recent activity.
-- **Review target companies** on the Entreprises page with search, priority filters, persistent checkboxes, and manual additions. [Import or synchronize your private CSV](docs/company-targeting.md) with `make sync-companies` while preserving checked records.
+```text
+Recherche ou ajout manuel
+  → Enregistrement et contrôle des doublons
+  → Filtre local déterministe
+  → Analyse : extraction des faits et préfiltre des missions
+  → Analyse : évaluation de l'adéquation avec le profil
+  → Préparation du CV et de la lettre, à la demande
+  → Relecture, envoi par l'utilisateur et suivi
+```
 
-Profile data and application history are stored locally. Connected providers process the data needed for search and AI features. You review documents and submit applications yourself.
+1. **Trouver l'offre.** La recherche interroge les connecteurs configurés : France Travail, LinkedIn via Apify, Welcome to the Jungle et Google Jobs via SerpApi. Une offre peut aussi être ajoutée par URL, texte ou formulaire. La collecte précède le filtrage local : une offre trouvée n'est pas encore une offre retenue.
+2. **Enregistrer et rapprocher.** Élan normalise la description, conserve la source et compare l'annonce aux offres déjà enregistrées. Une copie certaine peut être reliée à son offre principale ; un rapprochement ambigu passe dans **Doublons** pour décision. Les offres et l'historique de candidature ne sont pas effacés par ce rapprochement.
+3. **Appliquer les règles locales.** Le filtre déterministe écarte les incompatibilités établies, par exemple un contrat ou un niveau d'expérience non accepté. Les cas incertains restent **À classer** dans **Analyse**. Un ajout manuel explicite conserve une trace de dérogation au filtre.
+4. **Analyser les offres sélectionnées.** En mode immédiat ou Batch, un premier appel IA préfiltre les missions et archive seulement les offres clairement hors périmètre avec des missions suffisamment décrites. Un deuxième appel extrait les faits des annonces conservées ; un troisième les compare au profil ; le calcul de pertinence produit le score **IA** et des explications. Le Batch peut être repris après interruption. Le score ne rejette pas automatiquement l'offre.
+5. **Préparer et suivre la candidature.** Depuis une offre analysée, Élan adapte le CV, rédige une lettre, vérifie le dossier et produit des fichiers éditables et consultables. L'utilisateur relit les documents, soumet lui-même la candidature et met à jour son état (**Prête**, **Envoyée**, **Entretien**, **Archivée**).
 
-## Getting started
+Les étapes, leurs exceptions, les données enregistrées et les modules responsables sont détaillés dans le [guide du parcours d'une offre](docs/parcours-offre.md).
 
-Requires **macOS 13+** and **Python 3.10+**.
+Élan comprend aussi un espace **Entreprises** pour suivre les sociétés ciblées et [synchroniser une liste CSV privée](docs/company-targeting.md).
+
+## Installation
+
+Prérequis : **macOS 13+** et **Python 3.10+**.
 
 ```bash
 git clone https://github.com/lachtarnour/elan-career.git
@@ -38,28 +47,24 @@ cd elan-career
 make install-desktop
 ```
 
-Follow the [setup guide](docs/setup.md) to configure your profile and providers, then launch:
+Suivez le [guide de configuration](docs/setup.md) pour créer votre profil et configurer les fournisseurs, puis lancez :
 
 ```bash
 make run-desktop
 ```
 
-The guide also covers running with mock providers and building a standalone macOS app. Source credentials are configured separately for each [connector](docs/sources/README.md).
+Le guide explique aussi le mode IA simulée, l'utilisation depuis les sources et la construction de l'application macOS. Chaque connecteur de recherche a sa [configuration propre](docs/sources/README.md). Les données du profil et l'historique des candidatures sont stockés localement ; les fournisseurs configurés reçoivent les données nécessaires aux recherches et aux fonctions IA.
 
-## Make it your own
+## Personnaliser Élan
 
-Default filters are tuned for AI Engineer and related data/AI roles, with junior-to-mid experience. Follow these steps to adapt Élan to your profile and target position:
+1. **Profil** — Copiez le [profil d'exemple](smartapply/profile/mock_profile/) dans votre répertoire privé selon le [guide de configuration](docs/setup.md#configure-a-profile). Renseignez votre identité, vos expériences, compétences, projets, formation et préférences.
+2. **Recherche et filtres** — Adaptez les [familles de rôles](smartapply/pipeline/ingest/role_families.py), les [règles locales](smartapply/filtering/rules.py), ainsi que les contraintes de contrat et de localisation décrites dans le [guide de configuration](docs/setup.md#matching-rules). Le seul changement de profil ne modifie pas ces règles codées.
+3. **Documents** — Adaptez le [modèle HTML/CSS du CV](smartapply/cv/templates/cv.html.j2) ou `template_style.json` dans votre profil privé pour le DOCX. Voir la [personnalisation du CV](docs/setup.md#cv-template-and-writing-style).
 
-1. **Profile information** — Copy the [example profile](smartapply/profile/mock_profile/) into your private profile directory, following the [setup guide](docs/setup.md#configure-a-profile). Replace the identity, experience, skills, projects, and education with your own information, then set your search preferences in `preferences.json`.
-2. **Static filters** — Review [filter rules](smartapply/filtering/rules.py) and [search role families](smartapply/pipeline/ingest/role_families.py) for your target roles, exclusions, and seniority. Changing your profile does not automatically update these rules; the [matching guide](docs/setup.md#matching-rules) also covers contract and location filters.
-3. **CV template** — Edit [the HTML/CSS template](smartapply/cv/templates/cv.html.j2) for HTML/PDF layout, or `template_style.json` in your private profile for DOCX fonts and colors. See [CV customization](docs/setup.md#cv-template-and-writing-style) for layout and writing options.
-
-## Development
+## Développement et documentation
 
 ```bash
 make check
 ```
 
-Tests use fictional data and mock AI providers. See [Contributing](CONTRIBUTING.md) for the project structure, development workflow, and bug reports.
-
-[Setup](docs/setup.md) · [Source connectors](docs/sources/README.md) · [Interface guidelines](docs/desktop-design.md) · [Contributing](CONTRIBUTING.md)
+Les tests utilisent des données fictives et des fournisseurs IA simulés. Voir [Contribuer](CONTRIBUTING.md) pour l'organisation du code et les vérifications, [l'historique des versions](CHANGELOG.md) pour les changements publiés et [l'index des guides](docs/README.md) pour retrouver la documentation par sujet.

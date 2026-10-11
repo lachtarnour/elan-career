@@ -7,10 +7,8 @@ AppTextArea 1.0 AppTextArea.qml
 AppSelect 1.0 AppSelect.qml
 AppSpinBox 1.0 AppSpinBox.qml
 AppScrollBar 1.0 AppScrollBar.qml
-ActionTile 1.0 ActionTile.qml
 ChoiceChip 1.0 ChoiceChip.qml
 ConfirmDialog 1.0 ConfirmDialog.qml
-DocumentPreview 1.0 DocumentPreview.qml
 EmptyState 1.0 EmptyState.qml
 FormLabel 1.0 FormLabel.qml
 MetricCard 1.0 MetricCard.qml
@@ -21,3 +19,8 @@ SectionTitle 1.0 SectionTitle.qml
 SelectionBox 1.0 SelectionBox.qml
 SortHeader 1.0 SortHeader.qml
 Surface 1.0 Surface.qml
+LlmCallSettings 1.0 LlmCallSettings.qml
+SettingsField 1.0 SettingsField.qml
+SettingsGroup 1.0 SettingsGroup.qml
+FitEvaluation 1.0 FitEvaluation.qml
+OfferAnalysisSummary 1.0 OfferAnalysisSummary.qml

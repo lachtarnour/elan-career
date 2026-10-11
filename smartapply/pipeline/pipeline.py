@@ -2,7 +2,7 @@
 
 Phases:
 - Phase 1: ``Ingestor``  → scrape and persist raw jobs.
-- Phase 2: ``Processor`` → dedup + hard rejection + rank + LLM analysis on top-K.
+- Phase 2: ``Processor`` → deterministic filtering + LLM analysis.
 - Phase 3: ``Applier``   → adapt and render the CV and motivation letter.
 """
 
@@ -12,12 +12,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select
+
 from smartapply.config import get_source_settings
 from smartapply.cv import CvAdapter, CvValidator
 from smartapply.database import session_scope
-from smartapply.database.models import Job
-from smartapply.database.repository import top_jobs_by_score
-from smartapply.dedup import Deduplicator
+from smartapply.database.fit_ranking import current_fit_expression, fit_ranking_columns
+from smartapply.database.models import Application, Job, JobAnalysis
 from smartapply.filtering import (
     CandidateQualifications,
     DeterministicRejector,
@@ -36,11 +37,9 @@ from smartapply.pipeline.reports import (
     AnalyzeReport,
     ApplyReport,
     ProcessReport,
-    RankingReport,
 )
 from smartapply.pipeline.snapshots import CancellableProvider
 from smartapply.profile import get_profile
-from smartapply.ranking import JobScorer, get_embeddings_provider
 from smartapply.utils.contracts import (
     should_filter_france_travail_to_cdi,
     should_filter_serpapi_to_fulltime,
@@ -92,7 +91,6 @@ class Pipeline:
         self,
         profile=None,
         llm=None,
-        embeddings=None,
         stop_requested: Callable[[], bool] | None = None,
     ):
         self.stop_requested = stop_requested
@@ -100,17 +98,14 @@ class Pipeline:
         self.llm = llm or get_llm_provider()
         if stop_requested is not None:
             self.llm = CancellableProvider(self.llm, stop_requested)
-        self.embeddings = embeddings or get_embeddings_provider()
         self.settings = get_source_settings()
 
         # Shared building blocks
-        self.deduplicator = Deduplicator()
         self.filter = DeterministicRejector(
             ruleset_from_preferences(self.profile.preferences),
             qualifications=CandidateQualifications.from_profile(self.profile),
         )
-        self.scorer = JobScorer(self.profile, embeddings=self.embeddings)
-        self.adapter = CvAdapter(self.profile, llm=self.llm, embeddings=self.embeddings)
+        self.adapter = CvAdapter(self.profile, llm=self.llm)
         self.validator = CvValidator(self.profile)
         self.renderer = ApplicationDocumentRenderer(self.profile)
 
@@ -118,9 +113,8 @@ class Pipeline:
         self._ingestor = Ingestor(job_filter=self.filter)
         self._processor = Processor(
             profile=self.profile,
-            deduplicator=self.deduplicator,
+            use_global_profile=profile is None,
             job_filter=self.filter,
-            scorer=self.scorer,
             llm=self.llm,
             stop_requested=stop_requested,
         )
@@ -295,21 +289,6 @@ class Pipeline:
             local_filter_override_ids=local_filter_override_ids,
         )
 
-    def rank_pending(
-        self,
-        top_k_ranked: int | None = None,
-        *,
-        job_ids: list[int] | None = None,
-        local_filter_override_ids: list[int] | None = None,
-        persist_shortlist: bool = True,
-    ) -> RankingReport:
-        return self._processor.rank_pending(
-            top_k_ranked=top_k_ranked,
-            job_ids=job_ids,
-            local_filter_override_ids=local_filter_override_ids,
-            persist_shortlist=persist_shortlist,
-        )
-
     def analyze_jobs(
         self,
         job_ids: list[int],
@@ -324,7 +303,7 @@ class Pipeline:
         )
 
     def prepare_analysis(self, **kwargs):
-        """Prepare deterministic survivors without ranking or embedding calls."""
+        """Prepare deterministic survivors using local rules."""
         return self._processor.prepare_analysis(**kwargs)
 
     def analysis_candidates(self, job_ids=None, **kwargs):
@@ -379,7 +358,14 @@ class Pipeline:
         process = self.process_pending()
 
         with session_scope() as s:
-            top_jobs = list(top_jobs_by_score(s, top_k_apply, unapplied_only=True))
+            top_jobs = list(s.scalars(
+                select(Job).join(JobAnalysis).outerjoin(Application).where(
+                    Job.archived_at.is_(None),
+                    JobAnalysis.fit_score.is_not(None),
+                    current_fit_expression(),
+                    Application.id.is_(None),
+                ).order_by(*fit_ranking_columns(), Job.id.asc()).limit(top_k_apply)
+            ))
             top_ids = [j.id for j in top_jobs]
 
         applies: list[ApplyReport] = []

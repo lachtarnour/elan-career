@@ -4,11 +4,13 @@ import QtQuick.Layouts
 Item {
     id: root
     property var run: ({})
-    readonly property var phases: run.phase_batches || []
+    readonly property var phases: run.phase_batches || [{phase: "screening"}, {phase: "extraction"}, {phase: "evaluation"}]
+    readonly property int stepCount: phases.length + 1
+    readonly property int completedSteps: phases.filter(function(p) { return p.status === "completed" || p.status === "skipped" }).length
     readonly property bool hasRun: Boolean(run.id)
     readonly property bool finished: run.status === "completed"
     readonly property bool reachedOutcome: hasRun && run.phase === "done"
-    implicitHeight: 116
+    implicitHeight: 82
 
     function phaseData(name) {
         for (var i = 0; i < phases.length; ++i)
@@ -34,17 +36,17 @@ Item {
 
     Rectangle {
         objectName: "analysisTimelineTrack"
-        x: parent.width / 6
-        y: 18
-        width: parent.width * 2 / 3
+        x: parent.width / (2 * root.stepCount)
+        y: 12
+        width: parent.width * (root.stepCount - 1) / root.stepCount
         height: 2
         color: Theme.lineStrong
     }
     Rectangle {
         objectName: "analysisTimelineCompletedTrack"
-        x: parent.width / 6
-        y: 18
-        width: parent.width / 3 * (root.evaluationDone ? 2 : root.extractionDone ? 1 : 0)
+        x: parent.width / (2 * root.stepCount)
+        y: 12
+        width: parent.width / root.stepCount * root.completedSteps
         height: 2
         color: Theme.success
     }
@@ -52,32 +54,26 @@ Item {
     RowLayout {
         anchors.fill: parent
         spacing: 0
-        AnalysisPhaseCard {
-            Layout.fillWidth: true
-            Layout.preferredWidth: 1
-            number: 1
-            phase: root.extraction
-            current: root.hasRun && root.run.is_active && root.run.status !== "attention"
-                && root.run.phase === "extraction"
-            complete: root.extractionDone
-            issue: ["failed", "expired", "attention", "blocked", "cancelled"].indexOf(root.extraction.status) >= 0
-            started: root.hasRun
+        Repeater {
+            model: root.phases
+            delegate: AnalysisPhaseCard {
+                required property var modelData
+                required property int index
+                Layout.fillWidth: true
+                Layout.preferredWidth: 1
+                number: index + 1
+                phase: root.phaseData(modelData.phase)
+                current: root.hasRun && root.run.is_active && root.run.status !== "attention"
+                    && root.run.phase === modelData.phase
+                complete: phase.status === "completed" || phase.status === "skipped"
+                issue: ["failed", "expired", "attention", "blocked", "cancelled"].indexOf(phase.status) >= 0
+                started: root.hasRun && (index === 0 || root.phases[index - 1].status === "completed" || root.run.phase === modelData.phase)
+            }
         }
         AnalysisPhaseCard {
             Layout.fillWidth: true
             Layout.preferredWidth: 1
-            number: 2
-            phase: root.evaluation
-            current: root.hasRun && root.run.is_active && root.run.status !== "attention"
-                && root.run.phase === "evaluation"
-            complete: root.evaluationDone
-            issue: ["failed", "expired", "attention", "blocked", "cancelled"].indexOf(root.evaluation.status) >= 0
-            started: root.extractionDone || (root.hasRun && root.run.phase === "evaluation")
-        }
-        AnalysisPhaseCard {
-            Layout.fillWidth: true
-            Layout.preferredWidth: 1
-            number: 3
+            number: root.stepCount
             phase: root.outcome
             complete: root.finished
             issue: root.terminalIssue

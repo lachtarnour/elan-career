@@ -197,9 +197,9 @@ def test_fresh_ingest_runs_entire_plan_despite_old_reservation_and_dataset(
     result = Ingestor().collect_source(
         "linkedin", query, "France", max_results=1, include_research_cdd=True
     )
-    assert len(posts) == len(expected.all_queries) == 360
+    assert len(posts) == len(expected.all_queries) == 320
     assert {p["keywords"] for p in posts} == set(expected.all_queries)
-    assert len(result.completed_source_run_ids) == 360
+    assert len(result.completed_source_run_ids) == 320
     assert path.read_bytes() == before
     assert result.source_run_journal_path != str(path)
     assert not result.warnings

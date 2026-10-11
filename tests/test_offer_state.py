@@ -23,9 +23,9 @@ from smartapply.pipeline.process.filter_state import is_current_hard_reject_surv
 
 
 def _job(session, key="offer"):
-    job = Job(external_id=key, title="ML Engineer", company="Fixture", source="manual",
+    job = Job(external_id=key, title="ML Engineer", source_company="Fixture", source="manual",
               description="Python ML", status="filtered", filtered_at=datetime.now(timezone.utc))
-    job.score = JobScore(final_score=0.6, components={
+    job.score = JobScore(components={
         "filter_disposition": "pending_relevance",
         "hard_reject": HardRejectResult(decisions=()).audit_payload(),
         "independent_audit": {"keep": True},
@@ -112,7 +112,7 @@ def test_repair_is_idempotent_preserves_paid_results_and_keeps_filter_proof(isol
         assert {k: v for k, v in job.score.components.items() if k != FILTER_HISTORY_KEY} == {
             k: v for k, v in components.items() if k != "filter_disposition"}
         assert is_current_hard_reject_survivor(job.score.components)
-        assert job.score.final_score == 0.6 and job.score.computed_at == score_date.replace(tzinfo=None)
+        assert job.score.computed_at == score_date.replace(tzinfo=None)
         for name, row in (("analysis", job.analysis), ("application", job.application),
                           ("document", job.application.documents[0])):
             actual = {c.name: getattr(row, c.name) for c in row.__table__.columns}
@@ -141,12 +141,14 @@ def test_pending_duplicates_cannot_make_a_completed_offer_pending_again(isolated
         recent.possible_duplicate_of_id = reference.id
         recent_id = recent.id
     service = DesktopService()
-    assert not service.list_jobs(status="duplicate_review", only_pending_duplicates=True)
+    assert [row.id for row in service.list_jobs(
+        status="duplicate_review", only_pending_duplicates=True,
+    )] == [recent_id]
     assert [row.id for row in service.list_jobs(status="duplicate_review")] == [recent_id]
     assert not service.get_job(reference.id).filter_disposition
 
 
-@pytest.mark.parametrize("application_status", ["archived", "rejected", "interview"])
+@pytest.mark.parametrize("application_status", ["archived", "interview"])
 def test_tracking_state_prevents_sending_a_generated_dossier_again(isolated_db, application_status):
     with session_scope() as session:
         job = _job(session)

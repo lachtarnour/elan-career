@@ -85,23 +85,31 @@ def _extract_wttj_contract(
     facts: FilterFacts,
     source_data: dict[str, Any],
 ) -> None:
+    refresh = _dict(source_data.get("_smartapply_wttj_refresh"))
     matches_api = _dict(source_data.get("matches_api"))
-    raw_contract = _clean_text(matches_api.get("contract_type"))
+    raw_contract = (
+        _clean_text(refresh.get("raw_contract_type"))
+        if refresh.get("schema_version") == 1 else None
+    )
+    contract_source = "_smartapply_wttj_refresh.raw_contract_type"
+    if not raw_contract:
+        raw_contract = _clean_text(matches_api.get("contract_type"))
+        contract_source = "matches_api.contract_type"
     if not raw_contract:
         raw_contract = _clean_text(source_data.get("employment_type"))
+        contract_source = "employment_type"
+    if not raw_contract:
+        raw_contract = _clean_text(_dict(source_data.get("detail_api")).get("contract_type"))
+        contract_source = "detail_api.contract_type"
     if not raw_contract:
         return
 
-    contract_type = normalize_source_contract_type(raw_contract.replace("_", " "))
+    contract_type = normalize_source_contract_type(raw_contract, source=facts.source)
     if not contract_type:
         return
 
     facts.structured_contract_type = contract_type
-    facts.structured_contract_source = (
-        "welcometothejungle:matches_api.contract_type"
-        if matches_api.get("contract_type")
-        else "welcometothejungle:employment_type"
-    )
+    facts.structured_contract_source = f"welcometothejungle:{contract_source}"
     facts.facts_used.append(f"structured_contract_type:{contract_type}")
 
 

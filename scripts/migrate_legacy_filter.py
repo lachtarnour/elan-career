@@ -12,10 +12,10 @@ import tempfile
 from contextlib import suppress
 from pathlib import Path
 
-from scripts.replay_hard_reject_positive_control import load_manifest
 from smartapply.config import get_settings
 from smartapply.maintenance._sqlite_safety import file_sha256, require_safe_output_path
 from smartapply.maintenance.hard_reject_backfill import build_rejector
+from smartapply.maintenance.legacy_filter_manifest import load_manifest
 from smartapply.maintenance.legacy_filter_migration import (
     LegacyFilterMigrationPreconditionError,
     apply_legacy_filter_migration,

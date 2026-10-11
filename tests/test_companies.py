@@ -147,7 +147,7 @@ def test_startup_keeps_imported_companies_without_touching_existing_jobs(isolate
             Job(
                 external_id="company-import-test",
                 title="Data Engineer",
-                company="Existing",
+                source_company="Existing",
                 description="Existing offer",
                 source="manual",
             )
@@ -175,7 +175,7 @@ def test_startup_keeps_imported_companies_without_touching_existing_jobs(isolate
     assert len(service.list_companies()) == count + 1
     assert service.list_companies()[0]["checked"] is True
     with session_scope() as session:
-        assert session.scalar(select(Job.company)) == "Existing"
+        assert session.scalar(select(Job.source_company)) == "Existing"
         assert len(session.scalars(select(Company)).all()) == count + 1
 
 

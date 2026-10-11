@@ -8,13 +8,19 @@ defaults.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TypeVar
 
 from pydantic import BaseModel
 
+from smartapply.llm.fit_response import FitDecisionResponse, read_fit_response
 from smartapply.llm.provider import LLMError, LLMProvider
+from smartapply.llm.schemas import (
+    JobFitDecisionEvaluation,
+)
 
 T = TypeVar("T", bound=BaseModel)
+MockResponse = BaseModel | FitDecisionResponse | dict | str
 
 
 class MockLLMProvider(LLMProvider):
@@ -22,23 +28,29 @@ class MockLLMProvider(LLMProvider):
 
     # Class-level defaults keep the terse test API, while each instance copies
     # them at construction time so later test setup cannot mutate existing mocks.
-    _default_registry: dict[str, BaseModel] = {}
+    _default_registry: dict[str, MockResponse | Callable[..., MockResponse]] = {}
 
-    def __init__(self, registry: dict[str, BaseModel] | None = None):
+    def __init__(
+        self,
+        registry: dict[str, MockResponse | Callable[..., MockResponse]] | None = None,
+        *,
+        model: str | None = None,
+    ):
+        self._model = model
         self._registry = dict(
             registry if registry is not None else self.__class__._default_registry
         )
 
     @property
     def smart_model(self) -> str:
-        return "mock-smart"
+        return self._model or "mock-smart"
 
     @property
     def cheap_model(self) -> str:
-        return "mock-cheap"
+        return self._model or "mock-cheap"
 
     @classmethod
-    def register(cls, purpose: str, response: BaseModel) -> None:
+    def register(cls, purpose: str, response: MockResponse | Callable[..., MockResponse]) -> None:
         cls._default_registry[purpose] = response
 
     @classmethod
@@ -57,13 +69,21 @@ class MockLLMProvider(LLMProvider):
         job_id: int | None = None,
         use_cache: bool = True,
         refresh_cache: bool = False,
-    ) -> T:
+        max_completion_tokens: int | None = None,
+        effort: str | None = "auto",
+    ) -> T | FitDecisionResponse:
         if purpose not in self._registry:
             raise LLMError(
                 f"No mock response registered for purpose={purpose!r}. "
                 f"Call MockLLMProvider.register({purpose!r}, <instance>) first."
             )
         response = self._registry[purpose]
+        if callable(response):
+            response = response(
+                system=system, user=user, schema=schema, purpose=purpose, job_id=job_id
+            )
+        if schema is JobFitDecisionEvaluation:
+            return read_fit_response(response, schema=schema)
         if not isinstance(response, schema):
             raise LLMError(
                 f"Registered response type {type(response).__name__} does not "

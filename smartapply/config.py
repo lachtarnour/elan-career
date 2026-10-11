@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import os
+import sys
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
-DEFAULT_RUNTIME_DIR = Path.home() / "Library" / "Application Support" / "Elan"
+DEFAULT_RUNTIME_DIR = (
+    Path.home() / "Library" / "Application Support" / "Elan"
+    if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
+)
 RUNTIME_DIR = Path(os.environ.get("ELAN_HOME", DEFAULT_RUNTIME_DIR)).expanduser().resolve()
 ENV_FILE = Path(os.environ.get("ELAN_ENV_FILE", RUNTIME_DIR / ".env")).expanduser().resolve()
+
 
 
 class Settings(BaseSettings):
@@ -24,16 +31,12 @@ class Settings(BaseSettings):
     )
 
     # LLM
-    llm_provider: str = Field(default="openai")
-    openai_api_key: str = Field(default="")
-    openai_model_cheap: str = Field(default="gpt-5.4-mini")
-    openai_model_smart: str = Field(default="gpt-5.4")
-    openai_model_embed: str = Field(default="text-embedding-3-small")
-    openai_max_completion_tokens: int = Field(default=6000, ge=256, le=100_000)
+    openai_api_key: str = Field(default="", repr=False)
+    anthropic_api_key: str = Field(default="", repr=False)
+    openai_context_window_tokens: int | None = Field(default=None, ge=1024)
+    anthropic_context_window_tokens: int | None = Field(default=None, ge=1024)
+    declared_experience: str = "2 years of professional experience, plus 7 months of internship."
     llm_cache_ttl_days: int = Field(default=15, ge=1, le=365)
-    # Embeddings
-    embeddings_provider: str = Field(default="openai")
-    local_embeddings_model: str = Field(default="paraphrase-multilingual-MiniLM-L12-v2")
 
     # Database
     database_url: str = Field(default=f"sqlite:///{RUNTIME_DIR / 'data' / 'smartapply.db'}")
@@ -121,6 +124,13 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = Field(default="INFO")
 
+    def llm_context_window(self, provider: str) -> int | None:
+        if provider == "anthropic":
+            return self.anthropic_context_window_tokens
+        if provider in {"openai", "mock"}:
+            return self.openai_context_window_tokens
+        raise ValueError(f"Fournisseur IA inconnu : {provider}.")
+
     def ensure_dirs(self) -> None:
         for p in (self.output_dir, self.cache_dir):
             p.mkdir(parents=True, exist_ok=True)
@@ -162,3 +172,30 @@ def get_source_settings() -> Settings:
     }
     runtime = get_settings().model_dump(exclude=source_fields)
     return Settings(_env_file=str(ENV_FILE), **runtime)
+
+
+@dataclass(frozen=True)
+class LLMSettingsSnapshot:
+    """One operation's general settings and exact JSON call choices."""
+
+    runtime: Settings
+    calls: dict[str, Any]
+    load_error: str = ""
+
+    def __getattr__(self, name: str):
+        return getattr(self.runtime, name)
+
+
+def get_llm_settings() -> LLMSettingsSnapshot:
+    """Read model_config.json for each new operation; existing snapshots stay frozen."""
+    from smartapply.model_config import read_model_config
+
+    runtime = get_settings().model_dump(exclude={
+        name for name in Settings.model_fields
+        if name.startswith(("llm_", "openai_", "anthropic_"))
+    })
+    settings = Settings(_env_file=str(ENV_FILE), **runtime)
+    try:
+        return LLMSettingsSnapshot(settings, read_model_config())
+    except ValueError as exc:
+        return LLMSettingsSnapshot(settings, {}, str(exc))

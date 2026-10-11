@@ -24,6 +24,8 @@ def setup_logging() -> None:
     # Reduire le bruit
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("openai").setLevel(logging.WARNING)
+    logging.getLogger("anthropic").setLevel(logging.WARNING)
+    logging.getLogger("httpx2").setLevel(logging.WARNING)
     _configured = True
 
 

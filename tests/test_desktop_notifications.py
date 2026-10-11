@@ -71,7 +71,8 @@ def test_batch_notification_is_bounded_and_counts_dossiers_not_raw_diagnostics(m
         "warnings": [
             {"job_id": 1, "issues": ["text_review_corrected: correction vérifiée"]},
             {"job_id": 2, "issues": [raw, "cv_title_not_offer_anchored"]},
-            {"job_id": 3, "issues": [raw]},
+            {"job_id": 2, "issues": ["validation_error:cv_title_not_offer_anchored"]},
+            {"job_id": 3, "issues": [raw, "letter_too_long:252"]},
             {
                 "job_id": 4,
                 "issues": ["validation_error:text_review_incomplete: contrôle non terminé"],
@@ -108,21 +109,24 @@ def test_older_joined_diagnostics_still_distinguish_information_and_points():
     assert "1 dossier avec des points à vérifier" in notifications[0][1]
 
 
-def test_single_created_application_keeps_diagnostics_out_of_notification():
+@pytest.mark.parametrize("method", ["_generation_done", "_regeneration_done"])
+def test_single_created_application_counts_distinct_review_points(method):
     bridge, notifications = _bridge()
     report = {
         "job_id": 42,
         "validation_warnings": [
             "text_review_corrected: correction vérifiée",
             "cv_title_not_offer_anchored",
+            "letter_too_long:255",
         ],
-        "validation_errors": ["text_review_invalid_correction:letter_too_long:255"],
+        "validation_errors": ["validation_error:letter_too_long:255"],
     }
     before = deepcopy(report)
-    bridge._generation_done(report)
+    getattr(bridge, method)(report)
     _, message, kind = notifications[0]
     assert "2 points à vérifier" in message
     assert "text_review" not in message
+    assert "letter_too_long" not in message
     assert kind == "warning"
     assert report == before
 
@@ -146,17 +150,18 @@ def test_only_actual_operation_failures_are_called_failures(method):
     assert notifications[0][2] == "warning"
 
 
-def test_qml_toast_is_bounded_and_dossier_retains_full_diagnostics():
+def test_qml_toast_is_bounded_and_dossier_shows_product_review_points():
     """Exercise the actual QML with an inert bridge, without opening a database."""
     script = r"""
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from PySide6.QtCore import QObject, QUrl, QMetaObject, QElapsedTimer, QEventLoop, QPointF, QRectF
+from PySide6.QtCore import QObject, QUrl, QElapsedTimer, QEventLoop, QPointF, QRectF
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine, QQmlComponent
 from PySide6.QtQuick import QQuickItem
 from smartapply.desktop.bridge import DesktopBridge
+from smartapply.desktop.document_review_presentation import present_document_review
 
 app = QGuiApplication([])
 
@@ -169,6 +174,11 @@ def wait_until(predicate, timeout_ms=2000):
 
 def scene_rect(item):
     return QRectF(item.mapToScene(QPointF(0, 0)), item.size())
+
+def visual_items(item):
+    yield item
+    for child in item.childItems():
+        yield from visual_items(child)
 
 bridge = DesktopBridge.__new__(DesktopBridge)
 QObject.__init__(bridge)
@@ -207,10 +217,14 @@ wait_until(lambda: busy.property("opacity") >= 0.99)
 assert busy.property("visible") is True
 assert viewport.contains(scene_rect(busy))
 assert not scene_rect(toast).intersects(scene_rect(busy))
-raw = "text_review_invalid_correction:letter_too_long:255 " + "raw evidence " * 1000
+raw = "validation_error:letter_too_long:255"
+diagnostics = ["text_review_corrected: correction vérifiée", "letter_too_long:255", raw]
 bridge._current_job = {
     "id": 42, "title": "Data Scientist", "status": "ready_for_form_submission",
-    "application": {"id": 7, "warnings": ["text_review_corrected: correction vérifiée", raw]},
+    "application": {
+        "id": 7, "warnings": diagnostics,
+        "review_points": list(present_document_review(diagnostics)["points"]),
+    },
 }
 component = QQmlComponent(engine, QUrl.fromLocalFile(str(qml / "pages/JobsPage.qml")))
 assert not component.isError(), [error.toString() for error in component.errors()]
@@ -225,25 +239,57 @@ published_date_header = page.findChild(QObject, "offerPublishedDateHeader")
 assert published_date_header is not None
 assert published_date_header.property("visible") is False
 assert page.findChild(QObject, "offerFilterHeader").property("visible") is False
-assert page.findChild(QObject, "offerMatchHeader").property("visible") is True
+assert page.findChild(QObject, "offerIaHeader").property("visible") is True
+assert page.findChild(QObject, "offerMatchHeader") is None
 regenerate = page.findChild(QObject, "offerRegenerateAction")
 assert regenerate is not None
 wait_until(lambda: regenerate.property("visible") is True)
 assert page.property("documentReviewPointCount") == 1
-diagnostics = page.property("documentDiagnostics")
-if hasattr(diagnostics, "toVariant"):
-    diagnostics = diagnostics.toVariant()
-assert diagnostics == ["text_review_corrected: correction vérifiée", raw]
-toggle = page.findChild(QObject, "documentReviewDetailsToggle")
-assert toggle is not None
-assert page.property("documentReviewDetailsExpanded") is False
-QMetaObject.invokeMethod(toggle, "clicked")
-assert page.property("documentReviewDetailsExpanded") is True
-bridge._current_job = {"id": 43, "title": "Other role", "application": {"id": 8, "warnings": ["text_review_corrected: correction vérifiée"]}}
+card = page.findChild(QObject, "documentReviewCard")
+assert card is not None
+assert card.property("visible") is True
+title = card.findChild(QObject, "documentReviewCardTitle")
+assert title is not None
+assert title.property("text") == "CV et lettre"
+count = card.findChild(QObject, "documentReviewCardCount")
+assert count is not None
+assert count.property("text") == "1 point à vérifier"
+point = next((item for item in visual_items(card) if item.objectName() == "documentReviewPoint_letter_length"), None)
+detail = next((item for item in visual_items(card) if item.objectName() == "documentReviewDetail_letter_length"), None)
+assert point is not None and detail is not None
+assert "lettre" in point.property("text").lower()
+assert "255" in detail.property("text")
+public_text = " ".join(
+    str(item.property("text")) for item in visual_items(card)
+    if item.property("text") is not None
+)
+assert "validation_error" not in public_text
+assert "letter_too_long" not in public_text
+assert "text_review_corrected" not in public_text
+assert page.findChild(QObject, "documentReviewDetailsToggle") is None
+bridge._current_job = {
+    "id": 43, "title": "Other role",
+    "application": {"id": 8, "warnings": ["text_review_corrected: correction vérifiée"], "review_points": []},
+}
 bridge.currentJobChanged.emit()
 app.processEvents()
 assert page.property("documentReviewPointCount") == 0
-assert page.property("documentReviewDetailsExpanded") is False
+assert card.property("visible") is False
+style = "text_review:style:professional_summary: private stylistic explanation"
+bridge._current_job = {
+    "id": 44, "title": "Style review",
+    "application": {
+        "id": 9, "warnings": [style],
+        "review_points": list(present_document_review([style])["points"]),
+    },
+}
+bridge.currentJobChanged.emit()
+wait_until(lambda: page.property("documentReviewPointCount") == 1)
+assert card.property("visible") is True
+style_point = next((item for item in visual_items(card)
+    if item.objectName() == "documentReviewPoint_style:professional_summary"), None)
+assert style_point is not None and "style" in style_point.property("text").lower()
+assert "private stylistic explanation" not in style_point.property("text")
 page.deleteLater()
 window.close()
 engine.deleteLater()

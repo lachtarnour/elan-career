@@ -1,15 +1,15 @@
-"""Durable two-wave analysis against isolated SQLite and a fake Batch service."""
+"""Durable three-stage analysis against isolated SQLite and a fake Batch service."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import replace
-from datetime import datetime, timezone
+from dataclasses import asdict, replace
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import func, select
 
-from smartapply.config import get_settings
+from smartapply.config import get_llm_settings
 from smartapply.database import session_scope
 from smartapply.database.analysis_batches import (
     AnalysisBatchItem,
@@ -17,21 +17,32 @@ from smartapply.database.analysis_batches import (
     AnalysisBatchWave,
 )
 from smartapply.database.models import Job, JobAnalysis, JobScore, LLMCache, LLMUsage
-from smartapply.database.repository.llm_cache import cache_set
+from smartapply.database.repository.llm_cache import cache_set, purge_expired_cache
 from smartapply.filtering.hard_reject.types import HardRejectResult
-from smartapply.llm import JobFitAssessment, MockLLMProvider, OfferAnalysis
+from smartapply.llm import (
+    JobFitDecisionEvaluation,
+    MockLLMProvider,
+    OfferAnalysis,
+    OfferExtractionOutput,
+)
 from smartapply.llm.batch import BatchResult, BatchSnapshot
 from smartapply.llm.cache import make_cache_key
 from smartapply.llm.prompts import job_analysis, job_fit
+from smartapply.llm.request_options import request_cache_extra, stage_effort
+from smartapply.llm.schemas import JobScopeScreening
 from smartapply.llm.usage import estimate_cost_usd
+from smartapply.llm_policy import resolve_route
 from smartapply.offers import build_analyzer_input
 from smartapply.pipeline import Pipeline
 from smartapply.pipeline.batch_analysis import coordinator as coordinator_module
 from smartapply.pipeline.batch_analysis.coordinator import BatchAnalysisCoordinator
 from smartapply.pipeline.batch_analysis.presentation import analysis_workspace
+from smartapply.pipeline.batch_analysis.results import schema_for_request, validate_request_response
 from smartapply.pipeline.errors import TaskCancelledError
+from smartapply.pipeline.process.extraction_screening import extraction_offer_facts
+from smartapply.pipeline.rescore import reusable_offer
 from smartapply.profile import get_profile
-from smartapply.ranking import MockEmbeddingsProvider
+from tests.fit_fixtures import evaluation_from_user
 
 pytestmark = pytest.mark.usefixtures("isolated_db")
 
@@ -48,7 +59,18 @@ def offer(role="Machine Learning Engineer"):
     )
 
 
+def extraction_offer(role="Machine Learning Engineer"):
+    return OfferExtractionOutput.model_validate(
+        {
+            **offer(role).model_dump(),
+            "seniority": "unknown",
+        }
+    )
+
+
 def fit():
+    from smartapply.llm import JobFitAssessment
+
     return JobFitAssessment(
         fit_score=0.7,
         match_reasons=["Documented Python work"],
@@ -59,7 +81,8 @@ def fit():
 class FakeTransport:
     """A provider that keeps running after the local coordinator is recreated."""
 
-    def __init__(self):
+    def __init__(self, *, batch_prefix="batch"):
+        self.batch_prefix = batch_prefix
         self.inputs = {}
         self.snapshots = {}
         self.outputs = {}
@@ -81,7 +104,7 @@ class FakeTransport:
         return file_id
 
     def create(self, input_file_id, metadata):
-        batch_id = f"batch-{len(self.created) + 1}"
+        batch_id = f"{self.batch_prefix}-{len(self.created) + 1}"
         self.created.append(batch_id)
         state = BatchSnapshot(
             id=batch_id,
@@ -140,13 +163,32 @@ class FakeTransport:
                 continue
             schema = record["body"]["response_format"]["json_schema"]["name"]
             answer = answers.get(custom_id) or (
-                offer(f"Machine Learning Engineer {custom_id}")
-                if schema == "OfferAnalysis"
-                else fit()
+                JobScopeScreening.model_validate(
+                    {
+                        "mission_screen": {
+                            "mission_relation": "unknown",
+                            "mission_evidence": "insufficient",
+                        }
+                    }
+                )
+                if schema == "JobScopeScreening"
+                else OfferExtractionOutput.model_validate(
+                    extraction_offer(f"Machine Learning Engineer {custom_id}").model_dump(
+                        exclude={"mission_screen"}
+                    )
+                )
+                if schema == "OfferExtractionOutput"
+                else evaluation_from_user(record["body"]["messages"][1]["content"])
             )
             successes[custom_id] = BatchResult(
                 custom_id=custom_id,
-                content="{}" if custom_id in invalid else answer.model_dump_json(),
+                content=(
+                    "{}"
+                    if custom_id in invalid
+                    else answer
+                    if isinstance(answer, str)
+                    else answer.model_dump_json()
+                ),
                 prompt_tokens=100,
                 completion_tokens=50,
                 cached_prompt_tokens=80,
@@ -170,7 +212,27 @@ class FakeTransport:
         )
 
 
-def seed_jobs(count=1, *, exact_copies=False):
+@pytest.fixture(autouse=True)
+def explicit_batch_routes(monkeypatch, tmp_path):
+    """Simulated batches use independent explicit JSON routes."""
+    from tests.scope_fixtures import set_test_routes
+
+    set_test_routes(
+        monkeypatch,
+        tmp_path,
+        {
+            purpose: {
+                "provider": "openai",
+                "model": "gpt-5.4-mini",
+                "reasoning": "medium",
+                "max_output_tokens": 6000,
+            }
+            for purpose in ("job_scope_screening", "job_offer_extraction", "job_fit_assessment")
+        },
+    )
+
+
+def seed_jobs(count=1, *, exact_copies=False, screened=True):
     with session_scope() as session:
         jobs = []
         for index in range(count):
@@ -181,7 +243,7 @@ def seed_jobs(count=1, *, exact_copies=False):
                 Job(
                     external_id=f"batch-test-{index}",
                     title="Machine Learning Engineer",
-                    company="Example AI",
+                    source_company="Example AI",
                     location="Paris",
                     description=body,
                     source="manual",
@@ -196,6 +258,11 @@ def seed_jobs(count=1, *, exact_copies=False):
             )
         session.add_all(jobs)
         session.flush()
+        from tests.scope_fixtures import seed_neutral_scope
+
+        if screened:
+            for job in jobs:
+                seed_neutral_scope(session, job)
         return [job.id for job in jobs]
 
 
@@ -203,7 +270,6 @@ def pipeline(stop_requested=None):
     return Pipeline(
         profile=get_profile(),
         llm=MockLLMProvider(),
-        embeddings=MockEmbeddingsProvider(),
         stop_requested=stop_requested,
     )
 
@@ -269,8 +335,158 @@ def test_restart_resumes_two_dependent_waves_and_keeps_full_analysis():
     assert counts()["paid"] == 4
     with session_scope() as session:
         jobs = [session.get(Job, job_id) for job_id in ids]
-        assert all(job.analysis.fit_score == 0.7 and job.analyzed_at is not None for job in jobs)
-        assert all(job.ranked_at is None and job.score.final_score is None for job in jobs)
+        assert all(job.analysis.fit_score == 0.88 and job.analyzed_at is not None for job in jobs)
+        assert all(job.ranked_at is None and job.score is not None for job in jobs)
+
+
+def test_batch_screening_skips_only_the_distant_offer_before_extraction():
+    ids = seed_jobs(2, screened=False)
+    transport = FakeTransport()
+    coordinator = BatchAnalysisCoordinator(transport=transport, pipeline=pipeline())
+    run_id = coordinator.start(ids)
+    records = transport.requests(transport.created[-1])
+    finish_next(
+        transport,
+        coordinator,
+        answers={
+            record["custom_id"]: JobScopeScreening(
+                mission_screen={
+                    "mission_relation": "clearly_outside",
+                    "mission_evidence": "sufficient",
+                }
+            )
+            if index
+            else JobScopeScreening.model_validate(
+                {
+                    "mission_screen": {
+                        "mission_relation": "adjacent",
+                        "mission_evidence": "sufficient",
+                    }
+                }
+            )
+            for index, record in enumerate(records)
+        },
+    )
+    assert len(transport.requests(transport.created[-1])) == 1
+    assert transport.requests(transport.created[-1])[0]["custom_id"].startswith("extraction-")
+    finish_next(transport, coordinator)
+    finish_next(transport, coordinator)
+    run, items, waves = journal(run_id)
+    assert run.state == "completed"
+    assert [item.state for item in items] == ["completed", "filtered_after_screening"]
+    assert [wave.phase for wave in waves] == ["screening", "extraction", "evaluation"]
+    assert items[1].offer_data is None
+    assert items[1].scope_data["mission_screen"]["mission_relation"] == "clearly_outside"
+    summary = next(run for run in analysis_workspace()["runs"] if run["id"] == run_id)
+    assert summary["analyzed"] == summary["screened_out"] == 1
+    with session_scope() as session:
+        distant = session.get(Job, ids[1])
+        assert distant.archived_at is not None and distant.analysis is None
+
+
+def test_batch_with_only_screened_offers_completes_without_extraction_wave():
+    ids = seed_jobs(2, exact_copies=True, screened=False)
+    transport = FakeTransport()
+    coordinator = BatchAnalysisCoordinator(transport=transport, pipeline=pipeline())
+    run_id = coordinator.start(ids)
+    finish_next(
+        transport,
+        coordinator,
+        answers={
+            request["custom_id"]: JobScopeScreening(
+                mission_screen={
+                    "mission_relation": "clearly_outside",
+                    "mission_evidence": "sufficient",
+                }
+            )
+            for request in transport.requests(transport.created[-1])
+        },
+    )
+    run, items, waves = journal(run_id)
+    assert run.state == "completed"
+    assert all(
+        item.state == "filtered_after_screening" and item.offer_data is None for item in items
+    )
+    assert [wave.phase for wave in waves] == ["screening"]
+    assert counts()["analyses"] == 0 and counts()["paid"] == 1
+    summary = next(run for run in analysis_workspace()["runs"] if run["id"] == run_id)
+    assert summary["screened_out"] == 2
+    assert all(phase["status"] == "skipped" for phase in summary["phase_batches"][1:])
+
+
+def test_batch_invalid_screen_still_schedules_extraction_and_evaluation():
+    ids = seed_jobs(screened=False)
+    transport = FakeTransport()
+    coordinator = BatchAnalysisCoordinator(transport=transport, pipeline=pipeline())
+    run_id = coordinator.start(ids)
+    custom_id = transport.requests(transport.created[-1])[0]["custom_id"]
+    finish_next(
+        transport,
+        coordinator,
+        answers={
+            custom_id: '{"mission_screen":{"mission_relation":"sales","mission_evidence":"sufficient"}}'
+        },
+    )
+    assert journal(run_id)[1][0].state == "extraction_pending"
+    assert journal(run_id)[1][0].scope_data["status"] == "fail_open"
+    finish_next(transport, coordinator)
+    finish_next(transport, coordinator)
+    assert journal(run_id)[0].state == "completed"
+    with session_scope() as session:
+        job = session.get(Job, ids[0])
+        assert job.analysis is not None and job.archived_at is None
+
+
+def test_batch_screen_write_error_still_schedules_extraction_and_evaluation(monkeypatch):
+    from smartapply.pipeline.process import extraction_screening
+
+    ids = seed_jobs(screened=False)
+    original = extraction_screening.mark_archived
+
+    def fail_after_archive(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError("screen archive interrupted")
+
+    monkeypatch.setattr(extraction_screening, "mark_archived", fail_after_archive)
+    transport = FakeTransport()
+    coordinator = BatchAnalysisCoordinator(transport=transport, pipeline=pipeline())
+    run_id = coordinator.start(ids)
+    custom_id = transport.requests(transport.created[-1])[0]["custom_id"]
+    finish_next(
+        transport,
+        coordinator,
+        answers={
+            custom_id: JobScopeScreening(
+                mission_screen={
+                    "mission_relation": "clearly_outside",
+                    "mission_evidence": "sufficient",
+                }
+            )
+        },
+    )
+    assert journal(run_id)[1][0].state == "extraction_pending"
+    finish_next(transport, coordinator)
+    finish_next(transport, coordinator)
+    assert journal(run_id)[0].state == "completed"
+    with session_scope() as session:
+        job = session.get(Job, ids[0])
+        assert job.analysis is not None and job.archived_at is None
+
+
+def test_current_batch_extraction_schema_is_validated():
+    extracted = OfferExtractionOutput.model_validate(
+        {**offer().model_dump(), "seniority": "unknown", "offer_language": "en"}
+    )
+    body = {
+        "response_format": {
+            "json_schema": {
+                "name": OfferExtractionOutput.__name__,
+                "schema": OfferExtractionOutput.model_json_schema(),
+            }
+        }
+    }
+    assert schema_for_request(body) is OfferExtractionOutput
+    assert validate_request_response(body, extracted.model_dump_json()) == extracted
 
 
 def test_disjoint_runs_progress_independently_without_reserving_an_offer_twice():
@@ -327,7 +543,11 @@ def test_split_batches_show_individual_sizes_and_start_evaluation_after_all_extr
     coordinator = BatchAnalysisCoordinator(transport=transport, pipeline=pipeline())
     run_id = coordinator.start(ids)
     assert len(transport.created) == 2
-    phase = analysis_workspace()["runs"][0]["phase_batches"][0]
+    phase = next(
+        phase
+        for phase in analysis_workspace()["runs"][0]["phase_batches"]
+        if phase["phase"] == "extraction"
+    )
     assert phase["batch_count"] == 2
     assert [(batch["offers"], batch["total"]) for batch in phase["batches"]] == [(1, 1), (1, 1)]
 
@@ -456,7 +676,12 @@ def test_import_uses_batch_discount_and_preserves_cached_input_tokens():
     with session_scope() as session:
         usage = session.scalar(select(LLMUsage))
         assert usage.cost_usd == pytest.approx(
-            estimate_cost_usd(get_settings().openai_model_cheap, 100, 50, cached_prompt_tokens=80)
+            estimate_cost_usd(
+                resolve_route(get_llm_settings(), "job_offer_extraction").model,
+                100,
+                50,
+                cached_prompt_tokens=80,
+            )
             * 0.5
         )
         assert usage.cached_prompt_tokens == 80
@@ -514,7 +739,7 @@ def test_retry_failed_evaluation_reuses_successful_extraction():
     coordinator.retry(run_id)
     assert len(transport.created) == 3
     request = transport.requests(transport.created[-1])[0]
-    assert request["body"]["response_format"]["json_schema"]["name"] == "JobFitAssessment"
+    assert request["body"]["response_format"]["json_schema"]["name"] == "JobFitDecisionEvaluation"
     finish_next(transport, coordinator)
     assert journal(run_id)[0].state == "completed"
     assert counts()["analyses"] == 1
@@ -750,32 +975,39 @@ def test_exact_duplicate_prompts_pay_for_one_request_per_wave():
     assert counts()["paid"] == 2
 
 
-def _write_sync_cache(job_id, *, extraction=True, evaluation=False):
+def _write_sync_cache(job_id, *, extraction=True, evaluation=False, extraction_answer=None):
     profile = get_profile()
-    model = get_settings().openai_model_cheap
+    model = resolve_route(get_llm_settings(), "job_offer_extraction").model
     with session_scope() as session:
         job = session.get(Job, job_id)
         requests = []
         if extraction:
             requests.append(
                 (
-                    "job_offer_analysis",
-                    OfferAnalysis,
+                    "job_offer_extraction",
+                    OfferExtractionOutput,
                     job_analysis.build_system_prompt(),
                     job_analysis.build_user_prompt_from_input(
                         analyzer_input=build_analyzer_input(job)
                     ),
-                    offer(),
+                    extraction_answer or extraction_offer(),
                 )
             )
         if evaluation:
+            from smartapply.llm.fit_context import build_fit_context, build_fit_user
+
+            fit_user = build_fit_user(
+                build_fit_context(profile, model),
+                extraction_offer_facts(extraction_offer()),
+                extraction_provenance={"analyzer_input": asdict(build_analyzer_input(job))},
+            )
             requests.append(
                 (
                     "job_fit_assessment",
-                    JobFitAssessment,
+                    JobFitDecisionEvaluation,
                     job_fit.build_system_prompt(),
-                    job_fit.build_user_prompt(profile=profile, offer_analysis=offer()),
-                    fit(),
+                    fit_user,
+                    evaluation_from_user(fit_user),
                 )
             )
         for purpose, schema, system, user, answer in requests:
@@ -784,14 +1016,22 @@ def _write_sync_cache(job_id, *, extraction=True, evaluation=False):
                 system=system,
                 user=user,
                 schema_name=schema.__name__,
-                extra={"temperature": 0.2, "schema": schema.model_json_schema()},
+                extra=request_cache_extra(
+                    schema,
+                    0.2,
+                    stage_effort(
+                        "openai",
+                        model,
+                        purpose,
+                    ),
+                ),
             )
             cache_set(
                 session,
                 cache_key=key,
                 model=model,
                 purpose=purpose,
-                response=answer.model_dump_json(),
+                response=answer if isinstance(answer, str) else answer.model_dump_json(),
                 prompt_tokens=100,
                 completion_tokens=50,
             )
@@ -809,6 +1049,56 @@ def test_existing_synchronous_exact_cache_skips_extraction_batch():
     finish_next(transport, coordinator)
     assert journal(run_id)[0].state == "completed"
     assert counts()["paid"] == 1
+
+
+@pytest.mark.parametrize("from_cache", [False, True])
+def test_batch_preserves_wrapped_source_quotes_through_evaluation_and_storage(from_cache):
+    ids = seed_jobs()
+    extracted = extraction_offer()
+    source_quote = "Build machine learning models with Python."
+    extracted.supporting_excerpts = [f"« {source_quote} »"]
+    if from_cache:
+        _write_sync_cache(ids[0], extraction_answer=extracted)
+    transport = FakeTransport()
+    coordinator = BatchAnalysisCoordinator(transport=transport, pipeline=pipeline())
+    run_id = coordinator.start(ids)
+    if not from_cache:
+        custom_id = transport.requests(transport.created[-1])[0]["custom_id"]
+        finish_next(transport, coordinator, answers={custom_id: extracted})
+    item = journal(run_id)[1][0]
+    assert item.offer_data["supporting_excerpts"] == [source_quote]
+    assert item.offer_data["offer_risks"] == extracted.offer_risks
+    request = transport.requests(transport.created[-1])[0]
+    assert request["body"]["response_format"]["json_schema"]["name"] == "JobFitDecisionEvaluation"
+    assert json.dumps([source_quote]) in request["body"]["messages"][1]["content"]
+    finish_next(transport, coordinator)
+    assert journal(run_id)[0].state == "completed"
+    assert len(transport.created) == (1 if from_cache else 2)
+    assert counts()["paid"] == (1 if from_cache else 2)
+    with session_scope() as session:
+        job = session.get(Job, ids[0])
+        assert job.analysis.fit_score == 0.88
+        assert job.analysis.raw_response["supporting_excerpts"] == [source_quote]
+        assert job.analysis.raw_response["offer_risks"] == extracted.offer_risks
+        cached = session.scalar(select(LLMCache).where(LLMCache.purpose == "job_offer_extraction"))
+        assert json.loads(cached.response)["supporting_excerpts"] == extracted.supporting_excerpts
+    with session_scope() as session:
+        assert (
+            purge_expired_cache(
+                session, ttl_days=15, now=datetime.now(timezone.utc) + timedelta(days=16)
+            )
+            > 0
+        )
+    with session_scope() as session:
+        job = session.get(Job, ids[0])
+        assert session.scalar(select(func.count()).select_from(LLMCache)) == 0
+        source = job.analysis.fit_diagnostics["extraction_provenance"]
+        assert source["analyzer_input"] == item.analyzer_input
+        assert source["run_id"] == run_id
+        assert job.analysis.fit_diagnostics["offer_facts"]["required_skills"] == ["Python"]
+        reused, provenance = reusable_offer(session, job)
+        assert reused is not None
+        assert provenance == source
 
 
 def test_all_cached_run_completes_without_any_upload_or_batch_creation():
@@ -866,8 +1156,12 @@ def test_cancelled_extraction_resumes_evaluation_without_cache(next_mode):
         from types import SimpleNamespace
 
         instance.llm = SimpleNamespace(
-            cheap_model=coordinator.settings.openai_model_cheap,
-            complete_json=lambda **kwargs: calls.append(kwargs["purpose"]) or fit(),
+            name="openai",
+            cheap_model=resolve_route(coordinator.settings, "job_offer_extraction").model,
+            _settings=coordinator.settings,
+            complete_json=lambda **kwargs: (
+                calls.append(kwargs["purpose"]) or evaluation_from_user(kwargs["user"])
+            ),
         )
         instance._processor.llm = instance.llm
         assert instance.analyze_jobs(ids).analyzed == 1
@@ -877,7 +1171,7 @@ def test_cancelled_extraction_resumes_evaluation_without_cache(next_mode):
     assert analysis_workspace()["candidates"] == []
 
 
-def test_legacy_cancelled_journal_recovers_only_matching_extraction_contract():
+def test_cancelled_journal_recovers_only_matching_extraction_contract():
     from sqlalchemy import delete
 
     from smartapply.database.analysis_checkpoints import AnalysisCheckpoint

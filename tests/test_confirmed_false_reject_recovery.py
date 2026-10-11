@@ -83,14 +83,6 @@ def _archived_rejection(
         set_score(
             session,
             job.id,
-            rule_based_score=0.0,
-            semantic_score=0.71,
-            skill_score=0.8,
-            title_score=0.9,
-            seniority_score=0.7,
-            location_score=0.5,
-            domain_score=0.6,
-            final_score=0.75,
             components={
                 "rule_based": 0.0,
                 "semantic": 0.71,
@@ -306,12 +298,7 @@ def test_recovery_keeps_alias_archived_and_preserves_existing_work(isolated_db) 
                 session.get(Job, analyzed_id).ranked_at,
                 session.get(Job, analyzed_id).analyzed_at,
             ),
-            "scores": (
-                analyzed_score.semantic_score,
-                analyzed_score.skill_score,
-                analyzed_score.final_score,
-                analyzed_score.computed_at,
-            ),
+            "computed_at": analyzed_score.computed_at,
         }
         ranked_snapshot = {
             "timestamps": (
@@ -319,12 +306,7 @@ def test_recovery_keeps_alias_archived_and_preserves_existing_work(isolated_db) 
                 session.get(Job, ranked_id).ranked_at,
                 session.get(Job, ranked_id).analyzed_at,
             ),
-            "scores": (
-                ranked_score.semantic_score,
-                ranked_score.skill_score,
-                ranked_score.final_score,
-                ranked_score.computed_at,
-            ),
+            "computed_at": ranked_score.computed_at,
         }
 
     report = apply_confirmed_false_recovery(
@@ -351,15 +333,6 @@ def test_recovery_keeps_alias_archived_and_preserves_existing_work(isolated_db) 
         assert root.status == JobStatus.FILTERED
         assert root.archived_at is None
         assert root.filtered_at is not None
-        assert all(
-            value is None
-            for value in (
-                root_score.rule_based_score,
-                root_score.semantic_score,
-                root_score.skill_score,
-                root_score.final_score,
-            )
-        )
         assert "semantic" not in root_score.components
         assert "final" not in root_score.components
 
@@ -369,19 +342,6 @@ def test_recovery_keeps_alias_archived_and_preserves_existing_work(isolated_db) 
         assert filtered.archived_at is None
         assert filtered.filtered_at == filtered_at_snapshot
         assert filtered.ranked_at is None
-        assert all(
-            getattr(filtered_score, column) is None
-            for column in (
-                "rule_based_score",
-                "semantic_score",
-                "skill_score",
-                "title_score",
-                "seniority_score",
-                "location_score",
-                "domain_score",
-                "final_score",
-            )
-        )
         assert "semantic" not in filtered_score.components
         assert "final" not in filtered_score.components
 
@@ -392,16 +352,9 @@ def test_recovery_keeps_alias_archived_and_preserves_existing_work(isolated_db) 
         assert (analyzed.filtered_at, analyzed.ranked_at, analyzed.analyzed_at) == (
             analyzed_snapshot["timestamps"]
         )
-        assert (
-            analyzed_score.semantic_score,
-            analyzed_score.skill_score,
-            analyzed_score.final_score,
-            analyzed_score.computed_at,
-        ) == analyzed_snapshot["scores"]
-        assert analyzed_score.components["semantic"] == 0.71
-        assert analyzed_score.components["final"] == 0.75
-        assert analyzed_score.rule_based_score is None
-        assert "rule_based" not in analyzed_score.components
+        assert analyzed_score.computed_at == analyzed_snapshot["computed_at"]
+        assert "semantic" not in analyzed_score.components
+        assert "final" not in analyzed_score.components
 
         ranked = session.get(Job, ranked_id)
         ranked_score = session.query(JobScore).filter_by(job_id=ranked_id).one()
@@ -410,14 +363,9 @@ def test_recovery_keeps_alias_archived_and_preserves_existing_work(isolated_db) 
         assert (ranked.filtered_at, ranked.ranked_at, ranked.analyzed_at) == (
             ranked_snapshot["timestamps"]
         )
-        assert (
-            ranked_score.semantic_score,
-            ranked_score.skill_score,
-            ranked_score.final_score,
-            ranked_score.computed_at,
-        ) == ranked_snapshot["scores"]
-        assert ranked_score.rule_based_score is None
-        assert "rule_based" not in ranked_score.components
+        assert ranked_score.computed_at == ranked_snapshot["computed_at"]
+        assert "semantic" not in ranked_score.components
+        assert "final" not in ranked_score.components
 
         for job_id in (root_id, filtered_id, analyzed_id, ranked_id):
             components = session.query(JobScore).filter_by(job_id=job_id).one().components

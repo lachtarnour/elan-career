@@ -19,7 +19,8 @@ from smartapply.database.models import (
     JobStatus,
 )
 from smartapply.filtering.hard_reject.types import HardRejectResult
-from smartapply.llm import JobFitAssessment, OfferAnalysis
+from smartapply.llm import OfferExtractionOutput
+from smartapply.llm.schemas import JobScopeScreening
 from smartapply.pipeline import Pipeline
 from smartapply.pipeline.errors import StaleTaskResultError
 from smartapply.pipeline.process.analysis import AnalysisMixin
@@ -30,7 +31,7 @@ from smartapply.pipeline.process.analysis_admission import (
     is_current_analysis_candidate,
 )
 from smartapply.profile import get_profile
-from smartapply.ranking import MockEmbeddingsProvider
+from tests.fit_fixtures import evaluation_from_user
 
 
 def _kept_components():
@@ -44,7 +45,7 @@ def _job(external_id: str, **changes) -> Job:
     values = {
         "external_id": external_id,
         "title": "Machine Learning Engineer",
-        "company": "Example AI",
+        "source_company": "Example AI",
         "description": "Build machine learning models with Python.",
         "source": "manual",
         "location": "Paris",
@@ -60,45 +61,64 @@ def _provider(calls: list, hook=None):
         calls.append((kwargs["purpose"], kwargs["job_id"]))
         if hook:
             hook(kwargs["purpose"])
-        if kwargs["purpose"] == "job_offer_analysis":
-            return OfferAnalysis(
+        if kwargs["purpose"] == "job_scope_screening":
+            return JobScopeScreening(
+                mission_screen={"mission_relation": "unknown", "mission_evidence": "insufficient"}
+            )
+        if kwargs["purpose"] == "job_offer_extraction":
+            return OfferExtractionOutput(
                 role_type="Machine Learning Engineer",
-                seniority="",
+                seniority="unknown",
                 domain="",
                 required_skills=["Python"],
                 main_tasks=["Build machine learning models"],
                 nice_to_have=[],
                 cv_keywords_to_include=["Python"],
             )
-        return JobFitAssessment(fit_score=0.7, match_reasons=["Documented Python work"], risks=[])
+        return evaluation_from_user(kwargs["user"])
 
-    return SimpleNamespace(cheap_model="mock-cheap", complete_json=complete)
+    return SimpleNamespace(name="openai", cheap_model="mock-cheap", complete_json=complete)
 
 
 def test_unranked_offer_uses_its_own_score_foreign_key(isolated_db):
     with session_scope() as session:
         kept = _job("kept", id=1, score=JobScore(id=2, components=_kept_components()))
-        rejected = _job("rejected", id=2, score=JobScore(id=1, components={
-            "filter_disposition": "rejected",
-            "hard_reject": {"ruleset_version": "hard-reject-v2", "rejected": True},
-        }))
+        rejected = _job(
+            "rejected",
+            id=2,
+            score=JobScore(
+                id=1,
+                components={
+                    "filter_disposition": "rejected",
+                    "hard_reject": {"ruleset_version": "hard-reject-v2", "rejected": True},
+                },
+            ),
+        )
         session.add_all([kept, rejected])
     calls = []
     analyzer = AnalysisMixin()
-    analyzer.profile, analyzer.settings, analyzer.llm = get_profile(), get_settings(), _provider(calls)
+    analyzer.profile, analyzer.settings, analyzer.llm = (
+        get_profile(),
+        get_settings(),
+        _provider(calls),
+    )
 
     report = analyzer.analyze_jobs([1, 2])
 
     assert report.analyzed == 1 and report.skipped_missing == 1
-    assert calls == [("job_offer_analysis", 1), ("job_fit_assessment", 1)]
+    assert calls == [
+        ("job_scope_screening", 1),
+        ("job_offer_extraction", 1),
+        ("job_fit_assessment", 1),
+    ]
     with session_scope() as session:
         kept, rejected = session.get(Job, 1), session.get(Job, 2)
-        assert kept.analysis.fit_score == 0.7
-        assert kept.ranked_at is None and kept.score.final_score is None
+        assert kept.analysis.fit_score == 0.88
+        assert kept.ranked_at is None and kept.score is not None
         assert rejected.analysis is None and rejected.analyzed_at is None
 
 
-@pytest.mark.parametrize("purpose", ["job_offer_analysis", "job_fit_assessment"])
+@pytest.mark.parametrize("purpose", ["job_offer_extraction", "job_fit_assessment"])
 def test_own_rejection_is_rechecked_between_calls_and_before_publication(isolated_db, purpose):
     with session_scope() as session:
         session.add(_job("offset-score", score=JobScore(id=100, components=_kept_components())))
@@ -117,7 +137,7 @@ def test_own_rejection_is_rechecked_between_calls_and_before_publication(isolate
     analyzer.llm = _provider(calls, reject)
     with pytest.raises(StaleTaskResultError):
         analyzer._analyze_one(job_id=1)
-    assert len(calls) == (1 if purpose == "job_offer_analysis" else 2)
+    assert len(calls) == (2 if purpose == "job_offer_extraction" else 3)
     with session_scope() as session:
         assert session.get(Job, 1).analysis is None
 
@@ -126,27 +146,34 @@ def test_global_processing_analyzes_all_survivors_without_embeddings_or_top25(is
     with session_scope() as session:
         session.add_all([_job(f"survivor-{index}") for index in range(30)])
     calls = []
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=_provider(calls))
+    pipeline = Pipeline(llm=_provider(calls))
 
-    def forbidden_ranking(*args, **kwargs):
-        raise AssertionError("Analysis must not call the semantic ranking provider")
-
-    pipeline.scorer.rank = forbidden_ranking
     report = pipeline.process_pending(top_k_analyze=1)
 
     assert report.analyzed == report.kept_after_filter == 30
-    assert len(calls) == 60
+    assert len(calls) == 90
     with session_scope() as session:
         assert all(job.analyzed_at is not None for job in session.query(Job))
-        assert all(job.ranked_at is None and job.score.final_score is None for job in session.query(Job))
+        assert all(job.ranked_at is None and job.score is not None for job in session.query(Job))
     repeated = pipeline.process_pending()
-    assert repeated.analyzed == 0 and len(calls) == 60
+    assert repeated.analyzed == 0 and len(calls) == 90
 
 
-@pytest.mark.parametrize("blocked", [
-    "archived", "pending_duplicate", "alias", "sent", "interview", "application",
-    "submitted_application", "analysis_without_timestamp", "rejected", "stale_proof",
-])
+@pytest.mark.parametrize(
+    "blocked",
+    [
+        "archived",
+        "pending_duplicate",
+        "alias",
+        "sent",
+        "interview",
+        "application",
+        "submitted_application",
+        "analysis_without_timestamp",
+        "rejected",
+        "stale_proof",
+    ],
+)
 def test_candidate_queue_preserves_workflow_protections(isolated_db, blocked):
     with session_scope() as session:
         keeper = _job("canonical")
@@ -164,7 +191,9 @@ def test_candidate_queue_preserves_workflow_protections(isolated_db, blocked):
             job.status = blocked
         elif blocked in {"application", "submitted_application"}:
             job.application = Application(
-                form_submitted_at=datetime.now(timezone.utc) if blocked == "submitted_application" else None,
+                form_submitted_at=datetime.now(timezone.utc)
+                if blocked == "submitted_application"
+                else None,
             )
         elif blocked == "analysis_without_timestamp":
             job.analysis = JobAnalysis(fit_score=0.9, raw_response={"preserve": True})
@@ -190,25 +219,33 @@ def test_preparation_repairs_legacy_proof_without_touching_completed_history(iso
     recorded_at = datetime(2020, 1, 1)
     with session_scope() as session:
         job = _job(
-            "legacy-history", status=JobStatus.ANALYZED, ranked_at=recorded_at,
+            "legacy-history",
+            status=JobStatus.ANALYZED,
+            ranked_at=recorded_at,
             analyzed_at=recorded_at,
             analysis=JobAnalysis(fit_score=0.9, raw_response={"preserve": True}),
-            score=JobScore(final_score=0.8, computed_at=recorded_at, components={
-                "filter_disposition": "uncertain", "historical_audit": {"preserve": True},
-            }),
+            score=JobScore(
+                computed_at=recorded_at,
+                components={
+                    "filter_disposition": "uncertain",
+                    "historical_audit": {"preserve": True},
+                },
+            ),
         )
         session.add(job)
-    pipeline = Pipeline(embeddings=MockEmbeddingsProvider(), llm=_provider([]))
+    pipeline = Pipeline(llm=_provider([]))
 
     prepared = pipeline._processor.prepare_analysis(job_ids=[1], include_analyzed=True)
 
     assert prepared.kept_ids == [1]
     with session_scope() as session:
         job = session.get(Job, 1)
-        assert job.score.components["completed_filter_routing"]["disposition"] == "pending_relevance"
+        assert (
+            job.score.components["completed_filter_routing"]["disposition"] == "pending_relevance"
+        )
         assert "filter_disposition" not in job.score.components
         assert job.score.components["historical_audit"] == {"preserve": True}
-        assert job.score.final_score == 0.8 and job.score.computed_at == recorded_at
+        assert job.score.computed_at == recorded_at
         assert job.ranked_at == job.analyzed_at == recorded_at
         assert job.analysis.raw_response == {"preserve": True}
         assert job.status == JobStatus.ANALYZED
@@ -236,7 +273,9 @@ def test_queue_protects_transitive_duplicate_group_history(isolated_db, history)
         session.add(descendant)
         session.flush()
         assert not analysis_group_available(session, root.id)
-        assert analysis_group_available(session, root.id, exclude_applications=False) is (history == "draft")
+        assert analysis_group_available(session, root.id, exclude_applications=False) is (
+            history == "draft"
+        )
 
     analyzer = AnalysisMixin()
     assert analyzer.analysis_candidates([1]) == []
@@ -244,7 +283,7 @@ def test_queue_protects_transitive_duplicate_group_history(isolated_db, history)
     assert [job.id for job in explicit] == ([1] if history == "draft" else [])
 
 
-@pytest.mark.parametrize("purpose", ["job_offer_analysis", "job_fit_assessment"])
+@pytest.mark.parametrize("purpose", ["job_offer_extraction", "job_fit_assessment"])
 def test_alias_submission_during_analysis_stops_fit_or_publication(isolated_db, purpose):
     with session_scope() as session:
         root = _job("root")
@@ -263,38 +302,50 @@ def test_alias_submission_during_analysis_stops_fit_or_publication(isolated_db, 
     analyzer.llm = _provider(calls, submit_alias)
     with pytest.raises(StaleTaskResultError):
         analyzer._analyze_one(job_id=1)
-    assert len(calls) == (1 if purpose == "job_offer_analysis" else 2)
+    assert len(calls) == (2 if purpose == "job_offer_extraction" else 3)
     with session_scope() as session:
         assert session.get(Job, 1).analysis is None
 
 
 @pytest.mark.parametrize("application_status", [JobStatus.ANALYZED, JobStatus.ARCHIVED])
 def test_explicit_unsent_dossier_can_be_analyzed_but_default_selection_skips_it(
-    isolated_db, application_status,
+    isolated_db,
+    application_status,
 ):
     with session_scope() as session:
         session.add(_job("draft", application=Application(status=application_status)))
     calls = []
     analyzer = AnalysisMixin()
-    analyzer.profile, analyzer.settings, analyzer.llm = get_profile(), get_settings(), _provider(calls)
+    analyzer.profile, analyzer.settings, analyzer.llm = (
+        get_profile(),
+        get_settings(),
+        _provider(calls),
+    )
 
     protected = analyzer.analyze_jobs([1])
     assert protected.analyzed == 0 and protected.skipped_missing == 1 and calls == []
     explicit = analyzer.analyze_jobs([1], exclude_applications=False)
-    assert explicit.analyzed == 1 and len(calls) == 2
+    assert explicit.analyzed == 1 and len(calls) == 3
 
 
 def test_explicit_rescue_reanalysis_preserves_prior_analysis_when_provider_fails(isolated_db):
     recorded_at = datetime(2020, 1, 1)
     with session_scope() as session:
-        session.add(_job(
-            "rescue-history", analyzed_at=recorded_at,
-            analysis=JobAnalysis(fit_score=0.9, raw_response={"preserve": True}),
-            application=Application(status=JobStatus.ARCHIVED),
-        ))
+        session.add(
+            _job(
+                "rescue-history",
+                analyzed_at=recorded_at,
+                analysis=JobAnalysis(fit_score=0.9, raw_response={"preserve": True}),
+                application=Application(status=JobStatus.ARCHIVED),
+            )
+        )
     calls = []
     analyzer = AnalysisMixin()
-    analyzer.profile, analyzer.settings, analyzer.llm = get_profile(), get_settings(), _provider(calls)
+    analyzer.profile, analyzer.settings, analyzer.llm = (
+        get_profile(),
+        get_settings(),
+        _provider(calls),
+    )
     normal = analyzer.analyze_jobs([1], exclude_applications=False)
     assert normal.already_analyzed == 1 and calls == []
 
@@ -322,17 +373,30 @@ def test_dashboard_and_launch_intent_count_the_same_protected_queue(isolated_db)
         dossier_root = _job("dossier-root")
         session.add_all([eligible, pending_root, dossier_root])
         session.flush()
-        session.add_all([
-            _job("pending-review", possible_duplicate_of_id=pending_root.id,
-                 duplicate_review_status=JobDuplicateStatus.PENDING),
-            _job("alias-dossier", canonical_job_id=dossier_root.id,
-                 application=Application(form_submitted_at=datetime.now(timezone.utc))),
-            _job("rejected", score=JobScore(components={
-                "filter_disposition": "rejected",
-                "hard_reject": {"ruleset_version": "hard-reject-v2", "rejected": True},
-            })),
-            _job("unfiltered", filtered_at=None),
-        ])
+        session.add_all(
+            [
+                _job(
+                    "pending-review",
+                    possible_duplicate_of_id=pending_root.id,
+                    duplicate_review_status=JobDuplicateStatus.PENDING,
+                ),
+                _job(
+                    "alias-dossier",
+                    canonical_job_id=dossier_root.id,
+                    application=Application(form_submitted_at=datetime.now(timezone.utc)),
+                ),
+                _job(
+                    "rejected",
+                    score=JobScore(
+                        components={
+                            "filter_disposition": "rejected",
+                            "hard_reject": {"ruleset_version": "hard-reject-v2", "rejected": True},
+                        }
+                    ),
+                ),
+                _job("unfiltered", filtered_at=None),
+            ]
+        )
         eligible_id = eligible.id
 
     service = DesktopService()
@@ -362,15 +426,20 @@ def test_queue_read_does_not_load_offer_bodies_or_analysis_prompts(isolated_db):
         event.remove(engine, "before_cursor_execute", capture)
     assert statements
     for forbidden in (
-        "jobs.description", "jobs.cleaned_description", "job_analyses.raw_response",
-        "applications.cv_json", "analysis_batch_items.analyzer_input", "analysis_batch_waves.requests",
+        "jobs.description",
+        "jobs.cleaned_description",
+        "job_analyses.raw_response",
+        "applications.cv_json",
+        "analysis_batch_items.analyzer_input",
+        "analysis_batch_waves.requests",
     ):
         assert all(forbidden not in statement for statement in statements)
 
 
 @pytest.mark.parametrize("run_state", ["active", "attention"])
 def test_available_queue_excludes_reserved_batch_items_without_blocking_own_result_validation(
-    isolated_db, run_state,
+    isolated_db,
+    run_state,
 ):
     from smartapply.desktop.services import DesktopService
 
@@ -378,13 +447,26 @@ def test_available_queue_excludes_reserved_batch_items_without_blocking_own_resu
         reserved, available = _job("reserved"), _job("available")
         session.add_all([reserved, available])
         session.flush()
-        run = AnalysisBatchRun(id="test-run", state=run_state, model="mock", profile_data={})
+        run = AnalysisBatchRun(
+            id="test-run",
+            state=run_state,
+            model="mock",
+            provider="openai",
+            max_completion_tokens=6000,
+            profile_data={},
+        )
         session.add(run)
         session.flush()
-        session.add(AnalysisBatchItem(
-            run_id=run.id, job_id=reserved.id, job_snapshot="0" * 64,
-            title=reserved.title, company=reserved.company, analyzer_input={},
-        ))
+        session.add(
+            AnalysisBatchItem(
+                run_id=run.id,
+                job_id=reserved.id,
+                job_snapshot="0" * 64,
+                title=reserved.title,
+                company=reserved.source_company,
+                analyzer_input={},
+            )
+        )
         available_id = available.id
     service = DesktopService()
     assert service.dashboard().pending == 1

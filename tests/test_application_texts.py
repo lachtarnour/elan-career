@@ -118,7 +118,7 @@ def test_second_call_sees_frozen_cv_and_only_adds_summary_without_adding_skills(
     assert call["model"] == provider.smart_model
     assert call["refresh_cache"] is True
     assert call["job_id"] == 42
-    source_position = call["user"].index('"source_index"')
+    source_position = call["user"].index('"candidate_identity"')
     context_start = call["user"].rfind("{", 0, source_position)
     sources, _ = json.JSONDecoder().raw_decode(call["user"][context_start:])
     assert sources["final_cv"]["data"] == cv.model_dump(
@@ -147,3 +147,40 @@ def test_invalid_cv_structure_prevents_second_llm_call(text_inputs, invalid_part
         writer.generate_texts(cv, analysis, **context)
 
     provider.complete_json.assert_not_called()
+
+
+def test_fit_revision_preserves_nonfit_generation_inputs(text_inputs):
+    from smartapply.llm.prompts import (
+        application_texts,
+        cv_adaptation,
+    )
+
+    profile, cv, analysis, context = text_inputs
+    old = analysis.model_copy(
+        update={
+            "fit_score": 0.2,
+            "match_reasons": ["OLD_REASON"],
+            "risks": ["OLD_RISK"],
+        }
+    )
+    new = analysis.model_copy(
+        update={
+            "fit_score": 0.95,
+            "match_reasons": ["NEW_REASON"],
+            "risks": ["NEW_RISK"],
+        }
+    )
+    common = {key: context[key] for key in ("job_title", "job_company", "job_description")}
+    selection = dict(
+        profile=profile,
+        selected_experiences=profile.experiences,
+        selected_projects=profile.projects,
+        **common,
+    )
+    assert cv_adaptation.build_user_prompt(
+        analysis=old, **selection
+    ) == cv_adaptation.build_user_prompt(analysis=new, **selection)
+    args = dict(profile=profile, adapted_cv=cv, reference_date=date(2026, 10, 8), **common)
+    assert application_texts.build_user_prompt(
+        analysis=old, **args
+    ) == application_texts.build_user_prompt(analysis=new, **args)

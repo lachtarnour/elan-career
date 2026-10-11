@@ -38,6 +38,8 @@ Item {
 
         PageHeader {
             Layout.fillWidth: true
+            Layout.leftMargin: Math.max(0, (root.width - Theme.scrollGutter - Theme.pageContentMaxWidth) / 2)
+            Layout.rightMargin: Layout.leftMargin + Theme.scrollGutter
             title: "Entreprises"
             AppButton {
                 objectName: "companyAddButton"

@@ -29,7 +29,7 @@ from typing import Any, Protocol, runtime_checkable
 from rapidfuzz import fuzz
 from unidecode import unidecode
 
-from smartapply.company_identity import is_anonymous_company
+from smartapply.company_identity import is_anonymous_company, source_company_of
 from smartapply.config import get_settings
 from smartapply.dedup.geography import (
     commune_by_code,
@@ -444,7 +444,6 @@ _ADMINISTRATIVE_LOCATION_TRAILER_KEYS = _BROAD_LOCATION_KEYS | {"paris"}
 @runtime_checkable
 class JobLike(Protocol):
     title: str
-    company: str
     description: str
     external_id: str
 
@@ -522,8 +521,8 @@ def eligible_for_fuzzy_duplicate_comparison(left: JobLike, right: JobLike) -> bo
     evidence is incompatible. Missing locations and compatible broad labels
     remain neutral so an incomplete source cannot suppress a legitimate review.
     """
-    if is_anonymous_company(getattr(left, "company", None)) or is_anonymous_company(
-        getattr(right, "company", None)
+    if is_anonymous_company(source_company_of(left)) or is_anonymous_company(
+        source_company_of(right)
     ):
         return False
     return not offers_have_incompatible_precise_locations(left, right)
@@ -728,9 +727,9 @@ class Deduplicator:
         rewrites while the exact company/title block prevents broad false
         positives.
         """
-        if is_anonymous_company(getattr(target, "company", None)):
+        if is_anonymous_company(source_company_of(target)):
             return None
-        target_company = normalize_company(target.company)
+        target_company = normalize_company(source_company_of(target) or "")
         target_title = normalize_title(target.title)
         if not target_company or not target_title:
             return None
@@ -745,7 +744,7 @@ class Deduplicator:
                 target, "external_id", None
             ):
                 continue
-            if normalize_company(candidate.company) != target_company:
+            if normalize_company(source_company_of(candidate) or "") != target_company:
                 continue
             if not eligible_for_fuzzy_duplicate_comparison(target, candidate):
                 continue
@@ -804,9 +803,9 @@ class Deduplicator:
         # bucket get compared. This makes N² comparisons local instead of global.
         buckets: dict[str, list[int]] = {}
         for idx, job in enumerate(jobs):
-            if is_anonymous_company(getattr(job, "company", None)):
+            if is_anonymous_company(source_company_of(job)):
                 continue
-            key = normalize_company(job.company)
+            key = normalize_company(source_company_of(job) or "")
             if not key:
                 continue
             buckets.setdefault(key, []).append(idx)

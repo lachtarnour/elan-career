@@ -34,17 +34,6 @@ class LocalFilterReport:
 
 
 @dataclass
-class RankingReport:
-    total: int
-    kept_after_filter: int
-    duplicates_removed: int
-    ranked: int
-    shortlisted: int
-    ranked_ids: list[int]
-    shortlisted_ids: list[int]
-
-
-@dataclass
 class AnalyzeReport:
     requested: int
     already_analyzed: int
@@ -52,6 +41,7 @@ class AnalyzeReport:
     skipped_missing: int
     errors: list[dict[str, Any]] = field(default_factory=list)
     cancelled: bool = False
+    screened_out: int = 0
 
 
 @dataclass

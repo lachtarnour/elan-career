@@ -46,6 +46,7 @@ QtObject {
     readonly property color dangerLine: "#673541"
     readonly property int controlHeight: 40
     readonly property int pageGap: 24
+    readonly property int pageContentMaxWidth: 1320
     readonly property int sectionGap: 16
     readonly property int cardPadding: 22
     readonly property int scrollGutter: 14

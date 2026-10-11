@@ -277,7 +277,7 @@ def test_confirmation_with_two_dossiers_preserves_both_and_stays_pending(isolate
         assert session.get(Job, duplicate_id).duplicate_review_status == JobDuplicateStatus.PENDING
 
 
-@pytest.mark.parametrize("tracking_status", [JobStatus.SENT, JobStatus.INTERVIEW, JobStatus.REJECTED])
+@pytest.mark.parametrize("tracking_status", [JobStatus.SENT, JobStatus.INTERVIEW])
 def test_republication_keeps_sent_dossier_and_archived_history(isolated_db, tracking_status) -> None:
     from smartapply.database.repository import add_document
 
@@ -800,7 +800,7 @@ def test_backfill_releases_anonymous_fuzzy_pair_without_touching_history(isolate
         duplicate = session.get(Job, duplicate_id)
         assert root is not None
         assert duplicate is not None
-        root.company = duplicate.company = "Entreprise non communiquée"
+        root.source_company = duplicate.source_company = "Entreprise non communiquée"
         duplicate.analyzed_at = analyzed_at
         duplicate.source_data = {"legacy": "preserve"}
         application = create_or_get_application(session, duplicate_id)
@@ -1078,13 +1078,13 @@ def test_backfill_strong_identity_from_pending_sibling_does_not_protect_wrong_re
     with session_scope() as session:
         root = session.get(Job, root_id)
         target = session.get(Job, target_id)
-        root.company = target.company = "Entreprise non communiquée"
+        root.source_company = target.source_company = "Entreprise non communiquée"
         target.application_url = shared_url
         sibling = upsert_job(
             session,
             external_id="legacy:strong-pending-sibling",
             title=target.title,
-            company=target.company,
+            company=target.source_company,
             location=target.location,
             description=_DESCRIPTION,
             application_url=shared_url,
@@ -1125,7 +1125,7 @@ def test_backfill_new_link_respects_full_incoming_pending_group(isolated_db, con
             session,
             external_id="legacy:join-unknown-bridge",
             title=root.title,
-            company=root.company,
+            company=root.source_company,
             location="",
             description=_DESCRIPTION,
             application_url="https://acme.test/jobs/join-unknown-bridge",
@@ -1136,7 +1136,7 @@ def test_backfill_new_link_respects_full_incoming_pending_group(isolated_db, con
             session,
             external_id="legacy:join-lyon-child",
             title=root.title,
-            company=root.company,
+            company=root.source_company,
             location="Lyon" if conflict == "location" else "Paris",
             description=_DESCRIPTION,
             application_url="https://acme.test/jobs/join-lyon-child",
@@ -1309,7 +1309,7 @@ def test_backfill_preserves_mislabeled_fuzzy_pair_with_same_direct_url(isolated_
         duplicate = session.get(Job, duplicate_id)
         assert root is not None
         assert duplicate is not None
-        root.company = duplicate.company = "Entreprise non communiquée"
+        root.source_company = duplicate.source_company = "Entreprise non communiquée"
         root.location = "75 - Paris"
         duplicate.location = "69 - Lyon"
         root.application_url = "https://www.linkedin.com/jobs/view/4464028174?position=1"
@@ -1336,7 +1336,7 @@ def test_backfill_preserves_mislabeled_fuzzy_pair_with_same_france_travail_id(
         duplicate = session.get(Job, duplicate_id)
         assert root is not None
         assert duplicate is not None
-        root.company = duplicate.company = "Entreprise non communiquée"
+        root.source_company = duplicate.source_company = "Entreprise non communiquée"
         root.source = duplicate.source = "francetravail"
         root.location = "75 - Paris"
         duplicate.location = "69 - Lyon"
@@ -1365,7 +1365,7 @@ def test_backfill_does_not_treat_shared_search_page_as_strong_identity(isolated_
         duplicate = session.get(Job, duplicate_id)
         assert root is not None
         assert duplicate is not None
-        root.company = duplicate.company = "Entreprise non communiquée"
+        root.source_company = duplicate.source_company = "Entreprise non communiquée"
         root.application_url = duplicate.application_url = (
             "https://www.linkedin.com/jobs/search/?keywords=data"
         )
@@ -1632,14 +1632,15 @@ def test_explicit_filtering_prepares_both_offers_for_review(isolated_db, old_rej
     "reference_disposition,new_disposition,visible",
     [
         ("pending_relevance", "pending_relevance", True),
-        ("pending_relevance", "rejected", False),
-        ("rejected", "pending_relevance", False),
-        ("relevant", "pending_relevance", False),
-        ("pending_relevance", "relevant", False),
-        ("", "pending_relevance", False),
+        ("pending_relevance", "rejected", True),
+        ("rejected", "pending_relevance", True),
+        ("relevant", "pending_relevance", True),
+        ("pending_relevance", "relevant", True),
+        ("", "pending_relevance", True),
+        ("rejected", "rejected", False),
     ],
 )
-def test_duplicate_pending_toggle_requires_both_offers_pending(
+def test_duplicate_active_toggle_requires_at_least_one_non_rejected_offer(
     isolated_db, reference_disposition, new_disposition, visible
 ) -> None:
     reference_id, new_id = _create_review_pair()
@@ -1674,7 +1675,7 @@ def test_duplicate_pending_toggle_applies_limit_after_filtering(isolated_db) -> 
     with session_scope() as session:
         for job_id, disposition in (
             (first_reference, "rejected"),
-            (first_new, "pending_relevance"),
+            (first_new, "rejected"),
             (second_reference, "pending_relevance"),
             (second_new, "pending_relevance"),
         ):

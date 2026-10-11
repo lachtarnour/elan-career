@@ -350,10 +350,7 @@ def _contract_type(
     for label in CONTRACT_LABELS:
         if re.search(rf"\b{re.escape(label)}\b", combined, flags=re.IGNORECASE):
             return label
-    employment_type = _as_text(job_posting.get("employmentType"))
-    if employment_type == "FULL_TIME":
-        return "FULL_TIME"
-    return employment_type
+    return _normalize_api_contract_type(job_posting.get("employmentType"))
 
 
 def _remote_text(metadata: str, faq: dict[str, str]) -> str | None:

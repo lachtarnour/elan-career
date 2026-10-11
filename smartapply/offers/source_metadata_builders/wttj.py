@@ -6,6 +6,7 @@ from ast import literal_eval
 from typing import Any
 
 from smartapply.config import get_settings
+from smartapply.filtering.source_fact_builders.wttj import build_wttj_filter_facts
 from smartapply.offers.source_metadata_builders.common import (
     _MAX_LIST_ITEMS,
     _MAX_URLS,
@@ -73,8 +74,14 @@ def _wttj_fact_lines(source_data: dict[str, Any], enabled: set[str]) -> list[str
     company_profile = _dict(source_data.get("company_profile"))
 
     if "contract_type" in enabled:
-        _append_scalar(lines, "matches_api.contract_type", matches_api.get("contract_type"))
-        _append_scalar(lines, "employment_type", source_data.get("employment_type"))
+        refresh = _dict(source_data.get("_smartapply_wttj_refresh"))
+        if refresh.get("schema_version") == 1 and refresh.get("raw_contract_type"):
+            facts = build_wttj_filter_facts(source_data)
+            _append_scalar(lines, "contract_type", facts.structured_contract_type)
+            _append_scalar(lines, "contract_type_source", facts.structured_contract_source)
+        else:
+            _append_scalar(lines, "matches_api.contract_type", matches_api.get("contract_type"))
+            _append_scalar(lines, "employment_type", source_data.get("employment_type"))
     if "remote" in enabled:
         _append_scalar(lines, "matches_api.remote", matches_api.get("remote"))
         _append_scalar(lines, "remote_text", source_data.get("remote_text"))

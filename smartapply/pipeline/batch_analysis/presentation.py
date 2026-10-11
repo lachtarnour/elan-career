@@ -79,6 +79,7 @@ def _active_status(waves):
 
 
 def _phase(phase, waves, items, active_phase):
+    filtered = {"filtered_after_screening"}
     selected = [wave for wave in waves if wave.phase == phase]
     batches = [
         {
@@ -109,7 +110,8 @@ def _phase(phase, waves, items, active_phase):
                 "completed",
             )
         if (
-            status == "completed"
+            phase == "evaluation"
+            and status == "completed"
             and not any(w.provider_batch_id for w in selected)
             and not any(w.provider_data.get("completed", 0) for w in selected)
             and not any(
@@ -130,14 +132,22 @@ def _phase(phase, waves, items, active_phase):
             "submitted_count": sum(bool(w.provider_batch_id) for w in selected),
             "batches": batches,
         }
-    completed = (
-        all(
-            item.state in {"evaluation_pending", "evaluation_failed", "completed"} for item in items
+    evaluation_states = {"evaluation_pending", "evaluation_failed", "completed"}
+    if phase != "screening" and items and all(item.state in filtered for item in items):
+        status = "skipped"
+    else:
+        completed = (
+            all(item.state in evaluation_states | filtered for item in items)
+            if phase == "extraction"
+            else all(
+                item.state
+                in evaluation_states | filtered | {"extraction_pending", "extraction_failed"}
+                for item in items
+            )
+            if phase == "screening"
+            else all(item.state in {"completed"} | filtered for item in items)
         )
-        if phase == "extraction"
-        else all(item.state == "completed" for item in items)
-    )
-    status = "completed" if completed else "preparing" if phase == active_phase else "waiting"
+        status = "completed" if completed else "preparing" if phase == active_phase else "waiting"
     return {
         "phase": phase,
         "status": status,
@@ -156,6 +166,8 @@ def _item_label(item, phase, status):
         return "En extraction" if phase == "extraction" else "En évaluation"
     return {
         "extraction_pending": "À extraire",
+        "screening_pending": "À préfiltrer",
+        "filtered_after_screening": "Écartée au préfiltre",
         "evaluation_pending": "À évaluer",
         "completed": "Analysée",
         "extraction_failed": "Extraction en échec",
@@ -165,7 +177,7 @@ def _item_label(item, phase, status):
     }.get(item.state, "En attente")
 
 
-def _run(run, waves, items, job_details, sequence):
+def _run(run, waves, items, job_details, sequence, scope_enabled=False):
     active_waves = [wave for wave in waves if wave.state != "imported"]
     active = run.state in {"active", "attention"}
     if active_waves:
@@ -173,7 +185,9 @@ def _run(run, waves, items, job_details, sequence):
         status = _active_status(active_waves)
     else:
         phase = (
-            "extraction"
+            "screening"
+            if any(item.state == "screening_pending" for item in items)
+            else "extraction"
             if any(item.state == "extraction_pending" for item in items)
             else "evaluation"
         )
@@ -189,6 +203,7 @@ def _run(run, waves, items, job_details, sequence):
         status = "cancelling"
     failed = [item for item in items if item.state.endswith("_failed")]
     skipped = [item for item in items if item.state == "skipped"]
+    screened_out = [item for item in items if item.state in {"filtered_after_screening"}]
     deadlines = [
         wave.provider_data.get("expires_at")
         for wave in active_waves
@@ -196,11 +211,19 @@ def _run(run, waves, items, job_details, sequence):
     ]
     return {
         "id": run.id,
+        "provider": run.provider,
+        "provider_label": "Anthropic" if run.provider == "anthropic" else "OpenAI",
+        "model": run.model,
         "sequence": sequence,
         "phase": phase,
         "phase_label": {
-            "extraction": "Étape 1/2 · Extraction des offres",
-            "evaluation": "Étape 2/2 · Évaluation de la pertinence",
+            "screening": "Étape 1/3 · Préfiltre des missions",
+            "extraction": "Étape 2/3 · Extraction des offres"
+            if scope_enabled
+            else "Étape 1/2 · Extraction des offres",
+            "evaluation": "Étape 3/3 · Évaluation de la pertinence"
+            if scope_enabled
+            else "Étape 2/2 · Évaluation de la pertinence",
             "done": "Bilan de l’analyse",
         }[phase],
         "status": status,
@@ -208,6 +231,7 @@ def _run(run, waves, items, job_details, sequence):
         "total": len(items),
         "completed": sum(item.state == "completed" for item in items),
         "analyzed": sum(item.state == "completed" for item in items),
+        "screened_out": len(screened_out),
         "failed": len(failed),
         "skipped": len(skipped),
         "created_at": _date(run.created_at),
@@ -217,7 +241,7 @@ def _run(run, waves, items, job_details, sequence):
         "last_error": run.last_error,
         "is_active": active,
         "can_retry": (
-            (bool(failed) and not active and not run.cancel_requested)
+            (scope_enabled and bool(failed) and not active and not run.cancel_requested)
             or run.state in {"attention", "blocked"}
         ),
         "can_cancel": run.state in ACTIVE_ANALYSIS_RUN_STATES and not run.cancel_requested,
@@ -242,19 +266,30 @@ def _run(run, waves, items, job_details, sequence):
         ],
         "phase_batches": [
             _phase(listed_phase, waves, items, phase if active else "done")
-            for listed_phase in ("extraction", "evaluation")
+            for listed_phase in (
+                ("screening", "extraction", "evaluation")
+                if scope_enabled
+                else ("extraction", "evaluation")
+            )
         ],
     }
 
 
 def analysis_workspace() -> dict:
     with session_scope() as session:
+        scope_runs = set(
+            session.scalars(
+                select(AnalysisBatchRun.id).where(AnalysisBatchRun.scope_context.is_not(None))
+            )
+        )
         runs = list(
             session.scalars(
                 select(AnalysisBatchRun)
                 .options(
                     load_only(
                         AnalysisBatchRun.id,
+                        AnalysisBatchRun.provider,
+                        AnalysisBatchRun.model,
                         AnalysisBatchRun.state,
                         AnalysisBatchRun.cancel_requested,
                         AnalysisBatchRun.last_error,
@@ -312,7 +347,7 @@ def analysis_workspace() -> dict:
                     load_only(
                         Job.id,
                         Job.title,
-                        Job.company,
+                        Job.source_company,
                         Job.location,
                         Job.source,
                         Job.display_metadata,
@@ -347,7 +382,7 @@ def analysis_workspace() -> dict:
             {
                 "id": job.id,
                 "title": job.title,
-                "company": job.company,
+                "company": job.source_company,
                 "location": job.location or "",
                 "experience": _experience(job),
                 "source": job.source,
@@ -370,6 +405,7 @@ def analysis_workspace() -> dict:
                 items_by_run[run.id],
                 job_details,
                 sequences[run.id],
+                run.id in scope_runs,
             )
             for run in runs
         ]

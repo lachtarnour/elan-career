@@ -310,7 +310,7 @@ def _load_records(
     connection: sqlite3.Connection, where: str, parameters: tuple[Any, ...],
 ) -> list[dict[str, Any]]:
     projections = [
-        f'{alias}."{row[1]}" AS "{prefix}__{row[1]}"'
+        f'{alias}."{row[1]}" AS "{prefix}__{("company" if prefix == "job" and row[1] == "source_company" else row[1])}"'
         for table, alias, prefix in (("jobs", "j", "job"), ("job_scores", "s", "score"))
         for row in connection.execute(f'PRAGMA table_info("{table}")')
     ]
@@ -354,6 +354,13 @@ def _job(record: dict[str, Any]) -> LegacyJob:
 def _evaluate(
     record: dict[str, Any], rejector: Rejector, allowed_ids: frozenset[int],
 ) -> HardRejectResult:
+    from smartapply.filtering.manual_policy import (
+        has_manual_filter_bypass,
+        manual_filter_bypass_result,
+    )
+
+    if has_manual_filter_bypass(_decode_object(record["score__components"])):
+        return manual_filter_bypass_result()
     result = rejector.evaluate(_job(record))
     if result.ruleset_version != RULESET_VERSION:
         raise LegacyFilterMigrationError(f"Unsupported ruleset: {result.ruleset_version}")
@@ -437,7 +444,10 @@ def _migrated_components(
     *, applied_at: str, review_manifest_sha256: str | None,
 ) -> dict[str, Any]:
     previous = _decode_object(record["score__components"])
-    components = dict(previous)
+    from smartapply.pipeline.process.score_components import LEGACY_MATCH_COMPONENT_KEYS
+
+    components = {key: value for key, value in previous.items()
+                  if key not in LEGACY_MATCH_COMPONENT_KEYS}
     preserve_independent_reason = previous.get("rejection_stage") not in {None, "local_filter"}
     if not preserve_independent_reason:
         for key in _REJECTION_KEYS:

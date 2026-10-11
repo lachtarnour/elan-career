@@ -1,5 +1,6 @@
 """LLM provider abstraction + schemas + prompts."""
 
+from smartapply.llm.anthropic_provider import AnthropicProvider
 from smartapply.llm.cache import make_cache_key
 from smartapply.llm.factory import get_llm_provider
 from smartapply.llm.mock_provider import MockLLMProvider
@@ -13,43 +14,42 @@ from smartapply.llm.schemas import (
     AdaptedBullet,
     AdaptedCV,
     AdaptedExperience,
-    ApplicationDraft,
     ApplicationTexts,
     AssembledCV,
     CVPersonalization,
     CVSelection,
     DocumentReviewIssue,
     DocumentTextReview,
-    FormQuestionAnswer,
-    FormQuestionAnswers,
     JobAnalysis,
     JobFitAssessment,
+    JobFitDecisionEvaluation,
     MotivationLetter,
     MotivationLetterRepair,
     OfferAnalysis,
+    OfferExtractionOutput,
     ProjectSelectionReason,
     SkillSelectionBlock,
 )
 from smartapply.llm.usage import OPENAI_PRICING, estimate_cost_usd
 
 __all__ = [
+    "AnthropicProvider",
     "AdaptedBullet",
     "AdaptedCV",
     "AdaptedExperience",
-    "ApplicationDraft",
     "ApplicationTexts",
     "AssembledCV",
     "CVPersonalization",
     "CVSelection",
     "DocumentReviewIssue",
     "DocumentTextReview",
-    "FormQuestionAnswer",
-    "FormQuestionAnswers",
     "JobAnalysis",
     "JobFitAssessment",
+    "JobFitDecisionEvaluation",
     "MotivationLetter",
     "MotivationLetterRepair",
     "OfferAnalysis",
+    "OfferExtractionOutput",
     "ProjectSelectionReason",
     "SkillSelectionBlock",
     "LLMError",

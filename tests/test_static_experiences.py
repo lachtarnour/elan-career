@@ -14,7 +14,6 @@ from smartapply.cv.letter_writer import ApplicationTextWriter
 from smartapply.cv.motivation_validator import _paragraph_count, _word_count
 from smartapply.llm import (
     AdaptedCV,
-    ApplicationDraft,
     ApplicationTexts,
     AssembledCV,
     CVPersonalization,
@@ -24,7 +23,6 @@ from smartapply.llm import (
     MockLLMProvider,
 )
 from smartapply.profile import BulletLink, get_profile
-from smartapply.ranking import MockEmbeddingsProvider
 
 
 def _personalization() -> dict:
@@ -53,11 +51,6 @@ def _payload(schema: type[CVSelection]) -> dict:
     if schema is CVSelection:
         data.pop("professional_summary")
         data["selected_certificate_ids"] = []
-    if schema is ApplicationDraft:
-        data.update(
-            motivation_letter_subject="Application — Data Scientist",
-            motivation_letter_body="I would like to discuss the role and its data priorities.",
-        )
     return data
 
 
@@ -95,7 +88,7 @@ def _letter_body() -> str:
     return body
 
 
-@pytest.mark.parametrize("schema", [CVSelection, CVPersonalization, ApplicationDraft])
+@pytest.mark.parametrize("schema", [CVSelection, CVPersonalization])
 def test_llm_schemas_neither_request_nor_accept_experiences(schema) -> None:
     json_schema = schema.model_json_schema()
     assert "selected_experiences" not in json_schema["properties"]
@@ -143,7 +136,7 @@ def test_different_offers_keep_identical_complete_experiences(method) -> None:
     profile = get_profile().model_copy(deep=True)
     before = profile.model_dump()
     provider = _RecordingProvider()
-    adapter = CvAdapter(profile, llm=provider, embeddings=MockEmbeddingsProvider())
+    adapter = CvAdapter(profile, llm=provider)
     results = []
     for role, skill in [("Data Scientist NLP", "RAG"), ("Data Analyst", "SQL")]:
         analysis = JobAnalysis(
@@ -157,7 +150,8 @@ def test_different_offers_keep_identical_complete_experiences(method) -> None:
             risks=[],
             cv_keywords_to_include=[skill],
         )
-        cv, *_ = getattr(adapter, method)(analysis, job_title=role, job_company="Example")
+        result = getattr(adapter, method)(analysis, job_title=role, job_company="Example")
+        cv = result if method == "adapt" else result[0]
         results.append(cv)
         if method == "adapt":
             assert type(cv) is AssembledCV
@@ -181,7 +175,6 @@ def test_different_offers_keep_identical_complete_experiences(method) -> None:
             for bullet in exp.bullets:
                 assert bullet.text in call["user"]
     assert len(provider.calls) == (2 if method == "adapt" else 6)
-    assert all(call["purpose"] != "application_draft" for call in provider.calls)
     # Neither post-processing nor a later edit to a snapshot can alter the profile.
     results[0].selected_experiences[0].bullets[0].text = "Changed snapshot"
     assert results[1].model_dump()["selected_experiences"] == _expected(profile)
@@ -206,7 +199,7 @@ def test_overlong_second_call_summary_is_returned_intact_with_review_diagnostics
     # The contribution at the end must survive every former cutting boundary.
     assert summary.index(critical_tail) > profile.style_guide.max_summary_length
     provider = _RecordingProvider(summary=summary)
-    adapter = CvAdapter(profile, llm=provider, embeddings=MockEmbeddingsProvider())
+    adapter = CvAdapter(profile, llm=provider)
     analysis = JobAnalysis(
         role_type="Data Scientist",
         seniority="mid",
@@ -229,7 +222,7 @@ def test_overlong_second_call_summary_is_returned_intact_with_review_diagnostics
         return result
 
     with patch.object(ApplicationTextWriter, "review", capture_review):
-        cv, _, _ = adapter.adapt_application(
+        cv, _ = adapter.adapt_application(
             analysis, job_title="Data Scientist", job_company="Example"
         )
 
@@ -347,14 +340,14 @@ def test_final_cv_snapshot_loads_legacy_storage_and_preserves_new_audit() -> Non
         "selected_certificate_ids": None,
         "llm_selected_skills": None,
     }
-    draft = ApplicationDraft(**_payload(ApplicationDraft))
-    assembled = assemble_cv(draft, profile)
+    personalization = CVPersonalization(**_payload(CVPersonalization))
+    assembled = assemble_cv(personalization, profile)
     assert (
         assembled.model_dump(exclude={
             "project_selection_reasons", "selected_certificate_ids", "llm_selected_skills",
         })
         == legacy_payload
     )
-    assert assembled.project_selection_reasons == draft.project_selection_reasons
+    assert assembled.project_selection_reasons == personalization.project_selection_reasons
     assert AdaptedCV.model_validate_json(assembled.model_dump_json()) == assembled
     assert "motivation_letter_body" not in assembled.model_dump()

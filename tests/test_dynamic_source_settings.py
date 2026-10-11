@@ -39,7 +39,7 @@ def test_source_reload_updates_credentials_and_options_without_mutating_runtime(
         "APIFY_TOKEN=new-token\nLINKEDIN_MAX_RESULTS=80\n"
         "LINKEDIN_MAX_CONCURRENT_RUNS=4\nLINKEDIN_HTTP_TIMEOUT=20\n"
         "DATABASE_URL=sqlite:///must-not-switch.db\nPROFILE_DIR=/must-not-switch\n"
-        "OPENAI_MODEL_SMART=must-not-switch\nOPENAI_MAX_COMPLETION_TOKENS=invalid\n",
+        "OPENAI_MODEL_SMART=ignored-legacy-value\n",
         encoding="utf-8",
     )
 
@@ -56,10 +56,9 @@ def test_source_reload_updates_credentials_and_options_without_mutating_runtime(
         "profile_dir",
         "output_dir",
         "cache_dir",
-        "openai_model_smart",
-        "openai_max_completion_tokens",
     ):
         assert getattr(fresh, field) == original_data[field]
+    assert "openai_model_smart" not in config.Settings.model_fields
     assert config.get_settings() is original
     assert original.model_dump() == original_data
 

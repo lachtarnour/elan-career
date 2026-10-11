@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+from smartapply.company_identity import is_known_publisher_name, publisher_reintroduced
 from smartapply.concurrency import application_publication, job_operation
 from smartapply.config import get_settings
 from smartapply.cv import CvAdapter, CvValidator
@@ -12,7 +13,9 @@ from smartapply.cv.motivation_validator import MotivationLetterValidator
 from smartapply.cv.role_family import classify
 from smartapply.database import session_scope, write_session_scope
 from smartapply.database.models import Application, Job, JobStatus
+from smartapply.language import resolve_document_language
 from smartapply.llm import LLMProvider
+from smartapply.llm.provider import LLMError
 from smartapply.pipeline.application_renderer import ApplicationDocumentRenderer
 from smartapply.pipeline.apply.cv_writer import CvWriterMixin, _document_company_label
 from smartapply.pipeline.apply.persistence import ApplicationPersistenceMixin
@@ -101,23 +104,45 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
             snapshot = PublicationSnapshot.capture(job, application)
             snapshot.validate(session.get(Job, job_id), application)
         check_cancelled(self.stop_requested)
-        offer_language = analysis.offer_language or "fr"
+        offer_language, language_observation = resolve_document_language(
+            analysis.offer_language,
+            f"{job.title}\n{job.cleaned_description or job.description or ''}",
+        )
+        if language_observation:
+            report.validation_warnings.append(language_observation)
         document_company = _document_company_label(
-            job.company,
+            job.source_company,
             analysis.extracted_company_name,
             offer_language,
+        )
+        document_analysis = (
+            analysis.model_copy(update={
+                "extracted_company_name": "",
+                "company_context": "",
+                "offer_interest_points": [],
+            })
+            if not document_company
+            else analysis
         )
 
         adapted, letter = self._generate_draft(
             job=job,
-            analysis=analysis,
+            analysis=document_analysis,
             offer_language=offer_language,
             document_company=document_company,
             report=report,
             refresh_cache=refresh_cache,
         )
+        if is_known_publisher_name(analysis.extracted_company_name) and publisher_reintroduced(
+            analysis.extracted_company_name,
+            adapted.cv_title,
+            adapted.professional_summary,
+            letter.subject,
+            letter.body,
+        ):
+            raise LLMError("A neutralized publisher name appeared in generated document text")
         check_cancelled(self.stop_requested)
-        self._validate_letter(letter, adapted, analysis, report)
+        self._validate_letter(letter, adapted, analysis, report, language=offer_language)
         self._validate_cv_offer_alignment(adapted, analysis, job.title, report)
         resolved_form_url = form_url or job.application_url
         report.form_url = resolved_form_url

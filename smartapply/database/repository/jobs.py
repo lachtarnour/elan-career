@@ -10,6 +10,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from smartapply.database.models import Job, JobDuplicateStatus, JobScore, JobStatus, ShortlistOrigin
+from smartapply.jobsearch.archive_reasons import ARCHIVE_ORIGINS, ArchiveOrigin
 
 _SCORE_COMPONENT_KEYS = frozenset(
     {
@@ -25,12 +26,16 @@ _SCORE_COMPONENT_KEYS = frozenset(
     }
 )
 _ACTIVE_REJECTION_KEYS = frozenset(
-    {"rejection_stage", "rejection_reasons", "rejection_summary", "reasons", "hard_reject"}
+    {"rejection_stage", "rejection_reasons", "rejection_summary", "reasons", "hard_reject", "archive_origin"}
 )
 
 
 def upsert_job(session: Session, *, external_id: str, **fields: Any) -> Job:
     """Insert or update a job by external_id. Returns the persisted instance."""
+    if "company" in fields:
+        if "source_company" in fields:
+            raise ValueError("Specify only source_company or legacy company")
+        fields["source_company"] = fields.pop("company")
     job = session.execute(select(Job).where(Job.external_id == external_id)).scalar_one_or_none()
     if job is None:
         job = Job(external_id=external_id, **fields)
@@ -108,12 +113,6 @@ def mark_filtered(session: Session, job_id: int) -> None:
         job.filtered_at = datetime.now(timezone.utc)
 
 
-def mark_ranked(session: Session, job_id: int) -> None:
-    job = session.get(Job, job_id)
-    if job is not None:
-        job.ranked_at = datetime.now(timezone.utc)
-
-
 def set_shortlisted(
     session: Session,
     job_id: int,
@@ -131,15 +130,12 @@ def set_shortlisted(
         return None
 
     if selected:
-        # A Top selection is eligible for CV/letter generation only after
-        # local ranking and offer analysis have both completed. A shortlist
-        # must never manufacture missing pipeline timestamps.
+        # A Top selection needs a completed filter and AI fit assessment.
         if (
             job.filtered_at is None
-            or job.ranked_at is None
             or job.analyzed_at is None
-            or job.score is None
-            or job.score.final_score is None
+            or job.analysis is None
+            or job.analysis.fit_score is None
         ):
             return None
         now = datetime.now(timezone.utc)
@@ -170,10 +166,19 @@ def mark_analyzed(session: Session, job_id: int) -> None:
         retire_filter_routing(job)
 
 
-def mark_archived(session: Session, job_id: int) -> None:
+def mark_archived(
+    session: Session, job_id: int, *, origin: ArchiveOrigin | None = None,
+) -> None:
     """Mark a job archived in both routing and display state."""
     job = session.get(Job, job_id)
     if job is not None:
+        if origin is not None:
+            if origin not in ARCHIVE_ORIGINS:
+                raise ValueError(f"Unsupported archive origin: {origin}")
+            from smartapply.database.repository.scores import set_score
+
+            previous = dict(job.score.components) if job.score and job.score.components else {}
+            set_score(session, job_id, components={**previous, "archive_origin": origin})
         job.archived_at = datetime.now(timezone.utc)
         # Archiving removes the offer from Top sélection as well. Keeping the
         # old marker here makes an archived offer look shortlisted to any
@@ -226,6 +231,7 @@ def rescue_archived_job(
         "stage": previous_components.get("rejection_stage"),
         "reasons": list(previous_components.get("rejection_reasons", []) or []),
         "summary": previous_components.get("rejection_summary"),
+        "archive_origin": previous_components.get("archive_origin"),
     }
     components = {
         key: value
@@ -240,17 +246,17 @@ def rescue_archived_job(
         "previous_rejection": previous_rejection,
         "previous_hard_reject": previous_components.get("hard_reject"),
     }
-    set_score(
+    if job.canonical_job_id is not None or job.possible_duplicate_of_id is not None:
+        components["manual_rescue"]["previous_duplicate"] = {
+            "canonical_job_id": job.canonical_job_id,
+            "possible_duplicate_of_id": job.possible_duplicate_of_id,
+            "duplicate_review_status": job.duplicate_review_status,
+            "duplicate_match_type": job.duplicate_match_type,
+            "duplicate_confidence": job.duplicate_confidence,
+        }
+    job.score = set_score(
         session,
         job_id,
-        rule_based_score=None,
-        semantic_score=None,
-        skill_score=None,
-        title_score=None,
-        seniority_score=None,
-        location_score=None,
-        domain_score=None,
-        final_score=None,
         components=components,
     )
     return job

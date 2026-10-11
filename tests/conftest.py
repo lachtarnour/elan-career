@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -20,14 +21,26 @@ os.environ.update(
     OUTPUT_DIR=str(_runtime_path / "documents"),
     CACHE_DIR=str(_runtime_path / "cache"),
     PROFILE_DIR=str(Path(__file__).parent / "fixtures" / "profile"),
-    LLM_PROVIDER="mock",
-    EMBEDDINGS_PROVIDER="mock",
     OPENAI_API_KEY="",
+    ANTHROPIC_API_KEY="",
     SERPAPI_API_KEY="",
     FRANCETRAVAIL_CLIENT_ID="",
     FRANCETRAVAIL_CLIENT_SECRET="",
     APIFY_TOKEN="",
     WTTJ_COOKIE="",
+)
+_mock_call_purposes = (
+    "JOB_SCOPE_SCREENING", "JOB_OFFER_EXTRACTION", "JOB_FIT_ASSESSMENT",
+    "CV_ADAPTATION", "APPLICATION_TEXTS", "DOCUMENT_REVIEW", "DOCUMENT_CORRECTION",
+    "MOTIVATION_LETTER_REPAIR", "CV_SELECTION_CORRECTION",
+)
+(_runtime_path / ".env").write_text("", encoding="utf-8")
+(_runtime_path / "model_config.json").write_text(
+    json.dumps({purpose.lower(): {
+        "provider": "mock",
+        "model": "mock-cheap" if purpose in _mock_call_purposes[:3] else "mock-smart",
+        "reasoning": "auto", "max_output_tokens": 6000,
+    } for purpose in _mock_call_purposes}), encoding="utf-8",
 )
 
 # Clear any cached settings before tests

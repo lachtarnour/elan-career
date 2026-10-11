@@ -7,7 +7,6 @@ Item {
     property string title: ""
     property bool blocked: false
     readonly property var batches: phase.batches || []
-    readonly property int requestCount: Number(phase.total || 0)
 
     visible: batches.length > 0
     Layout.fillWidth: true
@@ -17,7 +16,7 @@ Item {
         id: content
         anchors.fill: parent
         anchors.margins: 2
-        spacing: 11
+        spacing: 7
 
         RowLayout {
             Layout.fillWidth: true
@@ -29,8 +28,8 @@ Item {
                 font.weight: Font.DemiBold
             }
             Text {
+                visible: root.batches.length > 1
                 text: root.batches.length + " Batch"
-                    + " · " + root.requestCount + (root.requestCount === 1 ? " demande" : " demandes")
                 color: Theme.inkMuted
                 font.pixelSize: 11
             }
@@ -42,7 +41,7 @@ Item {
                 id: batchRow
                 required property var modelData
                 Layout.fillWidth: true
-                spacing: 6
+                spacing: 4
                 readonly property int total: Number(modelData.total || 0)
                 readonly property int processed: Math.min(total,
                     Number(modelData.completed || 0) + Number(modelData.failed || 0))
@@ -53,32 +52,31 @@ Item {
                     Layout.fillWidth: true
                     spacing: 8
                     Text {
-                        text: "Batch n°" + modelData.number
+                        text: "Batch " + modelData.number
                         color: Theme.inkSoft
                         font.pixelSize: 11
                         font.weight: Font.DemiBold
                     }
                     Text {
+                        objectName: "analysisBatchState_" + root.phase.phase + "_" + modelData.number
                         Layout.fillWidth: true
-                        text: modelData.offers === null || modelData.offers === undefined
-                            ? total + (total === 1 ? " demande" : " demandes")
-                            : Number(modelData.offers) + (Number(modelData.offers) === 1 ? " offre" : " offres")
-                                + " · " + total + (total === 1 ? " demande" : " demandes")
-                        color: Theme.inkMuted
+                        visible: modelData.status !== "completed"
+                        text: batchRow.batchState
+                        color: root.blocked || Number(modelData.failed || 0) > 0
+                            ? Theme.warning : Theme.inkMuted
                         font.pixelSize: 11
                         elide: Text.ElideRight
                     }
                     Text {
-                        objectName: "analysisBatchState_" + root.phase.phase + "_" + modelData.number
-                        text: batchRow.batchState
-                        color: root.blocked || Number(modelData.failed || 0) > 0
-                            ? Theme.warning : Theme.inkSoft
+                        objectName: "analysisBatchProgress_" + root.phase.phase + "_" + modelData.number
+                        text: batchRow.processed + " / " + batchRow.total
+                        color: Theme.inkMuted
                         font.pixelSize: 11
                     }
                 }
                 Rectangle {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 5
+                    Layout.preferredHeight: 3
                     radius: 3
                     color: Theme.line
                     Rectangle {
@@ -88,13 +86,6 @@ Item {
                         radius: parent.radius
                         color: Number(modelData.failed || 0) > 0 ? Theme.warning : Theme.accentBright
                     }
-                }
-                Text {
-                    objectName: "analysisBatchProgress_" + root.phase.phase + "_" + modelData.number
-                    text: batchRow.processed + " / " + batchRow.total
-                        + (batchRow.total === 1 ? " demande traitée" : " demandes traitées")
-                    color: Theme.inkMuted
-                    font.pixelSize: 10
                 }
             }
         }

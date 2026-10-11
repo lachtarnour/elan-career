@@ -16,6 +16,7 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from smartapply.company_identity import document_company_name
 from smartapply.cv.certificate_selection import selected_certificates
 from smartapply.cv.education import education_entries_for_english
 from smartapply.cv.links import render_bullet_html
@@ -209,7 +210,7 @@ class HtmlApplicationRenderer:
             subject=letter.subject,
             paragraphs=paragraphs,
             job_title=job_title,
-            job_company=job_company,
+            job_company=document_company_name(job_company),
             letter_headline=headline,
             contact_line=self._contact_line(),
             contact_items=self._contact_items(),

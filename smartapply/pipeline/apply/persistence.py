@@ -87,8 +87,9 @@ class ApplicationPersistenceMixin:
                         return True
                     if not job_is_active(root) or (existing is not None and (
                         existing.form_submitted_at is not None
-                        or existing.status in {JobStatus.SENT, JobStatus.INTERVIEW,
-                                           JobStatus.REJECTED, JobStatus.ARCHIVED}
+                        or existing.status in {
+                            JobStatus.SENT, JobStatus.INTERVIEW, JobStatus.ARCHIVED,
+                        }
                     )):
                         raise StaleTaskResultError()
                     report.application_id = existing.id

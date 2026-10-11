@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 
+from smartapply.config import get_llm_settings
 from smartapply.cv.motivation_validator import (
     MotivationLetterValidator,
     normalize_french_elisions,
@@ -25,8 +26,10 @@ from smartapply.llm import (
     LLMProvider,
     MotivationLetter,
 )
-from smartapply.llm.prompts import application_texts, document_review, motivation_letter
+from smartapply.llm.prompts import application_texts, document_review
 from smartapply.llm.prompts.document_context import allowed_source_ids
+from smartapply.llm.routes import provider_for
+from smartapply.llm_policy import resolve_route
 from smartapply.profile import Profile
 
 # Reuse the validators' findings; never estimate lengths or cut generated text here.
@@ -83,15 +86,21 @@ class ApplicationTextWriter:
             language=language,
             reference_date=self.reference_date,
         )
-        texts = self.llm.complete_json(
+        provider = provider_for(self.llm, "application_texts")
+        route = resolve_route(
+            getattr(self.llm, "_settings", None) or get_llm_settings(), "application_texts"
+        )
+        texts = provider.complete_json(
             system=application_texts.build_system_prompt(),
             user=prompt,
             schema=ApplicationTexts,
-            model=self.llm.smart_model,
+            model=route.model,
             temperature=0.3,
             purpose="application_texts",
             job_id=job_id,
             refresh_cache=refresh_cache,
+            effort=route.reasoning,
+            max_completion_tokens=route.max_output_tokens,
         )
         # Only the new summary enters the CV. No selection or skills pass runs
         # after this point, and an overlong summary is preserved for the review.
@@ -99,40 +108,6 @@ class ApplicationTextWriter:
             {**cv.model_dump(), "professional_summary": texts.professional_summary}
         )
         return adapted, self._normalize_letter(texts.to_motivation_letter(), language)
-
-    def generate_letter(
-        self,
-        cv: AdaptedCV,
-        analysis: JobAnalysis,
-        *,
-        job_title: str,
-        job_company: str,
-        job_description: str,
-        language: str,
-        job_id: int | None,
-        refresh_cache: bool = False,
-    ) -> MotivationLetter:
-        prompt = motivation_letter.build_user_prompt(
-            profile=self.profile,
-            analysis=analysis,
-            adapted_cv=cv,
-            job_title=job_title,
-            job_company=job_company,
-            job_description=job_description,
-            language=language,
-            reference_date=self.reference_date,
-        )
-        letter = self.llm.complete_json(
-            system=motivation_letter.build_system_prompt(),
-            user=prompt,
-            schema=MotivationLetter,
-            model=self.llm.smart_model,
-            temperature=0.3,
-            purpose="motivation_letter",
-            job_id=job_id,
-            refresh_cache=refresh_cache,
-        )
-        return self._normalize_letter(letter, language)
 
     @staticmethod
     def _normalize_letter(letter: MotivationLetter, language: str) -> MotivationLetter:
@@ -318,7 +293,7 @@ class ApplicationTextWriter:
         job_id: int | None,
         refresh_cache: bool = False,
     ) -> TextReviewResult:
-        """One review, at most one proposed revision and one fresh confirmation.
+        """One review, at most one separate correction and one fresh confirmation.
 
         Unconfirmed revisions never replace the original documents. Failure or
         remaining semantic issues are explicit errors, not silent approvals.
@@ -346,10 +321,15 @@ class ApplicationTextWriter:
                 result.attempts[-1].update(status="incomplete", decision="incomplete")
 
         for attempt in range(2):
+            route = resolve_route(
+                getattr(self.llm, "_settings", None) or get_llm_settings(), "document_review"
+            )
             trace = {
                 "schema_version": 2,
-                "attempt": attempt + 1,
-                "model": self.llm.smart_model,
+                "attempt": len(result.attempts) + 1,
+                "model": route.model,
+                "purpose": "document_review",
+                "reasoning": route.reasoning,
                 "reference_date": self.reference_date.isoformat(),
             }
             prompt = document_review.build_user_prompt(
@@ -362,20 +342,23 @@ class ApplicationTextWriter:
                 job_description=job_description,
                 language=language,
                 validation_issues=self._validation_issues(candidate_cv, candidate_letter, analysis),
-                allow_corrections=attempt == 0,
+                allow_corrections=False,
                 reference_date=self.reference_date,
             )
             try:
-                review = self.llm.complete_json(
+                provider = provider_for(self.llm, "document_review")
+                review = provider.complete_json(
                     system=document_review.build_system_prompt(),
                     user=prompt,
                     schema=DocumentTextReview,
-                    model=self.llm.smart_model,
+                    model=route.model,
                     temperature=0.0,
                     purpose="document_review",
                     job_id=job_id,
                     use_cache=False,
                     refresh_cache=refresh_cache,
+                    effort=route.reasoning,
+                    max_completion_tokens=route.max_output_tokens,
                 )
             except LLMError:
                 # Provider errors may contain request contents. Persist only a
@@ -391,13 +374,79 @@ class ApplicationTextWriter:
             trace.update(status="completed", review=review.model_dump(), decision="rejected")
             result.attempts.append(trace)
             contract_errors = self._review_contract_errors(
-                review, candidate_cv, candidate_letter, allow_corrections=attempt == 0
+                review, candidate_cv, candidate_letter, allow_corrections=False
             )
             if contract_errors:
                 # Keep the raw response in the trace, but do not promote its
                 # unvalidated accusations to factual errors about the candidate.
                 reject_revision(contract_errors, incomplete=True)
                 return result
+
+            if attempt == 0 and any(issue.category != "style" for issue in review.issues):
+                first_review = review
+                trace["decision"] = "correction_requested"
+                correction_route = resolve_route(
+                    getattr(self.llm, "_settings", None) or get_llm_settings(),
+                    "document_correction",
+                )
+                correction_trace = {
+                    "schema_version": 2,
+                    "attempt": len(result.attempts) + 1,
+                    "model": correction_route.model,
+                    "purpose": "document_correction",
+                    "reasoning": correction_route.reasoning,
+                    "reference_date": self.reference_date.isoformat(),
+                }
+                correction_prompt = document_review.build_user_prompt(
+                    profile=self.profile,
+                    analysis=analysis,
+                    adapted_cv=cv,
+                    letter=letter,
+                    job_title=job_title,
+                    job_company=job_company,
+                    job_description=job_description,
+                    language=language,
+                    validation_issues=self._validation_issues(cv, letter, analysis),
+                    allow_corrections=True,
+                    reference_date=self.reference_date,
+                    correction_findings=[issue.model_dump() for issue in review.issues],
+                )
+                try:
+                    provider = provider_for(self.llm, "document_correction")
+                    review = provider.complete_json(
+                        system=document_review.build_system_prompt(),
+                        user=correction_prompt,
+                        schema=DocumentTextReview,
+                        model=correction_route.model,
+                        temperature=0.0,
+                        purpose="document_correction",
+                        job_id=job_id,
+                        use_cache=False,
+                        refresh_cache=refresh_cache,
+                        effort=correction_route.reasoning,
+                        max_completion_tokens=correction_route.max_output_tokens,
+                    )
+                except LLMError:
+                    result.attempts.append(
+                        {**correction_trace, "status": "unavailable", "decision": "unavailable"}
+                    )
+                    reject_revision(
+                        ["text_review_unavailable: correction non terminée"], incomplete=True
+                    )
+                    return result
+                trace = correction_trace
+                trace.update(status="completed", review=review.model_dump(), decision="rejected")
+                result.attempts.append(trace)
+                contract_errors = self._review_contract_errors(
+                    review, cv, letter, allow_corrections=True
+                )
+                if [issue.model_dump(exclude={"replacement"}) for issue in review.issues] != [
+                    issue.model_dump(exclude={"replacement"}) for issue in first_review.issues
+                ]:
+                    contract_errors.append("text_review_correction_findings_changed")
+                if contract_errors:
+                    reject_revision(contract_errors, incomplete=True)
+                    return result
 
             blocking = self._blocking_issues(review)
             advisory = [issue for issue in review.issues if issue not in blocking]

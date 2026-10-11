@@ -35,7 +35,6 @@ def test_smoke_test_env_isolated_from_user_runtime(tmp_path: Path) -> None:
     assert env["DATABASE_URL"] == f"sqlite:///{runtime / 'smartapply.db'}"
     assert env["OUTPUT_DIR"] == str(runtime / "documents")
     assert env["CACHE_DIR"] == str(runtime / "cache")
-    assert env["LLM_PROVIDER"] == env["EMBEDDINGS_PROVIDER"] == "mock"
 
 
 def test_running_bundle_pids_matches_the_exact_packaged_executable(

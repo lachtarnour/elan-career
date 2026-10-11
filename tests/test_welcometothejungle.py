@@ -408,7 +408,7 @@ def test_parse_detail_api_job_reads_public_api_payload() -> None:
     assert job.title == "Business data analyst"
     assert job.company == "Phagos"
     assert job.location == "Paris, FR"
-    assert job.contract_type == "Full-time"
+    assert job.contract_type == "CDI"
     assert job.remote_policy == "hybrid"
     assert job.published_date is not None
     assert job.experience == {
@@ -420,6 +420,43 @@ def test_parse_detail_api_job_reads_public_api_payload() -> None:
     assert job.source_data is not None
     assert job.source_data["salary"]["min"] == 45000
     assert job.source_data["company_profile"]["presentation"] == "Phagos builds biotech products."
+
+
+@pytest.mark.parametrize(
+    ("raw_contract", "expected"),
+    [
+        ("FULL_TIME", "CDI"),
+        ("full_time", "CDI"),
+        ("Full-Time", "CDI"),
+        (" full_time ", "CDI"),
+        ("temporary", "CDD"),
+        ("TEMPORARY", "CDD"),
+        ("CDD", "CDD"),
+        ("internship", "Internship"),
+        ("apprenticeship", "Apprenticeship"),
+        ("freelance", "Freelance"),
+        ("part_time", "Part-time"),
+        ("unknown_contract", "unknown_contract"),
+        (None, None),
+        ("", None),
+    ],
+)
+def test_wttj_api_contract_uses_source_semantics(raw_contract, expected) -> None:
+    job = parse_detail_api_job({"contract_type": raw_contract})
+
+    assert job.contract_type == expected
+    assert job.source_data["detail_api"]["contract_type"] == raw_contract
+
+
+@pytest.mark.parametrize(("visible_contract", "expected"), [("", "CDI"), ("CDD", "CDD")])
+def test_wttj_html_contract_fallback_preserves_visible_contract(visible_contract, expected) -> None:
+    html = f'''<html><script type="application/ld+json">
+        {{"@type": "JobPosting", "title": "Engineer", "employmentType": "FULL_TIME"}}
+        </script><div data-testid="job-metadata-block">{visible_contract}</div></html>'''
+
+    job = parse_detail_html(html)
+
+    assert job.contract_type == expected
 
 
 def test_parse_company_html_reads_profile_fields() -> None:

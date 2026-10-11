@@ -13,17 +13,19 @@ Item {
     readonly property int sentCount: Number(AppBridge.dashboard.sent || 0)
 
     Flickable {
+        id: dashboardScroll
         anchors.fill: parent
         z: 1
         contentWidth: width
-        contentHeight: content.implicitHeight + 12
+        contentHeight: content.height + 12
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         ScrollBar.vertical: AppScrollBar { }
 
         ColumnLayout {
             id: content
-            width: Math.min(1320, parent.width - Theme.scrollGutter)
+            width: Math.min(Theme.pageContentMaxWidth, parent.width - Theme.scrollGutter)
+            height: Math.max(implicitHeight, dashboardScroll.height - 12)
             x: (parent.width - Theme.scrollGutter - width) / 2
             spacing: Theme.pageGap
 
@@ -33,6 +35,7 @@ Item {
             }
 
             RowLayout {
+                objectName: "dashboardMetrics"
                 Layout.fillWidth: true
                 spacing: 13
 
@@ -78,11 +81,15 @@ Item {
                 }
             }
 
+            Item { Layout.fillHeight: true }
+
             SectionTitle {
+                objectName: "dashboardDailyTitle"
                 title: "Envois par jour"
             }
             Item {
                 id: dailyProgress
+                objectName: "dashboardDailyChart"
                 Layout.fillWidth: true
                 Layout.preferredHeight: 236
                 property var chartPoints: AppBridge.dashboard.sent_by_day || []
@@ -240,6 +247,8 @@ Item {
                 }
             }
 
+            Item { Layout.fillHeight: true }
+
             GridLayout {
                 Layout.fillWidth: true
                 columns: 5
@@ -248,6 +257,7 @@ Item {
 
                 Surface {
                     id: recentApplicationsPanel
+                    objectName: "recentApplicationsPanel"
                     Layout.columnSpan: 5
                     Layout.fillWidth: true
                     Layout.preferredHeight: (AppBridge.dashboard.recent || []).length > 0 ? 258 : 238

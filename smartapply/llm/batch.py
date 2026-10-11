@@ -1,4 +1,4 @@
-"""OpenAI Batch transport for the existing structured analysis requests.
+"""Canonical Batch requests and OpenAI transport.
 
 This module only handles request files and provider responses. The analysis
 pipeline owns durable submission intent, polling, cache, usage and job updates.
@@ -9,15 +9,18 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
 from smartapply.config import get_settings
 from smartapply.llm.cache import make_cache_key
-from smartapply.llm.openai_provider import OpenAIProvider, _to_strict_schema
+from smartapply.llm.fit_response import FitDecisionResponse, read_fit_response
 from smartapply.llm.provider import LLMError, LLMValidationError
+from smartapply.llm.request_options import request_cache_extra
+from smartapply.llm.schemas import JobFitDecisionEvaluation
+from smartapply.llm.structured import request_body, validate_output
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -65,34 +68,30 @@ def build_batch_request(
     max_completion_tokens: int,
     purpose: str,
     temperature: float = 0.2,
+    provider: str = "openai",
+    effort: str | None = None,
 ) -> BatchRequest:
     """Keep prompts, structured output and exact-cache identity unchanged."""
     if not custom_id or not model or max_completion_tokens <= 0:
         raise ValueError("Batch requests need an ID, a model and a positive token limit")
-    body = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": schema.__name__,
-                "strict": True,
-                "schema": _to_strict_schema(schema),
-            },
-        },
-        "temperature": temperature,
-        "max_completion_tokens": max_completion_tokens,
-        "prompt_cache_key": f"elan:{purpose}:{schema.__name__}",
-    }
+    body = request_body(
+        model=model,
+        system=system,
+        user=user,
+        schema=schema,
+        temperature=temperature,
+        max_completion_tokens=max_completion_tokens,
+        purpose=purpose,
+        effort=effort,
+        provider=provider,
+    )
     cache_key = make_cache_key(
         model=model,
         system=system,
         user=user,
         schema_name=schema.__name__,
-        extra={"temperature": temperature, "schema": schema.model_json_schema()},
+        extra=request_cache_extra(schema, temperature, effort),
+        provider=provider,
     )
     return BatchRequest(custom_id=custom_id, body=body, cache_key=cache_key)
 
@@ -204,6 +203,8 @@ class BatchSnapshot:
     cancelled_at: int | None = None
     metadata: dict[str, str] = field(default_factory=dict)
     errors: dict[str, Any] | None = None
+    provider: str = "openai"
+    provider_status: str | None = None
 
     @property
     def terminal(self) -> bool:
@@ -275,12 +276,22 @@ class BatchResult:
     def successful(self) -> bool:
         return self.error_code is None and self.error_message is None
 
-    def validate(self, schema: type[T]) -> T:
+    def validate(self, schema: type[T]) -> T | FitDecisionResponse:
         if not self.successful:
+            if schema is JobFitDecisionEvaluation and self.error_code in {
+                "refusal",
+                "incomplete_output",
+            }:
+                parsed = read_fit_response(self.content, schema=schema)
+                return replace(
+                    parsed,
+                    observations=parsed.observations
+                    + [f"Provider {self.error_code}; usable decisions retained"],
+                )
             raise LLMValidationError(
                 f"Batch request {self.custom_id} failed: {self.error_message or self.error_code}"
             )
-        return OpenAIProvider._validate(self.content, schema)
+        return validate_output(self.content, schema)
 
 
 def _as_mapping(value: Any) -> Mapping[str, Any]:
@@ -340,10 +351,16 @@ def _parse_result(raw: Mapping[str, Any]) -> BatchResult:
     message = _as_mapping(choice.get("message"))
     content = message.get("content")
     if message.get("refusal"):
-        return BatchResult(**common, error_code="refusal", error_message=str(message["refusal"]))
+        return BatchResult(
+            **common,
+            content=content if isinstance(content, str) else "",
+            error_code="refusal",
+            error_message=str(message["refusal"]),
+        )
     if choice.get("finish_reason") != "stop":
         return BatchResult(
             **common,
+            content=content if isinstance(content, str) else "",
             error_code="incomplete_output",
             error_message=f"Completion ended with {choice.get('finish_reason')!r}",
         )
@@ -377,14 +394,17 @@ def parse_results(content: str | bytes) -> dict[str, BatchResult]:
 class OpenAIBatchTransport:
     """Small synchronous SDK boundary; polling is the caller's responsibility."""
 
-    def __init__(self, client: Any = None):
+    provider = "openai"
+
+    def __init__(self, client: Any = None, *, settings=None):
         self._client = client
+        self._settings = settings
 
     def _client_lazy(self) -> Any:
         if self._client is None:
             from openai import OpenAI
 
-            api_key = get_settings().openai_api_key
+            api_key = (self._settings or get_settings()).openai_api_key
             if not api_key:
                 raise LLMError("OPENAI_API_KEY is not set")
             # Polling resumes later after a timeout. A bounded SDK call also
@@ -447,3 +467,14 @@ class OpenAIBatchTransport:
 
     def cancel(self, batch_id: str) -> BatchSnapshot:
         return BatchSnapshot.from_provider(self._client_lazy().batches.cancel(batch_id))
+
+
+def get_batch_transport(provider: str, *, settings=None):
+    """Resolve a saved run's provider, independent of the current selection."""
+    if provider == "openai":
+        return OpenAIBatchTransport(settings=settings)
+    if provider == "anthropic":
+        from smartapply.llm.anthropic_batch import AnthropicBatchTransport
+
+        return AnthropicBatchTransport(settings=settings)
+    raise ValueError("Le traitement Batch nécessite OpenAI ou Anthropic.")

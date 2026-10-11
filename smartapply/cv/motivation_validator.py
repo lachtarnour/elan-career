@@ -17,6 +17,9 @@ _FOREIGN_SCRIPT_RANGES = {
     "cjk": r"\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF",
 }
 
+DEFAULT_LETTER_MIN_WORDS = 180
+DEFAULT_LETTER_MAX_WORDS = 240
+
 
 def _normalize(text: str) -> str:
     return " ".join((text or "").lower().split())
@@ -94,7 +97,12 @@ class MotivationLetterValidator:
     establish whether an attribution or expression of motivation is justified.
     """
 
-    def __init__(self, profile: Profile, min_words: int = 180, max_words: int = 240):
+    def __init__(
+        self,
+        profile: Profile,
+        min_words: int = DEFAULT_LETTER_MIN_WORDS,
+        max_words: int = DEFAULT_LETTER_MAX_WORDS,
+    ):
         self.profile = profile
         self.min_words = min_words
         self.max_words = max_words

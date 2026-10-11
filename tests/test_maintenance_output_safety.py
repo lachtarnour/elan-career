@@ -10,7 +10,6 @@ import pytest
 
 from scripts.reclassify_hard_rejects import main as reclassify_main
 from scripts.recover_confirmed_false_rejections import main as recovery_main
-from scripts.replay_hard_reject_audit import main as replay_main
 from smartapply.maintenance import _sqlite_safety
 from smartapply.maintenance._sqlite_safety import (
     UnsafeOutputPathError,
@@ -138,35 +137,3 @@ def test_recovery_cli_refuses_to_overwrite_manifest(
         recovery_main()
 
     assert manifest.read_bytes() == b"manifest sentinel"
-
-
-def test_replay_cli_refuses_to_overwrite_frozen_database(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    audit_dir = tmp_path / "audit"
-    audit_dir.mkdir()
-    database = audit_dir / "before.db"
-    corrections = tmp_path / "reason-corrections.json"
-    database.write_bytes(b"database sentinel")
-    corrections.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "replay_hard_reject_audit.py",
-            "--audit-dir",
-            str(audit_dir),
-            "--database",
-            str(database),
-            "--reason-corrections",
-            str(corrections),
-            "--output",
-            str(database),
-        ],
-    )
-
-    with pytest.raises(UnsafeOutputPathError):
-        replay_main()
-
-    assert database.read_bytes() == b"database sentinel"

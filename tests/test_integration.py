@@ -15,12 +15,11 @@ from smartapply.llm import (
     ApplicationTexts,
     CVSelection,
     DocumentTextReview,
-    JobFitAssessment,
     MockLLMProvider,
-    OfferAnalysis,
+    OfferExtractionOutput,
 )
 from smartapply.profile import get_profile
-from smartapply.ranking import MockEmbeddingsProvider
+from tests.fit_fixtures import evaluation_from_user
 
 
 @pytest.fixture(autouse=True)
@@ -116,10 +115,11 @@ SAMPLE_JOBS = [
 def _register_llm_fixtures() -> None:
     MockLLMProvider.clear()
     MockLLMProvider.register(
-        "job_offer_analysis",
-        OfferAnalysis(
+        "job_offer_extraction",
+        OfferExtractionOutput(
             role_type="Data Scientist NLP",
             seniority="mid",
+            offer_language="fr",
             domain="HealthTech",
             main_tasks=[
                 "Concevoir des pipelines RAG",
@@ -140,15 +140,7 @@ def _register_llm_fixtures() -> None:
     )
     MockLLMProvider.register(
         "job_fit_assessment",
-        JobFitAssessment(
-            fit_score=0.5,
-            match_reasons=[
-                "Forte expérience NLP/RAG",
-                "Projet Evidence RAG",
-                "Pipelines speech via Whisper",
-            ],
-            risks=["Pas d'expérience prod cloud à grande échelle"],
-        ),
+        lambda **kwargs: evaluation_from_user(kwargs["user"], levels=(2, 4, 4)),
     )
     MockLLMProvider.register(
         "cv_adaptation",
@@ -222,20 +214,16 @@ def test_full_pipeline_on_realistic_sample(tmp_path: Path) -> None:
 
     from smartapply.database import session_scope
     from smartapply.database.models import Job, JobAnalysis
-    from smartapply.database.repository import top_jobs_by_score
+    from smartapply.offers import RawJob
     from smartapply.pipeline import Pipeline
+    from smartapply.pipeline.ingestor import Ingestor
 
-    p = Pipeline(embeddings=MockEmbeddingsProvider(), llm=MockLLMProvider())
+    p = Pipeline(llm=MockLLMProvider())
 
-    # ---- Step 1: Ingest the 5 sample jobs ----
-    for job_data in SAMPLE_JOBS:
-        p.ingest_text(
-            text=job_data["description"],
-            title=job_data["title"],
-            company=job_data["company"],
-            location=job_data["location"],
-            application_url=job_data["application_url"],
-        )
+    # Mock fetched results: a user-entered offer deliberately bypasses filters.
+    Ingestor()._persist("fixture_search", [RawJob(
+        external_id=f"fixture_search:{index}", source="fixture_search", **job_data,
+    ) for index, job_data in enumerate(SAMPLE_JOBS)])
 
     # ---- Step 2: Process ----
     process_report = p.process_pending()
@@ -246,24 +234,24 @@ def test_full_pipeline_on_realistic_sample(tmp_path: Path) -> None:
     assert process_report.kept_after_filter <= 4
     assert process_report.analyzed >= 2
 
-    # ---- Step 3: Optional ranking of the completed analysis pool ----
+    # ---- Step 3: Select completed analyses by AI fit ----
     with session_scope() as s:
-        analyzed_ids = list(s.scalars(
-            select(Job.id)
-            .join(JobAnalysis, JobAnalysis.job_id == Job.id)
-            .where(Job.archived_at.is_(None), Job.analyzed_at.is_not(None))
+        top = list(s.scalars(
+            select(Job).join(JobAnalysis).where(
+                Job.archived_at.is_(None), Job.analyzed_at.is_not(None),
+                JobAnalysis.fit_score.is_not(None),
+            ).order_by(JobAnalysis.fit_score.desc(), Job.id.asc()).limit(2)
         ))
-    p.rank_pending(job_ids=analyzed_ids, top_k_ranked=2)
-    with session_scope() as s:
-        top = list(top_jobs_by_score(s, 2))
         top_ids = [j.id for j in top]
-        top_companies = [j.company for j in top]
+        top_companies = [j.source_company for j in top]
 
     assert top_ids
     # The Sales Director should NOT be in the top
     assert "Example Sales" not in top_companies
-    # The BI role should NOT be in the top
-    assert "Example Retail" not in top_companies
+    with session_scope() as s:
+        assert [s.get(Job, job_id).analysis.fit_score for job_id in top_ids] == sorted(
+            [s.get(Job, job_id).analysis.fit_score for job_id in top_ids], reverse=True
+        )
 
     reports = []
     for jid in top_ids:

@@ -10,6 +10,7 @@ import pytest
 from PySide6.QtCore import QCoreApplication
 from sqlalchemy import event
 
+from smartapply.concurrency import TaskConflictError
 from smartapply.database import session_scope
 from smartapply.database.analysis_batches import (
     AnalysisBatchItem,
@@ -27,6 +28,7 @@ from smartapply.database.models import (
 from smartapply.database.session import get_engine
 from smartapply.desktop.analysis_services import AnalysisServiceMixin
 from smartapply.desktop.bridge import DesktopBridge
+from smartapply.desktop.services import DesktopService
 from smartapply.filtering.hard_reject.types import HardRejectResult
 from smartapply.pipeline.batch_analysis.presentation import analysis_workspace
 from smartapply.pipeline.errors import TaskCancelledError
@@ -83,7 +85,12 @@ def make_bridge(monkeypatch):
             start_analysis_batch=lambda ids: workspace(active=True),
             start_immediate_analysis=lambda ids, **kwargs: {
                 "workspace": workspace(),
-                "report": SimpleNamespace(analyzed=len(ids), errors=[], cancelled=False),
+                "report": SimpleNamespace(
+                    analyzed=len(ids),
+                    errors=[],
+                    cancelled=False,
+                    screened_out=0,
+                ),
             },
             retry_analysis_batch=lambda run_id: workspace(active=True),
             cancel_analysis_batch=lambda run_id: workspace(active=True),
@@ -163,6 +170,53 @@ def test_analysis_preview_handles_missing_offer_and_shutdown(make_bridge):
     assert bridge.analysisOffer == {}
     bridge.selectAnalysisOffer(88)
     assert bridge.analysisOfferId == 77
+
+
+def test_analysis_archive_refreshes_its_workspace_without_resetting_offers(make_bridge):
+    bridge = make_bridge()
+    bridge._current_job = {"id": 42, "application": {"notes": "Unsaved draft"}}
+    original = deepcopy(bridge.currentJob)
+    calls, notifications, archived, states = [], [], [], []
+    bridge.service.get_job = lambda job_id: {"id": job_id, "status": "archived"}
+    bridge.service.archive_analysis_offers = lambda ids: calls.append(ids) or ids
+    bridge.toastRequested.connect(lambda *args: notifications.append(args))
+    bridge.analysisOffersArchived.connect(archived.append)
+    bridge.analysisArchivingChanged.connect(lambda: states.append(bridge.analysisArchiving))
+    bridge.selectAnalysisOffer(7)
+    bridge._read_pool.finish_next()
+
+    bridge.archiveAnalysisOffers([7, 8, 7, 0])
+    bridge.archiveAnalysisOffers([9])  # No second operation while archiving.
+    assert bridge.analysisArchiving and len(bridge._mutation_pool.pending) == 1
+    bridge._mutation_pool.finish_next()
+    assert calls == [[7, 8]] and archived == [[7, 8]]
+    assert states == [True, False]
+    bridge._analysis_controller._pool.finish_next()
+    bridge._read_pool.finish_next()
+    assert bridge.analysisOfferId == 7 and bridge.analysisOffer["status"] == "archived"
+    assert bridge.currentJob == original
+    assert not bridge.busy
+    assert notifications == [("2 offres archivées", "", "success")]
+
+
+def test_analysis_archive_failure_keeps_selection_and_can_be_retried(make_bridge):
+    bridge = make_bridge()
+    archived, failures = [], []
+    bridge.analysisOffersArchived.connect(archived.append)
+    bridge._task_error = lambda message, trace: failures.append(message)
+
+    def fail(ids):
+        raise ValueError("Offre réservée par une analyse")
+
+    bridge.service.archive_analysis_offers = fail
+    bridge.archiveAnalysisOffers([])
+    assert not bridge._mutation_pool.pending
+    bridge.archiveAnalysisOffers([7])
+    bridge._mutation_pool.finish_next()
+    assert not bridge.analysisArchiving and archived == []
+    assert failures == ["Offre réservée par une analyse"]
+    bridge.archiveAnalysisOffers([7])
+    assert bridge.analysisArchiving and len(bridge._mutation_pool.pending) == 1
 
 
 def test_analysis_worker_preserves_offer_browser_and_global_busy(make_bridge):
@@ -375,7 +429,7 @@ def _job(external_id, **changes):
     values = {
         "external_id": external_id,
         "title": "Machine Learning Engineer",
-        "company": "Example AI",
+        "source_company": "Example AI",
         "description": "Large body " * 1000,
         "source": "manual",
         "location": "Paris",
@@ -396,6 +450,8 @@ def _run_items(session, jobs, *, state="active", item_states=None, error="", can
         id="run-test",
         state=state,
         model="gpt-5.4-mini",
+        provider="openai",
+        max_completion_tokens=6000,
         profile_data={"large_profile": "x" * 50_000},
         created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         updated_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
@@ -412,7 +468,7 @@ def _run_items(session, jobs, *, state="active", item_states=None, error="", can
             job_id=job.id,
             job_snapshot="snapshot",
             title=job.title,
-            company=job.company,
+            company=job.source_company,
             state=item_states[index] if item_states else "extraction_pending",
             analyzer_input={"large_offer": "x" * 50_000},
             offer_data={"large_extraction": "x" * 50_000},
@@ -446,6 +502,84 @@ def test_workspace_counts_exclude_aliases_duplicates_history_and_reserved_offers
     assert data["candidates_count"] == data["pending_count"] == 1
     assert [job["id"] for job in data["candidates"]] == [available_id]
     assert data["active_run_id"] == "run-test"
+
+
+def test_archive_analysis_selection_preserves_history_and_unselected_offers(isolated_db):
+    with session_scope() as session:
+        first = _job(
+            "archive-first",
+            analysis=JobAnalysis(fit_score=0.7),
+            analyzed_at=datetime.now(timezone.utc),
+        )
+        second = _job("archive-second")
+        other = _job("archive-unselected", application=Application(notes="Keep draft"))
+        session.add_all([first, second, other])
+        session.flush()
+        alias = _job("archive-alias", canonical_job_id=first.id)
+        session.add(alias)
+        run, items = _run_items(session, [first], state="completed", item_states=["completed"])
+        session.flush()
+        first_id, second_id, other_id, alias_id = first.id, second.id, other.id, alias.id
+        run_id, item_id, analysis_id = run.id, items[0].id, first.analysis.id
+        analyzed_at = first.analyzed_at
+
+    service = DesktopService()
+    assert service.archive_analysis_offers([first_id, second_id, first_id, 0, 999999]) == [
+        first_id,
+        second_id,
+    ]
+    assert service.archive_analysis_offers([first_id]) == []
+    with session_scope() as session:
+        first, second = session.get(Job, first_id), session.get(Job, second_id)
+        assert first.status == second.status == JobStatus.ARCHIVED
+        assert first.analysis.id == analysis_id and first.analysis.fit_score == 0.7
+        assert first.analyzed_at.replace(tzinfo=timezone.utc) == analyzed_at
+        assert first.score.components["rejection_reasons"] == ["manual_archive"]
+        assert session.get(Job, alias_id).archived_at is None
+        assert session.get(Job, other_id).archived_at is None
+        assert session.get(Job, other_id).application.notes == "Keep draft"
+        assert session.get(AnalysisBatchRun, run_id).state == "completed"
+        assert session.get(AnalysisBatchItem, item_id).state == "completed"
+
+
+@pytest.mark.parametrize("state", ["active", "attention", "blocked"])
+def test_archive_analysis_selection_is_atomic_when_a_batch_reserves_an_offer(isolated_db, state):
+    with session_scope() as session:
+        free, reserved = _job("archive-free"), _job("archive-reserved")
+        session.add_all([free, reserved])
+        session.flush()
+        _run_items(session, [reserved], state=state)
+        ids = [free.id, reserved.id]
+    with pytest.raises(TaskConflictError, match="analyse Batch"):
+        DesktopService().archive_analysis_offers(ids)
+    with session_scope() as session:
+        assert all(session.get(Job, job_id).archived_at is None for job_id in ids)
+        assert all(
+            "rejection_stage" not in session.get(Job, job_id).score.components for job_id in ids
+        )
+
+
+def test_archive_analysis_selection_rolls_back_on_storage_failure(isolated_db, monkeypatch):
+    with session_scope() as session:
+        jobs = [_job("archive-rollback-first"), _job("archive-rollback-second")]
+        session.add_all(jobs)
+        session.flush()
+        ids = [job.id for job in jobs]
+    original = DesktopService._archive_job_in_session
+
+    def archive(session, job):
+        if job.id == ids[1]:
+            raise RuntimeError("Storage failure")
+        original(session, job)
+
+    monkeypatch.setattr(DesktopService, "_archive_job_in_session", staticmethod(archive))
+    with pytest.raises(RuntimeError, match="Storage failure"):
+        DesktopService().archive_analysis_offers(ids)
+    with session_scope() as session:
+        assert all(session.get(Job, job_id).archived_at is None for job_id in ids)
+        assert all(
+            "rejection_stage" not in session.get(Job, job_id).score.components for job_id in ids
+        )
 
 
 def test_workspace_reports_active_phase_deadline_and_waiting_second_wave(isolated_db):
@@ -491,6 +625,8 @@ def test_workspace_keeps_each_run_and_provider_batch_progress_distinct(isolated_
             id="run-second",
             state="active",
             model="test",
+            provider="openai",
+            max_completion_tokens=6000,
             profile_data={},
             created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
         )
@@ -502,7 +638,7 @@ def test_workspace_keeps_each_run_and_provider_batch_progress_distinct(isolated_
                 job_id=jobs[2].id,
                 job_snapshot="snapshot",
                 title=jobs[2].title,
-                company=jobs[2].company,
+                company=jobs[2].source_company,
                 analyzer_input={},
                 state="extraction_pending",
             )
@@ -601,6 +737,22 @@ def test_workspace_preserves_partial_failure_counts_retry_and_error_details(isol
             state="partial",
             item_states=["completed", "extraction_failed", "skipped"],
         )
+        run.scope_context = {"provider": "openai", "model": "gpt-5.4-mini"}
+        session.add(
+            AnalysisBatchWave(
+                id="wave-screen",
+                run_id=run.id,
+                phase="screening",
+                state="imported",
+                provider_data={
+                    "status": "completed",
+                    "offers": 3,
+                    "total": 3,
+                    "completed": 3,
+                    "failed": 0,
+                },
+            )
+        )
         session.add(
             AnalysisBatchWave(
                 id="wave-first",
@@ -626,7 +778,8 @@ def test_workspace_preserves_partial_failure_counts_retry_and_error_details(isol
     assert summary["can_retry"] and not summary["can_cancel"]
     assert summary["completed_at"] == "2026-01-03T00:00:00+00:00"
     assert [item["message"] for item in summary["errors"]] == ["Problem 1", "Problem 2"]
-    assert summary["phase_batches"][0]["status"] == "expired"
+    assert summary["phase_batches"][0]["status"] == "completed"
+    assert summary["phase_batches"][1]["status"] == "expired"
 
 
 def test_workspace_read_does_not_fetch_stored_prompts_profile_or_offer_bodies(isolated_db):
@@ -668,13 +821,23 @@ def test_workspace_read_does_not_fetch_stored_prompts_profile_or_offer_bodies(is
         assert all(forbidden not in statement for statement in statements)
 
 
-def test_analysis_service_requires_openai_before_constructing_a_pipeline(monkeypatch):
+def test_analysis_service_requires_supported_provider_before_constructing_a_pipeline(monkeypatch):
     monkeypatch.setattr(
         "smartapply.desktop.analysis_services.ensure_startup_maintenance_complete", lambda: None
     )
     monkeypatch.setattr(
-        "smartapply.desktop.analysis_services.get_settings",
-        lambda: SimpleNamespace(llm_provider="mock"),
+        "smartapply.desktop.analysis_services.get_llm_settings",
+        lambda: SimpleNamespace(
+            calls={
+                purpose: {
+                    "provider": "mock",
+                    "model": "mock",
+                    "reasoning": "auto",
+                    "max_output_tokens": 6000,
+                }
+                for purpose in ("job_scope_screening", "job_offer_extraction", "job_fit_assessment")
+            }
+        ),
     )
 
     def unexpected(*args, **kwargs):
@@ -685,7 +848,8 @@ def test_analysis_service_requires_openai_before_constructing_a_pipeline(monkeyp
         AnalysisServiceMixin().start_analysis_batch([42])
 
 
-def test_analysis_service_dispatches_only_requested_batch_operation(monkeypatch):
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+def test_analysis_service_dispatches_only_requested_batch_operation(monkeypatch, provider):
     calls = []
     progress = []
     fake_pipeline = object()
@@ -711,8 +875,18 @@ def test_analysis_service_dispatches_only_requested_batch_operation(monkeypatch)
         "smartapply.desktop.analysis_services.ensure_startup_maintenance_complete", lambda: None
     )
     monkeypatch.setattr(
-        "smartapply.desktop.analysis_services.get_settings",
-        lambda: SimpleNamespace(llm_provider="openai"),
+        "smartapply.desktop.analysis_services.get_llm_settings",
+        lambda: SimpleNamespace(
+            calls={
+                purpose: {
+                    "provider": provider,
+                    "model": "gpt-5.4-mini" if provider == "openai" else "claude-haiku-5-5",
+                    "reasoning": "high",
+                    "max_output_tokens": 6000,
+                }
+                for purpose in ("job_scope_screening", "job_offer_extraction", "job_fit_assessment")
+            }
+        ),
     )
     monkeypatch.setattr(
         "smartapply.desktop.analysis_services.BatchAnalysisCoordinator", Coordinator
@@ -748,8 +922,18 @@ def test_cancelled_batch_preparation_returns_the_existing_workspace(monkeypatch)
         "smartapply.desktop.analysis_services.ensure_startup_maintenance_complete", lambda: None
     )
     monkeypatch.setattr(
-        "smartapply.desktop.analysis_services.get_settings",
-        lambda: SimpleNamespace(llm_provider="openai"),
+        "smartapply.desktop.analysis_services.get_llm_settings",
+        lambda: SimpleNamespace(
+            calls={
+                purpose: {
+                    "provider": "openai",
+                    "model": "gpt-5.4-mini",
+                    "reasoning": "high",
+                    "max_output_tokens": 6000,
+                }
+                for purpose in ("job_scope_screening", "job_offer_extraction", "job_fit_assessment")
+            }
+        ),
     )
     monkeypatch.setattr(
         "smartapply.desktop.analysis_services.BatchAnalysisCoordinator", Coordinator
@@ -761,7 +945,7 @@ def test_cancelled_batch_preparation_returns_the_existing_workspace(monkeypatch)
     )
 
 
-def test_immediate_service_analyzes_only_selected_offers(monkeypatch):
+def test_immediate_service_analyzes_only_selected_offers(isolated_db, monkeypatch):
     calls = []
     report = SimpleNamespace(analyzed=1, errors=[])
     snapshot = workspace()
@@ -789,6 +973,27 @@ def test_immediate_service_analyzes_only_selected_offers(monkeypatch):
         ("prepare", [7]),
         ("analyze", [7]),
     ]
+
+
+@pytest.mark.parametrize("state", ["active", "attention", "blocked"])
+def test_immediate_service_rejects_offers_reserved_by_batch(isolated_db, monkeypatch, state):
+    with session_scope() as session:
+        reserved = _job(f"reserved-{state}")
+        available = _job(f"available-{state}")
+        session.add_all([reserved, available])
+        session.flush()
+        _run_items(session, [reserved], state=state)
+        reserved_id, available_id = reserved.id, available.id
+
+    monkeypatch.setattr(
+        "smartapply.desktop.analysis_services.ensure_startup_maintenance_complete", lambda: None
+    )
+    monkeypatch.setattr(
+        "smartapply.pipeline.Pipeline",
+        lambda **kwargs: pytest.fail("Immediate pipeline must not start for a reserved offer"),
+    )
+    with pytest.raises(ValueError, match="déjà réservée par un Batch"):
+        AnalysisServiceMixin().start_immediate_analysis([available_id, reserved_id])
 
 
 def test_cancel_and_monitor_batch_remain_available_during_immediate_analysis(make_bridge):
@@ -831,7 +1036,22 @@ def test_cancel_requested_during_polling_is_queued_once_instead_of_lost(make_bri
 def test_empty_desktop_batch_selection_never_expands_to_entire_database(isolated_db, monkeypatch):
     from smartapply.desktop.analysis_services import AnalysisServiceMixin
 
-    monkeypatch.setattr("smartapply.desktop.analysis_services.ensure_startup_maintenance_complete", lambda: None)
-    monkeypatch.setattr("smartapply.desktop.analysis_services.get_settings", lambda: SimpleNamespace(llm_provider="openai"))
+    monkeypatch.setattr(
+        "smartapply.desktop.analysis_services.ensure_startup_maintenance_complete", lambda: None
+    )
+    monkeypatch.setattr(
+        "smartapply.desktop.analysis_services.get_llm_settings",
+        lambda: SimpleNamespace(
+            calls={
+                purpose: {
+                    "provider": "openai",
+                    "model": "gpt-5.4-mini",
+                    "reasoning": "high",
+                    "max_output_tokens": 6000,
+                }
+                for purpose in ("job_scope_screening", "job_offer_extraction", "job_fit_assessment")
+            }
+        ),
+    )
     with pytest.raises(ValueError, match="Sélectionnez"):
         AnalysisServiceMixin().start_analysis_batch([])

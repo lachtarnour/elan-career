@@ -12,24 +12,22 @@ import pytest
 from smartapply.config import get_settings
 from smartapply.database import session_scope
 from smartapply.database.models import Application, Job, JobAnalysis, JobScore, JobStatus
-from smartapply.llm import MotivationLetter, OfferAnalysis
+from smartapply.llm import MotivationLetter, OfferExtractionOutput
 from smartapply.pipeline.applier import Applier
 from smartapply.pipeline.errors import StaleTaskResultError, TaskCancelledError
 from smartapply.pipeline.process.analysis import AnalysisMixin
-from smartapply.pipeline.processor import Processor
 from smartapply.profile import get_profile
-from smartapply.ranking import MockEmbeddingsProvider
 
 
 def offer_result():
-    return OfferAnalysis(role_type="AI Engineer", seniority="", domain="",
+    return OfferExtractionOutput(role_type="AI Engineer", seniority="unknown", domain="",
                          main_tasks=["Build models"], required_skills=["Python"],
                          nice_to_have=[], cv_keywords_to_include=["Python"])
 
 
 def insert_job(*, analyzed=False):
     with session_scope() as session:
-        job = Job(external_id="concurrent", title="AI Engineer", company="Acme",
+        job = Job(external_id="concurrent", title="AI Engineer", source_company="Acme",
                   description="Build Python models.", source="manual", location="Paris")
         if analyzed:
             job.analyzed_at = datetime.now(timezone.utc)
@@ -37,6 +35,8 @@ def insert_job(*, analyzed=False):
             job.analysis = JobAnalysis(raw_response={"main_tasks": ["Build Python models"]})
         session.add(job)
         session.flush()
+        from tests.scope_fixtures import seed_neutral_scope
+        seed_neutral_scope(session, job)
         return job.id
 
 
@@ -48,7 +48,6 @@ def prepare_analysis_candidate(job_id: int) -> None:
         job.ranked_at = now
         session.add(JobScore(
             job_id=job_id,
-            final_score=0.7,
             components={
                 "filter_disposition": "pending_relevance",
                 "hard_reject": {
@@ -80,10 +79,10 @@ def test_changed_offer_does_not_consume_fit_call_or_publish_analysis(isolated_db
 
     instance = AnalysisMixin()
     instance.profile, instance.settings = get_profile(), get_settings()
-    instance.llm = SimpleNamespace(cheap_model="mock", complete_json=complete)
+    instance.llm = SimpleNamespace(name="openai", cheap_model="mock", complete_json=complete)
     with pytest.raises(StaleTaskResultError):
         instance._analyze_one(job_id=job_id)
-    assert calls == ["job_offer_analysis"]
+    assert calls == ["job_offer_extraction"]
     with session_scope() as session:
         assert session.get(Job, job_id).analysis is None
         assert session.get(Job, job_id).analyzed_at is None
@@ -95,7 +94,7 @@ def test_direct_analysis_refuses_unfiltered_offer_without_provider_call(isolated
     instance = AnalysisMixin()
     instance.profile, instance.settings = get_profile(), get_settings()
     instance.llm = SimpleNamespace(
-        cheap_model="mock",
+        name="openai", cheap_model="mock",
         complete_json=lambda **kwargs: calls.append(kwargs["purpose"]),
     )
 
@@ -115,120 +114,11 @@ def test_cancelled_extraction_does_not_start_fit_call(isolated_db):
 
     instance = AnalysisMixin()
     instance.profile, instance.settings = get_profile(), get_settings()
-    instance.llm = SimpleNamespace(cheap_model="mock", complete_json=complete)
+    instance.llm = SimpleNamespace(name="openai", cheap_model="mock", complete_json=complete)
     instance.stop_requested = cancelled.is_set
     report = instance.analyze_jobs([job_id])
     assert report.cancelled and report.analyzed == 0 and report.errors == []
-    assert calls == ["job_offer_analysis"]
-
-
-def test_ranking_does_not_reactivate_offer_archived_during_embedding(isolated_db):
-    from smartapply.dedup import Deduplicator
-    from smartapply.filtering import JobFilter, ruleset_from_preferences
-    from smartapply.ranking import JobScorer
-
-    job_id = insert_job()
-    profile = get_profile()
-    scorer = JobScorer(profile, embeddings=MockEmbeddingsProvider())
-    rank = scorer.rank
-
-    def archive_then_rank(jobs):
-        with session_scope() as session:
-            job = session.get(Job, job_id)
-            job.status, job.archived_at = JobStatus.ARCHIVED, datetime.now(timezone.utc)
-        return rank(jobs)
-
-    scorer.rank = archive_then_rank
-    processor = Processor(profile=profile, deduplicator=Deduplicator(),
-                          job_filter=JobFilter(ruleset_from_preferences(profile.preferences)),
-                          scorer=scorer, llm=None)
-    result = processor.rank_pending(job_ids=[job_id], persist_shortlist=False)
-    assert result.ranked_ids == []
-    with session_scope() as session:
-        job = session.get(Job, job_id)
-        assert job.status == JobStatus.ARCHIVED
-        assert job.score is None and job.ranked_at is None
-
-
-def test_ranking_does_not_overwrite_rejection_persisted_during_scoring(isolated_db):
-    from smartapply.dedup import Deduplicator
-    from smartapply.filtering import JobFilter, ruleset_from_preferences
-    from smartapply.ranking import JobScorer
-
-    job_id = insert_job()
-    with session_scope() as session:
-        job = session.get(Job, job_id)
-        assert job is not None
-        job.filtered_at = datetime.now(timezone.utc)
-        job.score = JobScore(
-            components={
-                "filter_disposition": "pending_relevance",
-                "hard_reject": {
-                    "ruleset_version": "hard-reject-v2",
-                    "rejected": False,
-                    "gates": [],
-                },
-            },
-        )
-
-    profile = get_profile()
-    scorer = JobScorer(profile, embeddings=MockEmbeddingsProvider())
-    rank = scorer.rank
-
-    def reject_then_return_scores(jobs):
-        result = rank(jobs)
-        with session_scope() as session:
-            score = session.get(JobScore, job_id)
-            assert score is not None
-            score.components = {
-                "filter_disposition": "rejected",
-                "hard_reject": {
-                    "ruleset_version": "hard-reject-v2",
-                    "rejected": True,
-                    "gates": [],
-                },
-            }
-        return result
-
-    scorer.rank = reject_then_return_scores
-    processor = Processor(
-        profile=profile,
-        deduplicator=Deduplicator(),
-        job_filter=JobFilter(ruleset_from_preferences(profile.preferences)),
-        scorer=scorer,
-        llm=None,
-    )
-
-    report = processor.rank_pending(job_ids=[job_id], persist_shortlist=False)
-
-    assert report.ranked_ids == []
-    with session_scope() as session:
-        job = session.get(Job, job_id)
-        assert job is not None and job.score is not None
-        assert job.ranked_at is None
-        assert job.score.final_score is None
-        assert job.score.components["filter_disposition"] == "rejected"
-
-
-def test_analysis_ranking_keeps_the_captured_offer_scope(isolated_db):
-    from smartapply.database.models import JobScore
-    from smartapply.dedup import Deduplicator
-    from smartapply.filtering import JobFilter, ruleset_from_preferences
-    from smartapply.ranking import JobScorer
-
-    selected_id = insert_job()
-    with session_scope() as session:
-        other = Job(external_id="outside-scope", title="AI Engineer", company="Elsewhere",
-                    description="Build Python models", source="manual", status=JobStatus.FILTERED,
-                    filtered_at=datetime.now(timezone.utc), ranked_at=datetime.now(timezone.utc))
-        other.score = JobScore(final_score=1.0)
-        session.add(other)
-    profile = get_profile()
-    processor = Processor(profile=profile, deduplicator=Deduplicator(),
-                          job_filter=JobFilter(ruleset_from_preferences(profile.preferences)),
-                          scorer=JobScorer(profile, embeddings=MockEmbeddingsProvider()), llm=None)
-    report = processor.rank_pending(job_ids=[selected_id], top_k_ranked=1, persist_shortlist=False)
-    assert report.ranked_ids == report.shortlisted_ids == [selected_id]
+    assert calls == ["job_offer_extraction"]
 
 
 @pytest.mark.parametrize("change", ["sent", "description", "notes", "cancel"])
@@ -270,7 +160,7 @@ def test_publication_revalidates_state_and_preserves_old_files(isolated_db, chan
     applier._generate_draft = lambda **kwargs: (
         adapted, MotivationLetter(subject="Application", body="Motivation"),
     )
-    applier._validate_letter = lambda *args: None
+    applier._validate_letter = lambda *args, **kwargs: None
     applier._validate_cv_offer_alignment = lambda *args: None
     if change == "notes":
         report = applier.apply(job_id, force_regenerate=True)

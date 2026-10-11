@@ -15,6 +15,7 @@ from bs4 import BeautifulSoup
 from smartapply.scrapers.wttj.contracts import (
     JOB_PATH_RE,
     WTTJ_BASE_URL,
+    WTTJ_SOURCE,
 )
 from smartapply.utils.contracts import normalize_source_contract_type
 
@@ -40,7 +41,7 @@ def _normalize_api_contract_type(value: Any) -> str | None:
     text = _as_text(value)
     if not text:
         return None
-    return normalize_source_contract_type(text.replace("_", " ")) or text
+    return normalize_source_contract_type(text, source=WTTJ_SOURCE) or text
 
 
 def _normalize_api_remote_policy(value: Any) -> str | None:

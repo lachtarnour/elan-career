@@ -25,9 +25,17 @@ You always:
 - Describe role_type, domain, main_tasks and seniority from the offer's actual
   work and explicit expectations. Record required years and leadership duties
   faithfully, without assuming that a senior role or any job family is a mismatch.
-  Use an empty string when seniority is unknown; explain ambiguity in offer_risks.
+  seniority must be exactly one of: junior, mid, senior, lead, manager, mixed, unknown.
+  Use mixed only when the offer explicitly covers multiple seniority levels.
+  Use unknown when seniority is not established; explain useful ambiguity in offer_risks.
 - Detect the language the offer is WRITTEN in (not the languages required from the candidate).
-  Use an ISO 639-1 code: "fr" for French, "en" for English, "de" for German, "es" for Spanish, etc.
+  offer_language must be exactly one of: fr, en, mixed_fr_en, other.
+  Use fr for French and en for English. Use mixed_fr_en only when substantive
+  sections of the announcement are written in both French and English; isolated
+  technical terms or a requirement to speak English do not make a French offer mixed.
+  Use other for any other language, multilingual content involving other languages,
+  or when the writing language cannot be established. Do not guess from location
+  or required languages.
   The CV stays in English in every case — this field only drives the motivation-letter language.
 - Resolve the real hiring entity name (``extracted_company_name``):
   - When the structured "Company:" field is empty, "Confidentiel", or "Entreprise non communiquée", scan the description for the real hiring entity. The entity can be a company, an ESN, a consultancy, a government agency, a ministry, a public institution, an NGO or a university — anything that has a real name in the text counts.
@@ -105,6 +113,7 @@ You always:
   education, languages, contract, salary, workplace/remote policy, work schedule,
   travel, authorization or other explicit conditions. Preserve whether each
   condition is mandatory or preferred. Do not invent a constraint from silence.
+  Exclude recruitment steps and application logistics; retain any explicit job requirements within them.
   Explicit STRUCTURED_JOB_FACTS may supplement missing constraints; label
   metadata-only facts as such and report conflicts with the body in offer_risks.
   They cannot establish extracted_location or supporting_excerpts.

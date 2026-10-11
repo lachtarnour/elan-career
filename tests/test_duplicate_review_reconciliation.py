@@ -68,8 +68,7 @@ def test_release_changes_relation_only_and_is_reversible(isolated_db):
         alias.shortlisted_at = datetime.now(timezone.utc)
         alias.shortlist_origin = "manual"
         session.add(Application(job_id=alias_id, status="archived", notes="Historique"))
-        session.add(JobScore(job_id=alias_id, final_score=75,
-                             components={"filter_disposition": "pending_relevance"}))
+        session.add(JobScore(job_id=alias_id, components={"filter_disposition": "pending_relevance"}))
         session.flush()
         before = {column.name: getattr(alias, column.name) for column in Job.__table__.columns}
     assert reconcile_pending_reviews() == 1
@@ -85,7 +84,7 @@ def test_release_changes_relation_only_and_is_reversible(isolated_db):
         assert alias.status == "archived"
         assert alias.possible_duplicate_of_id is None
         assert alias.application.notes == "Historique"
-        assert alias.score.final_score == 75
+        assert alias.score is not None
         event = session.scalar(select(DuplicateReviewEvent))
         assert event.reason == "incompatible_location"
         assert restore_automatic_review(session, event.id)
@@ -117,8 +116,7 @@ def test_used_alias_is_never_automatically_confirmed(isolated_db):
 def test_score_or_manual_choice_protects_legacy_alias(isolated_db):
     _, alias_id = _pair()
     with session_scope() as session:
-        session.add(JobScore(job_id=alias_id, final_score=20,
-                             components={"manual_keep": True}))
+        session.add(JobScore(job_id=alias_id, components={"manual_keep": True}))
     assert reconcile_pending_reviews() == 0
 
 
@@ -150,21 +148,8 @@ def test_source_identity_confirms_alias_with_only_filter_label(isolated_db):
         assert event.reason == "source_identity"
 
 
-@pytest.mark.parametrize("field", [
-    "rule_based_score", "semantic_score", "skill_score", "title_score",
-    "seniority_score", "location_score", "domain_score", "final_score",
-])
-def test_source_identity_keeps_alias_with_numeric_ranking(isolated_db, field):
-    _, alias_id = _pair()
-    with session_scope() as session:
-        score = _add_filter_metadata(session, alias_id)
-        # A computed zero is still ranking history and must not be discarded.
-        setattr(score, field, 0)
-    assert reconcile_pending_reviews() == 0
-
-
 @pytest.mark.parametrize("key,value", [
-    ("semantic", 0),
+    ("other_audit", 0),
     ("manual_keep", True),
     ("manual_rescue", {"schema_version": 3, "rescued_at": "2026-10-06T12:00:00Z"}),
     ("rejection_stage", "manual"),
@@ -198,7 +183,7 @@ def test_releasing_bad_edge_does_not_invalidate_remaining_chain(isolated_db):
         middle.published_date = at + timedelta(days=20)
         middle.location = "Lyon"
         later = upsert_job(session, external_id="linkedin:third", title=middle.title,
-                           company=middle.company, description=middle.description,
+                           company=middle.source_company, description=middle.description,
                            location="Lyon", source="linkedin")
         later.published_date = at + timedelta(days=40)
         later.possible_duplicate_of_id = middle_id
@@ -231,7 +216,7 @@ def test_full_group_time_window_cannot_be_bridged(isolated_db):
         reference.published_date = at
         alias.published_date = at + timedelta(days=20)
         later = upsert_job(session, external_id="linkedin:third", title=alias.title,
-                           company=alias.company, description=alias.description,
+                           company=alias.source_company, description=alias.description,
                            location="Paris", source="linkedin")
         later.published_date = at + timedelta(days=40)
         later.possible_duplicate_of_id = alias_id

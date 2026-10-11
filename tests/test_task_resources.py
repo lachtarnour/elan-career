@@ -26,14 +26,14 @@ def test_group_reservations_allow_other_offers_and_notes(isolated_db):
         first = Job(
             external_id="active",
             title="AI Engineer",
-            company="Acme",
+            source_company="Acme",
             description="Build models",
             source="manual",
         )
         other = Job(
             external_id="other",
             title="ML Engineer",
-            company="Elsewhere",
+            source_company="Elsewhere",
             description="Build models",
             source="manual",
         )
@@ -42,7 +42,7 @@ def test_group_reservations_allow_other_offers_and_notes(isolated_db):
         alias = Job(
             external_id="alias",
             title=first.title,
-            company=first.company,
+            source_company=first.source_company,
             description=first.description,
             source="manual",
             canonical_job_id=first.id,
@@ -111,7 +111,7 @@ def test_database_notifications_follow_commits_not_reads_notes_or_rollbacks(isol
             job = Job(
                 external_id="observe",
                 title="Original",
-                company="Acme",
+                source_company="Acme",
                 description="Build models",
                 source="manual",
             )

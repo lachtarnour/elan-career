@@ -12,18 +12,17 @@ from smartapply.database.models import (
     AppSetting,
     Base,
     Company,
-    EmbeddingCache,
     GeneratedDocument,
     Job,
     JobAnalysis,
     JobDuplicateStatus,
-    JobEmbedding,
     JobScore,
     JobStatus,
     LLMCache,
     LLMUsage,
     ShortlistOrigin,
 )
+from smartapply.database.scope_checkpoints import ScopeCheckpoint
 from smartapply.database.session import (
     auto_migrate,
     backfill_duplicate_reviews,
@@ -41,6 +40,7 @@ from smartapply.database.session import (
 )
 
 __all__ = [
+    "ScopeCheckpoint",
     "AnalysisCheckpoint",
     "AnalysisBatchItem",
     "AnalysisBatchRun",
@@ -49,12 +49,10 @@ __all__ = [
     "AppSetting",
     "Base",
     "Company",
-    "EmbeddingCache",
     "GeneratedDocument",
     "Job",
     "JobDuplicateStatus",
     "JobAnalysis",
-    "JobEmbedding",
     "JobScore",
     "JobStatus",
     "LLMCache",

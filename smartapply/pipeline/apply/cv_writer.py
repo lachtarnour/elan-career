@@ -6,7 +6,8 @@ import re
 from datetime import date
 from typing import Any
 
-from smartapply.company_identity import is_anonymous_company
+from smartapply.company_identity import document_company_name
+from smartapply.config import get_llm_settings
 from smartapply.cv.letter_writer import OBJECTIVE_TEXT_WARNING_PREFIXES, ApplicationTextWriter
 from smartapply.cv.motivation_validator import normalize_french_elisions
 from smartapply.cv.role_family import (
@@ -26,6 +27,8 @@ from smartapply.llm import (
     MotivationLetterRepair,
 )
 from smartapply.llm.prompts import motivation_letter_repair
+from smartapply.llm.routes import provider_for
+from smartapply.llm_policy import resolve_route
 from smartapply.logging_setup import get_logger
 from smartapply.pipeline.reports import ApplyReport
 
@@ -87,19 +90,13 @@ def _norm(text: str | None) -> str:
     return " ".join((text or "").lower().replace("’", "'").split())
 
 
-def _is_anonymous_company(name: str | None) -> bool:
-    return is_anonymous_company(name)
-
-
 def _document_company_label(
     _job_company: str | None,
     extracted_company_name: str | None,
     language: str,
 ) -> str:
-    """Use only the hiring entity confirmed by offer analysis."""
-    if not _is_anonymous_company(extracted_company_name):
-        return (extracted_company_name or "").strip()
-    return "Entreprise non communiquée" if language == "fr" else "Company not disclosed"
+    """Keep the legacy call shape while sharing the document-only decision."""
+    return document_company_name(extracted_company_name)
 
 
 def _word_anchors(text: str) -> set[str]:
@@ -143,7 +140,7 @@ class CvWriterMixin:
         refresh_cache: bool = False,
     ) -> tuple[Any, MotivationLetter]:
         """Assemble CV content, write summary and letter together, then review."""
-        assembled, _selection = self.adapter.adapt(
+        assembled = self.adapter.adapt(
             analysis,
             job_title=job.title,
             job_company=document_company,
@@ -249,11 +246,18 @@ class CvWriterMixin:
         adapted,
         analysis: JobAnalysis,
         report: ApplyReport,
+        *,
+        language: str | None = None,
     ) -> None:
+        validation_analysis = (
+            analysis.model_copy(update={"offer_language": language})
+            if language is not None and language != analysis.offer_language
+            else analysis
+        )
         result = self.letter_validator.validate(
             letter_draft,
             cv=adapted,
-            analysis=analysis,
+            analysis=validation_analysis,
         )
         report.validation_warnings.extend(
             warning for warning in result.warnings if warning not in report.validation_warnings
@@ -272,7 +276,7 @@ class CvWriterMixin:
         job_id: int,
         refresh_cache: bool = False,
     ) -> MotivationLetter:
-        """Repair one letter-only defect with at most one cheap-model call.
+        """Repair one letter-only defect with at most one smart-model call.
 
         The original letter is retained when there is no defect, more than one
         defect, a provider failure, or a repair that introduces any new issue.
@@ -297,15 +301,22 @@ class CvWriterMixin:
             letter=letter_draft,
         )
         try:
-            repair = self.llm.complete_json(
+            provider = provider_for(self.llm, "motivation_letter_repair")
+            route = resolve_route(
+                getattr(self.llm, "_settings", None) or get_llm_settings(),
+                "motivation_letter_repair",
+            )
+            repair = provider.complete_json(
                 system=motivation_letter_repair.build_system_prompt(),
                 user=prompt,
                 schema=MotivationLetterRepair,
-                model=self.llm.smart_model,
+                model=route.model,
                 temperature=0.1,
                 purpose="motivation_letter_repair",
                 job_id=job_id,
                 refresh_cache=refresh_cache,
+                effort=route.reasoning,
+                max_completion_tokens=route.max_output_tokens,
             )
         except LLMError as exc:
             logger.warning(

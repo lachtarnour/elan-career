@@ -56,8 +56,7 @@ def _copy_pair():
         alias.duplicate_match_type = "fuzzy"
         alias.duplicate_confidence = 0.99
         alias.filtered_at = at
-        session.add(JobScore(job_id=alias.id, final_score=50,
-                             components={"filter_disposition": "pending_relevance"}))
+        session.add(JobScore(job_id=alias.id, components={"filter_disposition": "pending_relevance"}))
         return reference.id, alias.id
 
 
@@ -108,7 +107,7 @@ def test_ingest_different_source_ids_confirms_exact_content_before_analysis(isol
         assert alias.canonical_job_id == reference_id
         assert alias.status == "archived"
         assert alias.score.components["filter_disposition"] in {"pending_relevance", "rejected"}
-        assert alias.score.final_score is None
+        assert alias.score is not None
         assert alias.analysis is None and alias.application is None
 
 
@@ -140,7 +139,7 @@ def test_ingest_resolves_old_machine_archive_and_keeps_new_active_copy(isolated_
             source="linkedin", published_date=at - timedelta(days=1),
         )
         old.status, old.archived_at = "archived", at - timedelta(hours=1)
-        session.add(JobScore(job_id=old.id, final_score=0, components={
+        session.add(JobScore(job_id=old.id, components={
             "filter_disposition": "rejected", "rejection_stage": "local_filter",
             "rejection_reasons": ["legacy_score_rejection"],
         }))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from smartapply.filtering.manual_policy import has_manual_filter_bypass
 from smartapply.jobsearch.archive_reasons import archive_reason_labels
 
 _PENDING_SUMMARY = (
@@ -44,6 +45,12 @@ def classification_explanation(components: Any) -> tuple[str, tuple[str, ...]]:
     hard_reject = components.get("hard_reject")
     gates = _gates(hard_reject)
     if disposition == "pending_relevance":
+        if has_manual_filter_bypass(components):
+            return (
+                "Offre ajoutée manuellement ; les filtres automatiques ne sont pas appliqués. "
+                "La pertinence reste à évaluer.",
+                (),
+            )
         return _pending_explanation(components, gates)
     if disposition == "rejected":
         if isinstance(hard_reject, dict):

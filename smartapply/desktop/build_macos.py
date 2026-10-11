@@ -26,7 +26,7 @@ BUNDLE_NAME = "Elan"
 PRODUCT_NAME = "Élan"
 DIST_APP = PROJECT_ROOT / "dist" / f"{BUNDLE_NAME}.app"
 RUNTIME_HOME = Path.home() / "Library" / "Application Support" / "Elan"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 
 
 def _running_bundle_pids(executable: Path) -> list[int]:
@@ -94,8 +94,6 @@ def _smoke_test_env(runtime_home: Path) -> dict[str, str]:
             "PROFILE_DIR": str(PROJECT_ROOT / "smartapply" / "profile" / "mock_profile"),
             "OUTPUT_DIR": str(runtime_home / "documents"),
             "CACHE_DIR": str(runtime_home / "cache"),
-            "LLM_PROVIDER": "mock",
-            "EMBEDDINGS_PROVIDER": "mock",
             "OPENAI_API_KEY": "",
             "ANTHROPIC_API_KEY": "",
         }
@@ -233,6 +231,8 @@ def build_bundle(*, smoke_test: bool = True) -> Path:
         f"{PROJECT_ROOT / 'smartapply' / 'dedup' / 'data'}:smartapply/dedup/data",
         "--add-data",
         f"{PROJECT_ROOT / 'smartapply' / 'llm' / 'prompts' / 'templates'}:smartapply/llm/prompts/templates",
+        "--add-data",
+        f"{PROJECT_ROOT / 'model_config.json'}:.",
         str(entry),
     ]
     try:
@@ -264,7 +264,7 @@ def _finalize_bundle_metadata() -> None:
     metadata.update(
         {
             "CFBundleShortVersionString": APP_VERSION,
-            "CFBundleVersion": "1",
+            "CFBundleVersion": "2",
             "CFBundleDevelopmentRegion": "fr",
             "LSApplicationCategoryType": "public.app-category.productivity",
             "LSMinimumSystemVersion": "13.0",

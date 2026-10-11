@@ -144,7 +144,7 @@ def test_serpapi_schedule_type_internship_is_rejected() -> None:
     )
 
 
-def test_wttj_full_time_contract_and_hybrid_remote_are_extracted() -> None:
+def test_wttj_cdi_contract_and_hybrid_remote_are_extracted() -> None:
     facts = build_wttj_filter_facts(
         {
             "matches_api": {
@@ -156,12 +156,30 @@ def test_wttj_full_time_contract_and_hybrid_remote_are_extracted() -> None:
         }
     )
 
-    assert facts.structured_contract_type == "Full-time"
+    assert facts.structured_contract_type == "CDI"
     assert facts.structured_contract_source == ("welcometothejungle:matches_api.contract_type")
     assert facts.structured_remote_policy == "hybrid"
     assert facts.structured_location == "Paris, FR"
     assert facts.structured_search_origin == "personalized_matches"
     assert facts.structured_search_chips == "pages=5"
+
+
+@pytest.mark.parametrize(
+    ("source_data", "source_field", "expected"),
+    [
+        ({"employment_type": "FULL_TIME"}, "employment_type", "CDI"),
+        ({"detail_api": {"contract_type": "full_time"}}, "detail_api.contract_type", "CDI"),
+        ({"matches_api": {"contract_type": "temporary"}}, "matches_api.contract_type", "CDD"),
+        ({"employment_type": "TEMPORARY"}, "employment_type", "CDD"),
+        ({"detail_api": {"contract_type": "temporary"}}, "detail_api.contract_type", "CDD"),
+    ],
+)
+def test_wttj_contract_sources_use_french_contract_labels(source_data, source_field, expected) -> None:
+    facts = build_wttj_filter_facts(source_data)
+
+    assert facts.structured_contract_type == expected
+    assert facts.structured_contract_source == f"welcometothejungle:{source_field}"
+    assert facts.structured_work_time is None
 
 
 def test_linkedin_filter_facts_extract_contract_location_experience_and_search_context() -> None:

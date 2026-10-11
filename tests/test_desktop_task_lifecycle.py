@@ -83,6 +83,21 @@ def bridge(monkeypatch):
     application.processEvents()
 
 
+def test_default_search_query_covers_all_families_without_profile_mutation(bridge):
+    from smartapply.pipeline.ingest.role_families import ROLE_FAMILIES, matching_role_families
+
+    bridge._profile = {"target_roles": ["Research Engineer", "Applied Scientist"]}
+    query = bridge.defaultSearchQuery
+
+    assert {family.key for family in matching_role_families(query.split(" OR "))} == {
+        family.key for family in ROLE_FAMILIES
+    }
+    assert query.startswith("AI Engineer OR ")
+    assert " OR Research Engineer OR " not in query
+    assert " OR Applied Scientist OR " not in query
+    assert bridge.profile["target_roles"] == ["Research Engineer", "Applied Scientist"]
+
+
 @pytest.mark.parametrize(
     ("disposition", "label"),
     [
@@ -474,6 +489,68 @@ def test_classification_filter_is_preserved_on_refresh_and_ignores_stale_result(
     bridge.loadJobs("Paris", "archived", "title", True, "pending_relevance")
     bridge._read_pool.finish_next()
     assert seen[-1]["filter_disposition"] == ""
+
+
+def test_minimum_ai_score_survives_sort_refresh_and_status_changes(bridge):
+    seen = []
+
+    def read(**kwargs):
+        seen.append(kwargs)
+        return [{"id": 1, "title": str(kwargs["min_llm_score"])}]
+
+    bridge.service.list_jobs = read
+    bridge._selected_job_id = 1
+    bridge.loadJobs("", "analyzed", "llm_score", False)
+    bridge._read_pool.finish_next()
+    assert seen[-1]["min_llm_score"] is None
+
+    bridge.setMinimumLlmScorePercent(70)
+    bridge.loadJobs("", "analyzed", "llm_score", False)
+    bridge.loadJobs("", "analyzed", "operation_date", False)
+    bridge._read_pool.finish_next()
+    bridge._read_pool.finish_next()
+    assert bridge.minimumLlmScorePercent == 70
+    assert bridge.jobs[0]["title"] == "0.7"
+    assert seen[-1]["min_llm_score"] == 0.7
+
+    bridge.refreshJobs()
+    bridge._read_pool.finish_next()
+    assert seen[-1]["min_llm_score"] == 0.7
+    selected = []
+    bridge.allMatchingJobsReady.connect(lambda rows: selected.extend(rows))
+
+    def matching(**kwargs):
+        seen.append(kwargs)
+        return [SimpleNamespace(
+            id=1, status="analyzed", application_id=None,
+            shortlisted=False, can_generate=True,
+        )]
+
+    bridge.service.list_jobs = matching
+    bridge.selectAllMatchingJobs()
+    bridge._read_pool.finish_next()
+    assert seen[-1]["min_llm_score"] == 0.7
+    assert [row["id"] for row in selected] == [1]
+    bridge.service.list_jobs = read
+    for status in ("ready_for_form_submission", "sent"):
+        bridge.loadJobs("", status, "llm_score", False)
+        bridge._read_pool.finish_next()
+        assert seen[-1]["min_llm_score"] == 0.7
+    bridge.loadJobs("", "archived", "score", False)
+    bridge._read_pool.finish_next()
+    assert seen[-1]["min_llm_score"] is None
+    bridge.loadJobs("", "analyzed", "llm_score", False)
+    bridge._read_pool.finish_next()
+    assert seen[-1]["min_llm_score"] == 0.7
+
+    bridge.setMinimumLlmScorePercent(0)
+    bridge.refreshJobs()
+    bridge._read_pool.finish_next()
+    assert seen[-1]["min_llm_score"] == 0.0
+    bridge.setMinimumLlmScorePercent(-1)
+    bridge.refreshJobs()
+    bridge._read_pool.finish_next()
+    assert seen[-1]["min_llm_score"] is None
 
 
 def test_offer_loading_compares_displayed_id_and_ignores_late_other_offer(bridge):

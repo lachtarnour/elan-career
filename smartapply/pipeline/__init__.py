@@ -16,7 +16,6 @@ from smartapply.pipeline.reports import (
     ApplyReport,
     LocalFilterReport,
     ProcessReport,
-    RankingReport,
 )
 
 __all__ = [
@@ -32,6 +31,5 @@ __all__ = [
     "LocalFilterReport",
     "ProcessReport",
     "Processor",
-    "RankingReport",
     "detect_offer_language",
 ]

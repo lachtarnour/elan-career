@@ -24,6 +24,7 @@ from smartapply.database.models import (
     JobStatus,
 )
 from smartapply.filtering.hard_reject.types import HardRejectDisposition
+from smartapply.filtering.manual_policy import evaluate_or_bypass
 from smartapply.jobsearch.offer_state import offer_state
 from smartapply.pipeline.process.filter_state import (
     current_hard_reject_disposition,
@@ -33,7 +34,7 @@ from smartapply.pipeline.process.filter_state import (
 from smartapply.pipeline.reports import LocalFilterReport
 from smartapply.pipeline.snapshots import check_cancelled, job_is_active, job_snapshot_key
 
-_SUBMITTED_STATUSES = {JobStatus.SENT, JobStatus.INTERVIEW, JobStatus.REJECTED}
+_SUBMITTED_STATUSES = {JobStatus.SENT, JobStatus.INTERVIEW}
 
 
 def analysis_group_available(
@@ -266,7 +267,7 @@ class AnalysisAdmissionMixin:
         include_analyzed: bool = False,
         exclude_applications: bool = True,
     ) -> LocalFilterReport:
-        """Repair deterministic filter state before analysis, without embeddings.
+        """Repair deterministic filter state before analysis.
 
         Explicit keep overrides retain their audit. Existing workflow records
         receive metadata repairs only; their analysis, rank and dossier survive.
@@ -303,7 +304,9 @@ class AnalysisAdmissionMixin:
         results = []
         for job, snapshot, components, force_keep in prepared:
             check_cancelled(stop_requested)
-            results.append((int(job.id), snapshot, components, force_keep, self.filter.evaluate(job)))
+            results.append((
+                int(job.id), snapshot, components, force_keep, evaluate_or_bypass(self.filter, job),
+            ))
         check_cancelled(stop_requested)
         with write_session_scope() as session:
             reserved = (

@@ -22,7 +22,6 @@ from smartapply.llm.prompts import (
     application_texts,
     cv_adaptation,
     document_review,
-    motivation_letter,
 )
 from smartapply.llm.prompts.document_context import (
     allowed_source_ids,
@@ -30,6 +29,124 @@ from smartapply.llm.prompts.document_context import (
 )
 from smartapply.llm.prompts.loader import load_prompt
 from smartapply.profile import Profile
+
+
+def _prompt_context(prompt):
+    start = prompt.index('{\n  "candidate_identity":')
+    return json.JSONDecoder().raw_decode(prompt[start:])[0]
+
+
+def _cache_audit_prompt(kind, inputs, **review_options):
+    if kind == "writing":
+        return application_texts.build_user_prompt(**_assembled_inputs(inputs))
+    options = {
+        "letter": MotivationLetter(subject="Application", body="First letter."),
+        "validation_issues": [],
+        "allow_corrections": False,
+        **review_options,
+    }
+    return document_review.build_user_prompt(**inputs, **options)
+
+
+def test_document_context_places_candidate_before_offer_and_documents(source_documents):
+    context = build_document_context(**source_documents)
+    assert list(context) == [
+        "candidate_identity",
+        "declared_skills",
+        "languages",
+        "education",
+        "certificates",
+        "recruiter_text_style",
+        "title_style",
+        "summary_style",
+        "experience_evidence",
+        "letter_style",
+        "source_index",
+        "candidate_evidence_scope",
+        "reference_date",
+        "job_offer",
+        "motivation_context",
+        "job_analysis",
+        "selected_project_evidence",
+        "final_cv",
+    ]
+
+
+@pytest.mark.parametrize("kind", ["writing", "review"])
+def test_candidate_prefix_survives_offer_selection_and_document_changes(source_documents, kind):
+    first = _cache_audit_prompt(kind, {**source_documents, "reference_date": date(2026, 10, 10)})
+    changed_cv = source_documents["adapted_cv"].model_copy(deep=True)
+    changed_cv.selected_project_ids = ["proj_unselected"]
+    changed_cv.cv_title = "Machine Learning Engineer"
+    changed_cv.professional_summary = "A different generated summary."
+    changed = {
+        **source_documents,
+        "adapted_cv": changed_cv,
+        "job_title": "Machine Learning Engineer",
+        "job_company": "Another Employer",
+        "job_description": "A different offer with different requirements.",
+        "analysis": source_documents["analysis"].model_copy(
+            update={"main_tasks": ["Deploy models"]}
+        ),
+        "reference_date": date(2026, 10, 11),
+    }
+    second = _cache_audit_prompt(kind, changed)
+    # The role at the end of letter_style is the first per-offer value.
+    boundary = '"target_role":'
+    prefix = first.split(boundary, 1)[0]
+    assert prefix == second.split(boundary, 1)[0]
+    assert "Speech Lab" in prefix and '"declared_skills"' in prefix
+    assert first != second
+    context = _prompt_context(second)
+    assert context["job_offer"]["full_description"] == changed["job_description"]
+    assert context["final_cv"]["data"]["cv_title"] == changed_cv.cv_title
+    assert [project["id"] for project in context["selected_project_evidence"]] == [
+        "proj_unselected"
+    ]
+    assert "UNSELECTED_FACT_SENTINEL" not in first
+    assert "UNSELECTED_FACT_SENTINEL" in second
+
+
+def test_review_text_metrics_and_correction_mode_follow_candidate_prefix(source_documents):
+    first = _cache_audit_prompt("review", source_documents)
+    second = _cache_audit_prompt(
+        "review",
+        source_documents,
+        letter=MotivationLetter(subject="Another subject", body="Second letter with more words."),
+        validation_issues=["letter_too_short:5"],
+        allow_corrections=True,
+    )
+    assert (
+        first.split("CURRENT TEXT FIELDS\n", 1)[0].split('"final_cv":', 1)[0]
+        == (second.split("CURRENT TEXT FIELDS\n", 1)[0].split('"final_cv":', 1)[0])
+    )
+    assert first.index('"candidate_identity"') < first.index('"job_offer"')
+    assert first.index('"job_offer"') < first.index('"selected_project_evidence"')
+    assert first.index('"final_cv"') < first.index("CURRENT TEXT FIELDS\n")
+    assert '"word_count": 5' in second
+    assert "CORRECTIONS ALLOWED" in second and "CORRECTIONS DISABLED" in first
+
+
+@pytest.mark.parametrize("kind", ["writing", "review"])
+def test_profile_edits_update_candidate_prefix(source_documents, kind):
+    first = _cache_audit_prompt(kind, source_documents)
+    profile = source_documents["profile"].model_copy(deep=True)
+    profile.skills.categories[0].skills.append("Rust")
+    second = _cache_audit_prompt(kind, {**source_documents, "profile": profile})
+    assert first.split('"target_role":', 1)[0] != second.split('"target_role":', 1)[0]
+    assert "Rust" in second and "Rust" not in first
+
+
+@pytest.mark.parametrize("kind", ["writing", "review"])
+def test_experience_selection_preserves_global_prefix_and_evidence_scope(source_documents, kind):
+    first = _cache_audit_prompt(kind, source_documents)
+    cv = source_documents["adapted_cv"].model_copy(update={"selected_experiences": []})
+    second = _cache_audit_prompt(kind, {**source_documents, "adapted_cv": cv})
+    assert (
+        first.split('"experience_evidence":', 1)[0] == second.split('"experience_evidence":', 1)[0]
+    )
+    assert _prompt_context(second)["experience_evidence"] == []
+    assert "experience:exp_speech" not in _prompt_context(second)["source_index"]
 
 
 @pytest.fixture
@@ -285,7 +402,7 @@ def test_texts_prompt_receives_full_offer_and_assembled_cv_without_draft_summary
     assert "AUTHOR_REASONING_SENTINEL" not in prompt
     assert "ANALYSIS_REASONING_SENTINEL" not in prompt
     assert "ANALYSIS_RISK_SENTINEL" not in prompt
-    start = prompt.rfind("{", 0, prompt.index('"source_index"'))
+    start = prompt.rfind("{", 0, prompt.index('"candidate_identity"'))
     context, _ = json.JSONDecoder().raw_decode(prompt[start:])
     assert context["final_cv"]["read_only"] is True
     assert context["final_cv"]["data"]["cv_title"] == source_documents["adapted_cv"].cv_title
@@ -338,7 +455,7 @@ def test_reviewer_receives_title_with_explicit_cv_boundaries(source_documents, a
         "motivation_letter_subject": "Application for Research Scientist",
         "motivation_letter_body": "I am interested.",
     }
-    start = prompt.rfind("{", 0, prompt.index('"source_index"'))
+    start = prompt.rfind("{", 0, prompt.index('"candidate_identity"'))
     context, _ = json.JSONDecoder().raw_decode(prompt[start:])
     snapshot = context["final_cv"]
     assert "read_only" not in snapshot
@@ -394,7 +511,7 @@ def test_summary_editorial_contract_is_shared_from_generation_through_confirmati
         validation_issues=[],
         allow_corrections=allow_corrections,
     )
-    start = review_prompt.rfind("{", 0, review_prompt.index('"source_index"'))
+    start = review_prompt.rfind("{", 0, review_prompt.index('"candidate_identity"'))
     context, _ = json.JSONDecoder().raw_decode(review_prompt[start:])
     summary = context["summary_style"]
     shared_rules = load_prompt("cv_adaptation/summary_rules.j2")
@@ -413,7 +530,9 @@ def test_summary_editorial_contract_is_shared_from_generation_through_confirmati
     assert summary["max_characters"] == 200
     assert summary["max_lines"] == 2
     assert "CV_ONLY_NO_FIRST_PERSON_SENTINEL" not in generation_prompt
-    generation_start = generation_prompt.rfind("{", 0, generation_prompt.index('"source_index"'))
+    generation_start = generation_prompt.rfind(
+        "{", 0, generation_prompt.index('"candidate_identity"')
+    )
     generation_context, _ = json.JSONDecoder().raw_decode(generation_prompt[generation_start:])
     assert generation_context["summary_style"] == summary
     assert context["job_analysis"]["data"]["main_tasks"] == ["Build useful applications"]
@@ -424,7 +543,7 @@ def test_summary_editorial_contract_is_shared_from_generation_through_confirmati
 def test_combined_generation_keeps_summary_and_letter_styles_separate(source_documents):
     profile_before = source_documents["profile"].model_dump()
     prompt = application_texts.build_user_prompt(**_assembled_inputs(source_documents))
-    start = prompt.rfind("{", 0, prompt.index('"source_index"'))
+    start = prompt.rfind("{", 0, prompt.index('"candidate_identity"'))
     context, _ = json.JSONDecoder().raw_decode(prompt[start:])
 
     assert "do" not in context["summary_style"]
@@ -454,7 +573,6 @@ def test_subject_and_body_contract_is_identical_in_generation_review_and_confirm
 
     prompts = (
         application_texts.build_user_prompt(**_assembled_inputs(source_documents)),
-        motivation_letter.build_user_prompt(**source_documents),
         document_review.build_user_prompt(
             **source_documents,
             letter=MotivationLetter(
@@ -466,7 +584,7 @@ def test_subject_and_body_contract_is_identical_in_generation_review_and_confirm
         ),
     )
     for prompt in prompts:
-        start = prompt.rfind("{", 0, prompt.index('"source_index"'))
+        start = prompt.rfind("{", 0, prompt.index('"candidate_identity"'))
         exposed, _ = json.JSONDecoder().raw_decode(prompt[start:])
         assert exposed["letter_style"] == expected["letter_style"]
         assert exposed["letter_style"]["language"] == language
@@ -558,7 +676,6 @@ def test_motivation_leads_are_explicit_shared_and_do_not_replace_offer(
     assert analysis.model_dump() == before
 
     prompts = [
-        motivation_letter.build_user_prompt(**source_documents),
         application_texts.build_user_prompt(**_assembled_inputs(source_documents)),
         document_review.build_user_prompt(
             **source_documents,
@@ -568,7 +685,7 @@ def test_motivation_leads_are_explicit_shared_and_do_not_replace_offer(
         ),
     ]
     for prompt in prompts:
-        start = prompt.rfind("{", 0, prompt.index('"source_index"'))
+        start = prompt.rfind("{", 0, prompt.index('"candidate_identity"'))
         exposed, _ = json.JSONDecoder().raw_decode(prompt[start:])
         assert exposed["motivation_context"] == brief
         assert exposed["job_offer"] == context["job_offer"]
@@ -628,7 +745,6 @@ def test_recruiter_language_rule_is_shared_with_generation_review_and_confirmati
         source_documents["profile"], source_documents["adapted_cv"]
     )
     prompts = [
-        motivation_letter.build_user_prompt(**source_documents),
         application_texts.build_user_prompt(**_assembled_inputs(source_documents)),
         document_review.build_user_prompt(
             **source_documents,
@@ -638,6 +754,6 @@ def test_recruiter_language_rule_is_shared_with_generation_review_and_confirmati
         ),
     ]
     for prompt in prompts:
-        start = prompt.rfind("{", 0, prompt.index('"source_index"'))
+        start = prompt.rfind("{", 0, prompt.index('"candidate_identity"'))
         exposed, _ = json.JSONDecoder().raw_decode(prompt[start:])
         assert exposed["recruiter_text_style"] == style

@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from itertools import combinations
 from typing import Any
 
+from smartapply.company_identity import source_company_of
 from smartapply.dedup.copy_groups import strict_copy_fingerprint
 from smartapply.dedup.deduplicator import (
     linked_duplicate_components,
@@ -103,8 +104,8 @@ def copy_is_active(job: Any) -> bool:
 
 def _literal_metadata_agrees(left: Any, right: Any) -> bool:
     for field in ("title", "company", "contract_type", "remote_policy"):
-        a = " ".join(str(getattr(left, field, None) or "").casefold().split())
-        b = " ".join(str(getattr(right, field, None) or "").casefold().split())
+        a = " ".join(str((source_company_of(left) if field == "company" else getattr(left, field, None)) or "").casefold().split())
+        b = " ".join(str((source_company_of(right) if field == "company" else getattr(right, field, None)) or "").casefold().split())
         if a and b and a != b:
             return False
     return True

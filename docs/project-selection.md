@@ -66,8 +66,8 @@ Le parcours normal n'ajoute aucun appel LLM.
 
 La lettre reçoit le CV final et les preuves des seuls projets retenus. HTML,
 PDF et DOCX suivent les identifiants dans le même ordre et n'ajoutent jamais de
-projet lors du rendu. Les scores d'embeddings restent des diagnostics, sans imposer la
-sélection.
+projet lors du rendu. La sélection provient de l'appel de personnalisation, qui
+reçoit le profil complet et ses règles d'éligibilité.
 
 Les raisons sont conservées dans `project_selection_reasons` du snapshot CV pour
 audit, mais exclues des documents et des sources de relecture. Les anciens

@@ -255,19 +255,11 @@ def _title_blocker(
     )
 
 
-def _description_blocker(reason_code: str, rule_id: str, description: str) -> _Blocker:
-    return _Blocker(reason_code, rule_id, _excerpt(description), "description")
-
-
 def _deduplicate_blockers(blockers: list[_Blocker]) -> list[_Blocker]:
     unique: dict[tuple[str, str], _Blocker] = {}
     for blocker in blockers:
         unique.setdefault((blocker.reason_code, blocker.rule_id), blocker)
     return list(unique.values())
-
-
-def _excerpt(text: str, *, limit: int = 220) -> str:
-    return text.strip()[:limit]
 
 
 __all__ = ["evaluate_role"]

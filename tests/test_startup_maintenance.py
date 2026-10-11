@@ -42,7 +42,7 @@ def test_duplicate_repair_resumes_after_a_committed_batch(isolated_db, monkeypat
     make_pending()
     with session_scope() as session:
         session.add_all([
-            Job(external_id=f"repair-{index}", title="AI Engineer", company="Acme",
+            Job(external_id=f"repair-{index}", title="AI Engineer", source_company="Acme",
                 location="Paris", description="Develop Python machine learning systems " * 20,
                 source="manual") for index in range(3)
         ])

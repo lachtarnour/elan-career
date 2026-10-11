@@ -39,12 +39,14 @@ def cache_set(
     prompt_tokens: int,
     completion_tokens: int,
     purpose: str | None = None,
+    provider: str = "openai",
 ) -> LLMCache:
     entry = cache_get(session, cache_key)
     if entry is not None:
         # Refresh stale/invalid entries (for example after a schema change).
         # This also makes a paid recovery reusable on the next request.
         entry.model = model
+        entry.provider = provider
         entry.response = response
         entry.prompt_tokens = prompt_tokens
         entry.completion_tokens = completion_tokens
@@ -56,6 +58,7 @@ def cache_set(
     entry = LLMCache(
         cache_key=cache_key,
         model=model,
+        provider=provider,
         response=response,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
@@ -79,6 +82,9 @@ def record_usage(
     cached: bool = False,
     job_id: int | None = None,
     cache_key: str | None = None,
+    provider: str = "openai",
+    requested_model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> LLMUsage:
     job_external_id = None
     if job_id is not None:
@@ -86,6 +92,9 @@ def record_usage(
     usage = LLMUsage(
         purpose=purpose,
         model=model,
+        requested_model=requested_model,
+        reasoning_effort=reasoning_effort,
+        provider=provider,
         prompt_tokens=prompt_tokens,
         cached_prompt_tokens=cached_prompt_tokens,
         cache_write_prompt_tokens=cache_write_prompt_tokens,

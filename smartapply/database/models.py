@@ -28,7 +28,6 @@ class JobStatus:
     ANALYZED = "analyzed"
     SENT = "sent"
     INTERVIEW = "interview"
-    REJECTED = "rejected"
     QUALITY_REJECTED = "quality_rejected"
     READY_FOR_FORM_SUBMISSION = "ready_for_form_submission"
     ARCHIVED = "archived"
@@ -92,12 +91,15 @@ class Company(Base):
 
 class Job(Base):
     __tablename__ = "jobs"
-    __table_args__ = (Index("ix_jobs_status_scraped_at", "status", "scraped_at"),)
+    __table_args__ = (
+        Index("ix_jobs_status_scraped_at", "status", "scraped_at"),
+        Index("ix_jobs_company", "source_company"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     external_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     title: Mapped[str] = mapped_column(String(500))
-    company: Mapped[str] = mapped_column(String(255), index=True)
+    source_company: Mapped[str] = mapped_column(String(255))
     location: Mapped[str | None] = mapped_column(String(255), nullable=True)
     contract_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     remote_policy: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -163,14 +165,6 @@ class JobScore(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), unique=True)
-    rule_based_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    semantic_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    skill_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    title_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    seniority_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    location_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    domain_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    final_score: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)
     components: Mapped[Any | None] = mapped_column(JSON, nullable=True)
     computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
@@ -193,6 +187,7 @@ class JobAnalysis(Base):
     cv_keywords_to_include: Mapped[Any | None] = mapped_column(JSON, nullable=True)
     fit_score: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)
     raw_response: Mapped[Any | None] = mapped_column(JSON, nullable=True)
+    fit_diagnostics: Mapped[Any | None] = mapped_column(JSON, nullable=True)
     model_used: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
@@ -247,6 +242,7 @@ class LLMCache(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     cache_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     model: Mapped[str] = mapped_column(String(100))
+    provider: Mapped[str] = mapped_column(String(32), default="openai", server_default="openai")
     purpose: Mapped[str | None] = mapped_column(String(100), nullable=True)
     response: Mapped[str] = mapped_column(Text)
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
@@ -260,6 +256,9 @@ class LLMUsage(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     purpose: Mapped[str] = mapped_column(String(100), index=True)
     model: Mapped[str] = mapped_column(String(100))
+    requested_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    reasoning_effort: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    provider: Mapped[str] = mapped_column(String(32), default="openai", server_default="openai")
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cached_prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cache_write_prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
@@ -273,30 +272,6 @@ class LLMUsage(Base):
     job_external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Enables targeted removal of exact responses when an offer is deleted.
     cache_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-
-
-class EmbeddingCache(Base):
-    """Persistent exact cache shared by ranking and CV block selection."""
-
-    __tablename__ = "embedding_cache"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    cache_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    model: Mapped[str] = mapped_column(String(100), index=True)
-    vector: Mapped[Any] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-
-
-class JobEmbedding(Base):
-    """Cached embedding vector for a job, to avoid recomputing it."""
-
-    __tablename__ = "job_embeddings"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), unique=True)
-    model: Mapped[str] = mapped_column(String(100))
-    vector: Mapped[Any] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 

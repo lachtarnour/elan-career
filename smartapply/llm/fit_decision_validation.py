@@ -1,0 +1,201 @@
+"""Read-only observations of fit annotations; no scoring authority."""
+
+from smartapply.llm.fit_context import DECISION_LEVELS, offer_references, resolve
+from smartapply.llm.fit_validation import AXES, POSITIVE, PREFERENCE_FIELDS
+
+
+def inspect_decisions(evaluation, context, offer) -> list[str]:
+    candidate = context["candidate_refs"]
+    offers = offer_references(offer)
+    source = context.get("offer_source", {})
+    if source.get("available"):
+        offers["offer_source:body"] = {"source_type": "source"}
+    observations = []
+
+    def refs(offer_refs, candidate_refs, label):
+        if not offer_refs:
+            observations.append(f"{label}: at least one offer reference is required")
+        for ref in offer_refs:
+            if ref not in offers:
+                observations.append(f"{label}: unknown offer reference {ref}")
+        for ref in candidate_refs:
+            if ref not in candidate:
+                observations.append(f"{label}: unknown candidate reference {ref}")
+
+    def binding_preferences(references):
+        return bool(references) and all(
+            ref in candidate
+            and candidate[ref]["source_type"] == "preference"
+            and candidate[ref]["path"][1] in PREFERENCE_FIELDS
+            for ref in references
+        )
+
+    optional = set()
+    for interpretation in evaluation.offer_interpretations:
+        refs(interpretation.offer_refs, [], "source interpretation")
+        valid_quote = (
+            source.get("available")
+            and bool(interpretation.source_quote.strip())
+            and interpretation.source_quote in source.get("offer_body", "")
+        )
+        if not valid_quote:
+            observations.append("Source interpretation: quote not found in frozen source")
+        elif interpretation.meaning == "optional":
+            optional.update(interpretation.offer_refs)
+        if not interpretation.text.strip():
+            observations.append("Source interpretation: explanation is empty")
+
+    whole_neutral = set()
+    for neutral in evaluation.neutral_offer_refs:
+        refs([neutral.offer_ref], neutral.candidate_refs, "neutralisation")
+        kind = offers.get(neutral.offer_ref, {}).get("source_type")
+        if neutral.scope == "years_component" and neutral.reason != "years_only":
+            observations.append(f"{neutral.offer_ref}: years_component requires years_only")
+        if neutral.reason == "compatible_preference" and not binding_preferences(
+            neutral.candidate_refs
+        ):
+            observations.append(
+                f"{neutral.offer_ref}: compatible_preference requires admissible preference evidence"
+            )
+        if (
+            neutral.reason in {"no_declared_preference", "compatible_preference"}
+            and kind != "constraints"
+        ):
+            observations.append(
+                f"{neutral.offer_ref}: preference neutralisation requires a context constraint"
+            )
+        if neutral.scope == "whole_entry":
+            admissible = neutral.reason in {"years_only", "explicit_exemption"}
+            admissible |= neutral.reason == "optional_only" and neutral.offer_ref in optional
+            admissible |= kind == "constraints" and neutral.reason in {
+                "no_declared_preference",
+                "compatible_preference",
+            }
+            if admissible:
+                whole_neutral.add(neutral.offer_ref)
+            else:
+                observations.append(
+                    f"{neutral.offer_ref}: whole neutralisation lacks appropriate support"
+                )
+
+    covered = {}
+    for axis in AXES:
+        findings = getattr(evaluation.dimensions, axis).findings
+        covered[axis] = set()
+        positives = 0
+        for finding in findings:
+            refs(finding.offer_refs, finding.candidate_refs, axis)
+            covered[axis].update(finding.offer_refs)
+            if not finding.text.strip():
+                observations.append(f"{axis}: finding explanation is empty")
+            sources = [candidate[ref] for ref in finding.candidate_refs if ref in candidate]
+            types = {item["source_type"] for item in sources}
+            if finding.support in POSITIVE:
+                positives += 1
+                if not sources or types & {"identity", "preference"}:
+                    observations.append(
+                        f"{axis}: positive capability needs appropriate candidate facts"
+                    )
+                if axis != "essentials" and "bullet" not in types:
+                    observations.append(
+                        f"{axis}: accomplishments require experience/project bullets"
+                    )
+                if finding.support in {"direct", "transferable"} and types == {"declared_skill"}:
+                    observations.append(
+                        f"{axis}: ordinary declared skills must remain declared_only"
+                    )
+                if finding.support == "direct" and any(
+                    item["source_type"] == "bullet"
+                    and resolve(context["candidate_facts"], item)["evidence_level"] == "inferred"
+                    for item in sources
+                ):
+                    observations.append(f"{axis}: inferred facts are not established realizations")
+            if finding.support == "not_documented" and sources:
+                observations.append(
+                    f"{axis}: not_documented must distinguish positive partial support"
+                )
+            if finding.support == "contradicted" and (
+                not sources or types <= {"declared_skill", "identity"}
+            ):
+                observations.append(f"{axis}: contradiction needs an explicit candidate fact")
+        state = getattr(evaluation.decision, axis)
+        if DECISION_LEVELS[state] >= 3 and not positives:
+            observations.append(f"{axis}: high decision without a sourced positive finding")
+        explained = any(finding.text.strip() for finding in findings) or any(
+            issue.axis == axis and issue.text.strip() for issue in evaluation.issues
+        )
+        if DECISION_LEVELS[state] <= 2 and not explained:
+            observations.append(f"{axis}: limited decision without an explanatory annotation")
+
+    issue_coverage = set()
+    task_coverage = set()
+    for issue in evaluation.issues:
+        refs(issue.offer_refs, issue.candidate_refs, issue.axis)
+        issue_coverage.update(issue.offer_refs)
+        if issue.origin == "offer_information" and issue.axis in {"missions", "responsibilities"}:
+            task_coverage.update(issue.offer_refs)
+        if not issue.text.strip():
+            observations.append(f"{issue.axis}: reservation explanation is empty")
+        if issue.origin == "preference_alignment" and not any(
+            ref in candidate and candidate[ref]["source_type"] == "preference"
+            for ref in issue.candidate_refs
+        ):
+            observations.append("Preference reservation needs a declared preference")
+    admissibility_coverage = set()
+    if evaluation.admissibility is not None:
+        for name in ("mandatory_conditions", "candidate_preferences"):
+            dimension = getattr(evaluation.admissibility, name)
+            finding_statuses = {finding.status for finding in dimension.findings}
+            if dimension.status == "incompatible" and "incompatible" not in finding_statuses:
+                observations.append(f"{name}: incompatible status without an explanatory finding")
+            if dimension.status == "compatible" and finding_statuses & {"unknown", "incompatible"}:
+                observations.append(
+                    f"{name}: compatible status has unresolved or incompatible findings"
+                )
+            if dimension.status == "unknown" and "incompatible" in finding_statuses:
+                observations.append(f"{name}: unknown status has an incompatible finding")
+            for finding in dimension.findings:
+                refs(finding.offer_refs, finding.candidate_refs, name)
+                admissibility_coverage.update(finding.offer_refs)
+                if not finding.text.strip():
+                    observations.append(f"{name}: finding explanation is empty")
+                if finding.status in {"compatible", "incompatible"}:
+                    if not any(ref in candidate for ref in finding.candidate_refs):
+                        observations.append(
+                            f"{name}: established comparison lacks candidate references"
+                        )
+                    if name == "candidate_preferences" and not binding_preferences(
+                        finding.candidate_refs
+                    ):
+                        observations.append(
+                            f"{name}: established comparison lacks explicit binding preferences"
+                        )
+
+    if evaluation.reliability is not None:
+        for name in ("offer_information", "candidate_information", "traceability"):
+            if not getattr(evaluation.reliability, name).strip():
+                observations.append(f"reliability.{name}: description is empty")
+        if any(
+            not uncertainty.strip() for uncertainty in evaluation.reliability.business_uncertainties
+        ):
+            observations.append("reliability.business_uncertainties: empty description")
+
+    for ref, entry in offers.items():
+        if ref in whole_neutral or ref in optional:
+            continue
+        kind = entry["source_type"]
+        if kind == "required_skills" and ref not in (
+            covered["essentials"] | admissibility_coverage
+        ):
+            observations.append(f"{ref}: essential expectation not covered")
+        if kind == "main_tasks" and ref not in (
+            covered["missions"] | covered["responsibilities"] | task_coverage
+        ):
+            observations.append(f"{ref}: task not covered")
+        if kind == "constraints" and ref not in (
+            set.union(*covered.values()) | issue_coverage | admissibility_coverage
+        ):
+            observations.append(
+                f"{ref}: constraint not covered (partial neutralisation is insufficient)"
+            )
+    return list(dict.fromkeys(observations))

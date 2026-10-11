@@ -41,14 +41,46 @@ def test_init_creates_all_tables() -> None:
         "jobs",
         "job_scores",
         "job_analyses",
-        "job_embeddings",
         "applications",
         "generated_documents",
-        "embedding_cache",
         "llm_cache",
         "llm_usage",
     }
     assert expected.issubset(tables)
+    assert "job_embeddings" not in tables
+    assert "embedding_cache" not in tables
+    assert "final_score" not in {column["name"] for column in insp.get_columns("job_scores")}
+
+
+def test_match_score_migration_keeps_filter_evidence(tmp_path) -> None:
+    from sqlalchemy import create_engine, text
+
+    from smartapply.database.match_score_migration import remove_match_score
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy.db'}")
+    with engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE job_scores (id INTEGER PRIMARY KEY, job_id INTEGER, "
+            "final_score FLOAT, semantic_score FLOAT, components JSON, computed_at DATETIME)"
+        ))
+        connection.execute(text("CREATE INDEX ix_job_scores_final_score ON job_scores (final_score)"))
+        connection.execute(text("CREATE TABLE job_embeddings (id INTEGER PRIMARY KEY, job_id INTEGER)"))
+        connection.execute(text(
+            "INSERT INTO job_scores (job_id, final_score, semantic_score, components) "
+            "VALUES (1, 0.8, 0.7, :components)"
+        ), {"components": '{"final":0.8,"semantic":0.7,"filter_disposition":"rejected"}'})
+
+    remove_match_score(engine)
+    remove_match_score(engine)
+    with engine.connect() as connection:
+        columns = {row[1] for row in connection.execute(text("PRAGMA table_info(job_scores)"))}
+        assert columns == {"id", "job_id", "components", "computed_at"}
+        assert connection.scalar(text("SELECT components FROM job_scores")) == (
+            '{"filter_disposition":"rejected"}'
+        )
+        assert connection.scalar(text(
+            "SELECT count(*) FROM sqlite_master WHERE name='job_embeddings'"
+        )) == 0
 
 
 def test_sqlite_is_tuned_for_concurrent_desktop_workloads() -> None:
@@ -228,7 +260,7 @@ def test_upsert_job_inserts_then_updates() -> None:
         )
         assert job.id == first_id
         assert job.title == "Data Scientist Senior"
-        assert job.company == "Acme"
+        assert job.source_company == "Acme"
 
 
 def test_application_document_and_tracking_flow() -> None:
@@ -269,55 +301,6 @@ def test_application_document_and_tracking_flow() -> None:
         assert tracked.notes == "Relancer dans une semaine."
 
 
-def test_top_jobs_can_exclude_already_prepared_applications() -> None:
-    from smartapply.database import session_scope
-    from smartapply.database.repository import (
-        create_or_get_application,
-        mark_archived,
-        set_score,
-        top_jobs_by_score,
-        upsert_job,
-    )
-
-    with session_scope() as session:
-        prepared = upsert_job(
-            session,
-            external_id="rank:prepared",
-            title="Prepared",
-            company="Acme",
-            description="desc",
-            source="manual",
-        )
-        available = upsert_job(
-            session,
-            external_id="rank:available",
-            title="Available",
-            company="Acme",
-            description="desc",
-            source="manual",
-        )
-        archived = upsert_job(
-            session,
-            external_id="rank:archived",
-            title="Archived",
-            company="Acme",
-            description="desc",
-            source="manual",
-        )
-        set_score(session, prepared.id, final_score=0.99)
-        set_score(session, available.id, final_score=0.75)
-        set_score(session, archived.id, final_score=1.0)
-        mark_archived(session, archived.id)
-        create_or_get_application(session, prepared.id)
-
-    with session_scope() as session:
-        all_top = top_jobs_by_score(session, 1)
-        unapplied_top = top_jobs_by_score(session, 1, unapplied_only=True)
-
-        assert [job.id for job in all_top] == [prepared.id]
-        assert [job.id for job in unapplied_top] == [available.id]
-
-
 def test_audit_component_update_preserves_score_computation_time() -> None:
     from datetime import datetime
 
@@ -337,15 +320,14 @@ def test_audit_component_update_preserves_score_computation_time() -> None:
         score = set_score(
             session,
             job.id,
-            final_score=0.8,
-            components={"ranking": {"final": 0.8}},
+            components={"manual_audit": True},
             computed_at=original_time,
         )
         session.flush()
         score = set_score(
             session,
             job.id,
-            components={"ranking": {"final": 0.8}, "manual_audit": True},
+            components={"manual_audit": True, "verified": True},
         )
         session.flush()
 
@@ -488,7 +470,6 @@ def test_rescue_archived_job_resets_state_without_fabricating_scores() -> None:
         set_score(
             s,
             job.id,
-            rule_based_score=0.0,
             components={
                 "rejection_stage": "local_filter",
                 "rejection_reasons": [
@@ -511,7 +492,7 @@ def test_rescue_archived_job_resets_state_without_fabricating_scores() -> None:
         assert rescued is not None
         assert rescued.id == job_id
 
-    # Assert: archive cleared, status FILTERED, no score is fabricated and the
+    # Assert: archive cleared and status FILTERED while the
     # audit block preserves the previous rejection reasons.
     with session_scope() as s:
         job = s.get(Job, job_id)
@@ -530,18 +511,6 @@ def test_rescue_archived_job_resets_state_without_fabricating_scores() -> None:
         assert 0 <= delta.total_seconds() < 60
 
         score = s.execute(select(JobScore).where(JobScore.job_id == job_id)).scalar_one()
-        for component in (
-            "rule_based_score",
-            "semantic_score",
-            "skill_score",
-            "title_score",
-            "seniority_score",
-            "location_score",
-            "domain_score",
-            "final_score",
-        ):
-            assert getattr(score, component) is None, component
-
         comps = score.components
         assert comps["filter_disposition"] == "pending_relevance"
         assert "hard_reject" not in comps

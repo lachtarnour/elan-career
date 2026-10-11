@@ -115,6 +115,193 @@ class OfferAnalysis(BaseModel):
     )
 
 
+ExtractionSeniority = Literal["junior", "mid", "senior", "lead", "manager", "mixed", "unknown"]
+ExtractionLanguage = Literal["fr", "en", "mixed_fr_en", "other"]
+MissionRelation = Literal["direct", "adjacent", "clearly_outside", "unknown"]
+MissionEvidence = Literal["sufficient", "insufficient", "contradictory"]
+
+
+class OfferExtractionOutput(OfferAnalysis):
+    """Closed categories for new extractions; historical offer facts stay readable."""
+
+    seniority: ExtractionSeniority = Field(
+        description=(
+            "Seniority explicitly supported by the offer: junior, mid, senior, lead, manager; "
+            "mixed for multiple stated levels, unknown when not established."
+        )
+    )
+    offer_language: ExtractionLanguage = Field(
+        default="other",
+        description=(
+            "Language the offer is written in: fr for French, en for English, "
+            "mixed_fr_en for substantive content in both French and English; "
+            "other for any other language, other multilingual content, or unclear language. "
+            "Required candidate languages do not determine the offer language."
+        ),
+    )
+
+
+class MissionScreen(BaseModel):
+    """Offer-only mission classification for the dedicated prefilter."""
+
+    model_config = _strict
+
+    mission_relation: MissionRelation = Field(
+        description=(
+            "Semantic relation of concrete responsibilities to AI/ML, data analysis, "
+            "quantitative analysis/research, analytics, "
+            "data/AI consulting or closely related data/AI delivery. Exact search terms "
+            "are not required; recognise synonymous or functionally equivalent duties. "
+            "Financial/economic work requires actual quantitative research or analysis; "
+            "general financial duties alone do not qualify, and sectors are not excluded wholesale. "
+            "Programming is not required. Generic software/IT work without substantive data/AI duties, "
+            "transferable skills or incidental tools do not establish proximity."
+        )
+    )
+    mission_evidence: MissionEvidence = Field(
+        description=(
+            "Whether the body establishes the actual duties clearly enough to classify their "
+            "relation; contradictory means conflicting missions prevent classification."
+        )
+    )
+
+
+class JobScopeScreening(BaseModel):
+    """Independent mission screen using the unchanged historical categories."""
+
+    model_config = _strict
+    mission_screen: MissionScreen = Field(
+        description=(
+            "Classify the offer's main duties independently of any candidate. "
+            "Use unknown with insufficient or contradictory evidence when the duties cannot be classified."
+        ),
+    )
+
+
+class FitFinding(BaseModel):
+    model_config = _strict
+    offer_refs: list[str]
+    candidate_refs: list[str]
+    support: Literal["direct", "transferable", "declared_only", "not_documented", "contradicted"]
+    text: str = Field(min_length=1)
+
+
+class NeutralOfferReference(BaseModel):
+    model_config = _strict
+    offer_ref: str
+    reason: Literal[
+        "years_only",
+        "explicit_exemption",
+        "optional_only",
+        "no_declared_preference",
+        "compatible_preference",
+    ]
+    scope: Literal["whole_entry", "years_component"]
+    candidate_refs: list[str]
+
+
+FitDecisionState = Literal[
+    "very_low_support",
+    "weak_support",
+    "partial_core_fit",
+    "credible_fit",
+    "strong_fit",
+]
+
+
+class FitDecisions(BaseModel):
+    model_config = _strict
+    missions: FitDecisionState
+    essentials: FitDecisionState
+    responsibilities: FitDecisionState
+
+
+class FitDecisionFinding(FitFinding):
+    support: Literal[
+        "direct",
+        "transferable",
+        "declared_only",
+        "partial_support",
+        "not_documented",
+        "contradicted",
+    ]
+
+
+class FitDecisionDimension(BaseModel):
+    model_config = _strict
+    findings: list[FitDecisionFinding]
+
+
+class FitDecisionAnnotations(BaseModel):
+    model_config = _strict
+    missions: FitDecisionDimension
+    essentials: FitDecisionDimension
+    responsibilities: FitDecisionDimension
+
+
+class FitReservation(BaseModel):
+    model_config = _strict
+    axis: Literal["missions", "essentials", "responsibilities", "context"]
+    origin: Literal["candidate_evidence", "offer_information", "preference_alignment"]
+    offer_refs: list[str]
+    candidate_refs: list[str]
+    text: str
+
+
+class FitOfferInterpretation(BaseModel):
+    model_config = _strict
+    offer_refs: list[str]
+    source_ref: Literal["offer_source:body"]
+    source_quote: str
+    meaning: Literal["mandatory", "optional", "alternative", "conditional", "uncertain"]
+    origin: Literal["offer_information"]
+    text: str
+
+
+AdmissibilityState = Literal["compatible", "incompatible", "unknown"]
+
+
+class FitAdmissibilityFinding(BaseModel):
+    model_config = _strict
+    offer_refs: list[str]
+    candidate_refs: list[str]
+    status: AdmissibilityState
+    text: str
+
+
+class FitAdmissibilityDimension(BaseModel):
+    model_config = _strict
+    status: AdmissibilityState
+    findings: list[FitAdmissibilityFinding]
+
+
+class FitAdmissibility(BaseModel):
+    model_config = _strict
+    mandatory_conditions: FitAdmissibilityDimension
+    candidate_preferences: FitAdmissibilityDimension
+
+
+class FitReliability(BaseModel):
+    model_config = _strict
+    offer_information: str
+    candidate_information: str
+    traceability: str
+    business_uncertainties: list[str]
+
+
+class JobFitDecisionEvaluation(BaseModel):
+    """Three technical decisions suffice; auxiliary output is advisory at runtime."""
+
+    model_config = _strict
+    decision: FitDecisions
+    admissibility: FitAdmissibility | None = None
+    reliability: FitReliability | None = None
+    dimensions: FitDecisionAnnotations
+    issues: list[FitReservation]
+    neutral_offer_refs: list[NeutralOfferReference]
+    offer_interpretations: list[FitOfferInterpretation]
+
+
 class JobFitAssessment(BaseModel):
     """The matching call cannot return or overwrite extracted offer fields."""
 
@@ -123,7 +310,7 @@ class JobFitAssessment(BaseModel):
     fit_score: float = Field(
         ge=0.0,
         le=1.0,
-        description="Overall candidate fit from 0 to 1 using the fixed assessment rubric.",
+        description="Ordinal technical fit index from the three weighted decisions, not a probability.",
     )
     match_reasons: list[str] = Field(
         description="Concrete matches between immutable offer requirements and candidate facts."
@@ -238,7 +425,7 @@ class CVSelection(BaseModel):
 
 
 class CVPersonalization(CVSelection):
-    """Complete personalization retained for existing snapshots and legacy drafts."""
+    """Complete personalization retained for existing CV snapshots."""
 
     # None marks a snapshot created before certificate selection existed.
     selected_certificate_ids: list[str] | None = None
@@ -384,46 +571,3 @@ class DocumentTextReview(BaseModel):
             "Empty when none remain. Never include positive assessments or a clean verdict."
         )
     )
-
-
-class FormQuestionAnswer(BaseModel):
-    model_config = _strict
-
-    question: str = Field(description="Original form question, copied or normalized")
-    answer: str = Field(description="Candidate-ready answer, plain text, no markdown")
-    evidence_used: list[str] = Field(
-        description="Concrete profile/job evidence used to justify this answer"
-    )
-    warnings: list[str] = Field(
-        description="Grounding warnings, missing context or claims to verify manually"
-    )
-
-
-class FormQuestionAnswers(BaseModel):
-    model_config = _strict
-
-    answers: list[FormQuestionAnswer] = Field(
-        description="One answer per detected form question, preserving question order"
-    )
-    global_warnings: list[str] = Field(
-        description="Overall warnings that apply to the generated answer set"
-    )
-
-
-class ApplicationDraft(CVPersonalization):
-    """LLM-generated personalization and letter, without experience output."""
-
-    motivation_letter_subject: str = Field(description="Motivation letter subject line")
-    motivation_letter_body: str = Field(
-        description=(
-            "Natural and professional motivation letter, usually 250-350 words. "
-            "Must reuse evidence from read-only profile experiences or selected_project_ids "
-            "without going into project details."
-        )
-    )
-
-    def to_motivation_letter(self) -> MotivationLetter:
-        return MotivationLetter(
-            subject=self.motivation_letter_subject,
-            body=self.motivation_letter_body,
-        )

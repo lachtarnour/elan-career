@@ -31,6 +31,7 @@ ENV/
 # ---- Secrets ----
 .env
 .env.*
+.*.llm.lock
 !.env.example
 secrets/
 *.pem
@@ -54,6 +55,20 @@ token.json
 # Legacy locations for private company lists and ranking research.
 /smartapply/desktop/resources/*.csv
 /docs/company-ranking.json
+/benchmarks/
+!/benchmarks/
+/benchmarks/*
+!/benchmarks/elan_200/
+/benchmarks/elan_200/*
+!/benchmarks/elan_200/publication/
+/benchmarks/elan_200/publication/*
+!/benchmarks/elan_200/publication/README.md
+!/benchmarks/elan_200/publication/corpora.json
+!/benchmarks/elan_200/publication/runs.json
+!/benchmarks/elan_200/publication/coverage.jsonl
+!/benchmarks/elan_200/publication/checksums.json
+!/benchmarks/elan_200/publication/verify.py
+!/benchmarks/elan_200/publication/benchmark_overview.html
 *.db
 *.db-*
 *.sqlite

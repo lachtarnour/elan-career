@@ -52,10 +52,7 @@ def _legacy_job(
             contract_type="CDI", source="manual", status=JobStatus.SCRAPED,
         )
         set_score(
-            session, job.id, rule_based_score=0.5, semantic_score=0.6,
-            skill_score=0.7, title_score=0.8, seniority_score=0.9,
-            location_score=1.0, domain_score=0.4, final_score=0.75,
-            components={
+            session, job.id, components={
                 "filter_disposition": disposition, "reasons": ["legacy_unclear"],
                 "semantic": {"value": 0.6}, "title": 0.8, "final": 0.75,
                 "independent_audit": {"verified": True}, **(components or {}),
@@ -87,7 +84,7 @@ def _plan(database: Path, *, allowed: set[int] | None = None, **kwargs):
     )
 
 
-def test_migration_preserves_all_scores_and_workflow_for_survivors(isolated_db) -> None:
+def test_migration_preserves_workflow_and_discards_legacy_match(isolated_db) -> None:
     from smartapply.database import session_scope
     from smartapply.database.models import Application, GeneratedDocument, Job, JobAnalysis
 
@@ -125,8 +122,9 @@ def test_migration_preserves_all_scores_and_workflow_for_survivors(isolated_db) 
         assert components["legacy_filter_migration"]["previous_filter_components"] == {
             "filter_disposition": "uncertain", "reasons": ["legacy_unclear"],
         }
-        for key in ("semantic", "title", "final", "independent_audit"):
-            assert components[key] == old_components[key]
+        for key in ("semantic", "title", "final"):
+            assert key not in components
+        assert components["independent_audit"] == old_components["independent_audit"]
     assert report.backup.stat().st_mode & 0o777 == 0o600
     assert _snapshot(report.backup) == before
     assert _plan(database).changes == ()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from smartapply.config import get_llm_settings
 from smartapply.cv.assembly import assemble_cv
 from smartapply.cv.certificate_selection import certificate_policy_errors
 from smartapply.cv.project_selection import (
@@ -12,7 +13,6 @@ from smartapply.cv.project_selection import (
     validate_project_selection,
 )
 from smartapply.cv.role_contracts import apply_contract
-from smartapply.cv.selector import CvBlockSelector, SelectionResult
 from smartapply.cv.skill_selection import normalize_skill_selection
 from smartapply.llm import (
     AdaptedCV,
@@ -26,11 +26,9 @@ from smartapply.llm import (
     get_llm_provider,
 )
 from smartapply.llm.prompts import cv_adaptation
+from smartapply.llm.routes import provider_for
+from smartapply.llm_policy import resolve_route
 from smartapply.profile import Profile
-from smartapply.ranking.embeddings import (
-    EmbeddingsProvider,
-    get_embeddings_provider,
-)
 from smartapply.utils.skill_terms import normalize_skill_term, skill_term_matches
 
 
@@ -39,12 +37,9 @@ class CvAdapter:
         self,
         profile: Profile,
         llm: LLMProvider | None = None,
-        embeddings: EmbeddingsProvider | None = None,
     ):
         self.profile = profile
         self.llm = llm or get_llm_provider()
-        self.embeddings = embeddings or get_embeddings_provider()
-        self.selector = CvBlockSelector(self.embeddings)
 
     def adapt(
         self,
@@ -55,14 +50,13 @@ class CvAdapter:
         job_description: str = "",
         job_id: int | None = None,
         refresh_cache: bool = False,
-    ) -> tuple[AssembledCV, SelectionResult]:
+    ) -> AssembledCV:
         capacity = selectable_project_capacity(self.profile)
         if capacity < MIN_PROJECTS:
             raise LLMError(
                 f"Insufficient eligible projects: policy allows {capacity}, "
                 f"but each CV requires at least {MIN_PROJECTS}"
             )
-        selection = self.selector.select(self.profile, analysis)
         prompt = cv_adaptation.build_user_prompt(
             profile=self.profile,
             analysis=analysis,
@@ -75,16 +69,23 @@ class CvAdapter:
             selected_projects=list(self.profile.projects),
         )
         # Finalize the complete selection before any summary or letter is written.
+        purposes = ("cv_adaptation", "cv_selection_correction")
+        providers = [provider_for(self.llm, purpose) for purpose in purposes]
+        settings = getattr(self.llm, "_settings", None) or get_llm_settings()
+        routes = [resolve_route(settings, purpose) for purpose in purposes]
         for attempt in range(2):
-            personalization = self.llm.complete_json(
+            provider = providers[attempt]
+            personalization = provider.complete_json(
                 system=cv_adaptation.build_system_prompt(),
                 user=prompt,
                 schema=CVSelection,
-                model=self.llm.smart_model,
+                model=routes[attempt].model,
                 temperature=0.3,
-                purpose="cv_adaptation",
+                purpose=purposes[attempt],
                 job_id=job_id,
                 refresh_cache=refresh_cache or attempt > 0,
+                effort=routes[attempt].reasoning,
+                max_completion_tokens=routes[attempt].max_output_tokens,
             )
             project_errors = validate_project_selection(
                 personalization, self.profile, analysis, job_description=job_description
@@ -115,11 +116,11 @@ class CvAdapter:
                     "honest transferable relevance. Never invent a direct specialty match."
                 )
         adapted = assemble_cv(personalization, self.profile)
-        adapted = self._ensure_supported_offer_skills(adapted, analysis)
+        adapted = self._ensure_supported_offer_skills(
+            adapted, analysis, job_description=job_description
+        )
         adapted = self._apply_role_family_contract(adapted, analysis, job_title)
-        project_by_id = {project.id: project for project in self.profile.projects}
-        selection.projects = [project_by_id[pid] for pid in adapted.selected_project_ids]
-        return adapted, selection
+        return adapted
 
     def adapt_application(
         self,
@@ -131,7 +132,7 @@ class CvAdapter:
         job_id: int | None = None,
         refresh_cache: bool = False,
         job_description: str = "",
-    ) -> tuple[AdaptedCV, MotivationLetter, SelectionResult]:
+    ) -> tuple[AdaptedCV, MotivationLetter]:
         """Compatibility entry point using the same sequential, reviewed flow.
 
         Text checks remain advisory for document availability. This tuple-only
@@ -141,7 +142,7 @@ class CvAdapter:
         from smartapply.cv.letter_writer import ApplicationTextWriter
         from smartapply.cv.validator import CvValidator
 
-        assembled, selection = self.adapt(
+        assembled = self.adapt(
             analysis,
             job_title=job_title,
             job_company=job_company,
@@ -174,68 +175,16 @@ class CvAdapter:
                 ]
             )
         )
-        return reviewed.cv.model_copy(update={"warnings": warnings}), reviewed.letter, selection
-
-    def _ensure_summary_skills_visible(self, adapted: AdaptedCV) -> AdaptedCV:
-        """Legacy utility; the two-stage generation never mutates skills from a summary."""
-        summary = adapted.professional_summary or ""
-        if not summary.strip():
-            return adapted
-
-        category_by_skill: dict[str, str] = {}
-        canonical_by_skill: dict[str, str] = {}
-        for category in self.profile.skills.categories:
-            for skill in category.skills:
-                key = skill.lower()
-                category_by_skill.setdefault(key, category.id)
-                canonical_by_skill.setdefault(key, skill)
-
-        selected_by_category: dict[str, list[str]] = {
-            block.category_id: list(block.skills) for block in adapted.selected_skills
-        }
-        category_order = [block.category_id for block in adapted.selected_skills]
-        already_selected = {
-            skill.lower() for skills in selected_by_category.values() for skill in skills
-        }
-
-        for skill_key in sorted(canonical_by_skill, key=len, reverse=True):
-            if skill_key in already_selected:
-                continue
-            canonical = canonical_by_skill[skill_key]
-            if not self._summary_mentions_skill(summary, canonical):
-                continue
-            category_id = category_by_skill[skill_key]
-            if category_id not in selected_by_category:
-                selected_by_category[category_id] = []
-                category_order.append(category_id)
-            selected_by_category[category_id].append(canonical)
-            already_selected.add(skill_key)
-
-        if not selected_by_category:
-            return adapted
-
-        skills_order = list(adapted.skills_order)
-        for category_id in category_order:
-            if category_id not in skills_order:
-                skills_order.append(category_id)
-
-        return adapted.model_copy(
-            update={
-                "selected_skills": [
-                    SkillSelectionBlock(category_id=category_id, skills=skills)
-                    for category_id in category_order
-                    if (skills := selected_by_category.get(category_id))
-                ],
-                "skills_order": skills_order,
-            }
-        )
+        return reviewed.cv.model_copy(update={"warnings": warnings}), reviewed.letter
 
     def _ensure_supported_offer_skills(
         self,
         adapted: AssembledCV,
         analysis: JobAnalysis,
+        *,
+        job_description: str = "",
     ) -> AssembledCV:
-        """Deterministically keep supported offer-required skills visible.
+        """Keep explicitly mentioned, supported offer skills visible.
 
         The LLM decides the section, but this guard fixes a common miss:
         offers often phrase skills as "Python programming" or "Experience
@@ -262,17 +211,32 @@ class CvAdapter:
             block.category_id: list(block.skills) for block in adapted.selected_skills
         }
         category_order = [block.category_id for block in adapted.selected_skills]
+        selected_skills_lower = {
+            skill.lower() for skills in selected_by_category.values() for skill in skills
+        }
 
-        for term in list(analysis.required_skills) + list(analysis.cv_keywords_to_include):
-            for skill_key in self._matched_allowed_skill_keys(term, canonical_by_skill):
-                category_id = category_by_skill[skill_key]
-                canonical = canonical_by_skill[skill_key]
-                if category_id not in selected_by_category:
-                    selected_by_category[category_id] = []
-                    category_order.append(category_id)
-                existing = {skill.lower() for skill in selected_by_category[category_id]}
-                if canonical.lower() not in existing:
-                    selected_by_category[category_id].append(canonical)
+        offer_skill_keys = [
+            skill_key
+            for term in (
+                list(analysis.required_skills)
+                + list(analysis.cv_keywords_to_include)
+                + list(analysis.nice_to_have)
+            )
+            for skill_key in self._matched_allowed_skill_keys(term, canonical_by_skill)
+        ]
+        offer_skill_keys.extend(
+            self._matched_description_skill_keys(job_description, canonical_by_skill)
+        )
+        for skill_key in offer_skill_keys:
+            if skill_key in selected_skills_lower:
+                continue
+            category_id = category_by_skill[skill_key]
+            canonical = canonical_by_skill[skill_key]
+            if category_id not in selected_by_category:
+                selected_by_category[category_id] = []
+                category_order.append(category_id)
+            selected_by_category[category_id].append(canonical)
+            selected_skills_lower.add(skill_key)
 
         if not selected_by_category:
             return adapted
@@ -314,21 +278,6 @@ class CvAdapter:
         return adapted
 
     @staticmethod
-    def _summary_mentions_skill(summary: str, skill: str) -> bool:
-        normalized_summary = normalize_skill_term(summary)
-        normalized_skill = normalize_skill_term(skill)
-        if not normalized_summary or not normalized_skill:
-            return False
-        if len(normalized_skill) <= 2:
-            return normalized_skill in re.findall(r"[a-z0-9+#.]+", normalized_summary)
-        return bool(
-            re.search(
-                rf"(?<![a-z0-9+#]){re.escape(normalized_skill)}(?![a-z0-9+#])",
-                normalized_summary,
-            )
-        )
-
-    @staticmethod
     def _matched_allowed_skill_keys(
         term: str,
         canonical_by_skill: dict[str, str],
@@ -365,3 +314,39 @@ class CvAdapter:
             if skill_key not in filtered:
                 filtered.append(skill_key)
         return filtered
+
+    @staticmethod
+    def _matched_description_skill_keys(
+        description: str,
+        canonical_by_skill: dict[str, str],
+    ) -> list[str]:
+        """Find complete catalogue names in the source offer, preferring longer names."""
+        text = normalize_skill_term(description)
+        if not text:
+            return []
+
+        matches: list[tuple[str, int, int]] = []
+        for skill_key in canonical_by_skill:
+            skill = normalize_skill_term(skill_key)
+            # A bare "R" in prose is too ambiguous; require programming context.
+            if len(skill) <= 2 and (
+                skill != "r" or not re.search(
+                    r"\b(?:langage\s+r|r\s+(?:language|programming|packages?|scripts?)"
+                    r"|(?:python|sql)\s*[,/;&+]\s*r|r\s*[,/;&+]\s*(?:python|sql))\b",
+                    text,
+                )
+            ):
+                continue
+            for match in re.finditer(
+                rf"(?<![\w+#]){re.escape(skill)}(?![\w+#])", text
+            ):
+                matches.append((skill_key, match.start(), match.end()))
+
+        chosen: list[tuple[str, int, int]] = []
+        for candidate in sorted(matches, key=lambda item: item[2] - item[1], reverse=True):
+            if not any(
+                candidate[1] < end and start < candidate[2]
+                for _, start, end in chosen
+            ):
+                chosen.append(candidate)
+        return list(dict.fromkeys(skill_key for skill_key, _, _ in chosen))

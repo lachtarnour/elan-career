@@ -6,6 +6,7 @@ import hashlib
 import json
 from typing import Any
 
+from smartapply.company_identity import source_company_of
 from smartapply.filtering.types import HasJobFields
 
 
@@ -14,7 +15,7 @@ def hard_reject_input_payload(job: HasJobFields) -> dict[str, Any]:
 
     return {
         "title": str(getattr(job, "title", "") or ""),
-        "company": str(getattr(job, "company", "") or ""),
+        "company": str(source_company_of(job) or ""),
         "description": str(getattr(job, "description", "") or ""),
         "location": getattr(job, "location", None),
         "contract_type": getattr(job, "contract_type", None),

@@ -5,6 +5,8 @@ import QtQuick.Layouts
 Surface {
     id: root
     property var run: ({})
+    property var historyOptions: []
+    property int activeRunCount: 0
     property bool controlsEnabled: true
     property bool detailsExpanded: false
     property bool errorsExpanded: false
@@ -12,16 +14,15 @@ Surface {
     readonly property var errors: run.errors || []
     readonly property int total: Number(run.total || 0)
     readonly property int analyzed: Number(run.analyzed || 0)
+    readonly property int screenedOut: Number(run.screened_out || 0)
     readonly property int failedCount: Number(run.failed || 0) + Number(run.skipped || 0)
+    readonly property bool hasMultipleBatches: (run.phase_batches || []).some(function(phase) {
+        return (phase.batches || []).length > 1
+    })
     readonly property bool needsAction: ["blocked", "attention", "failed"].indexOf(run.status) >= 0
-    readonly property int batchCount: (run.phase_batches || []).reduce(function(sum, phase) {
-        return sum + Number(phase.batch_count || (phase.batches || []).length)
-    }, 0)
-    readonly property int submittedBatchCount: (run.phase_batches || []).reduce(function(sum, phase) {
-        return sum + Number(phase.submitted_count !== undefined ? phase.submitted_count : phase.batch_count || 0)
-    }, 0)
     signal retryRequested(string runId)
     signal cancelRequested(string runId)
+    signal runSelected(string runId)
     padding: 0
     surfaceColor: "transparent"
     strokeColor: "transparent"
@@ -52,68 +53,122 @@ Surface {
         return "Le traitement a été interrompu. Vous pouvez reprendre les demandes restantes."
     }
 
-    RowLayout {
+    function resultSummary() {
+        var parts = []
+        if (analyzed > 0)
+            parts.push(analyzed + (analyzed === 1 ? " analysée" : " analysées"))
+        if (screenedOut > 0)
+            parts.push(screenedOut + (screenedOut === 1 ? " écartée" : " écartées") + " au préfiltre")
+        if (Number(run.failed || 0) > 0)
+            parts.push(run.failed + " en échec")
+        if (Number(run.skipped || 0) > 0)
+            parts.push(run.skipped + " ignorée" + (Number(run.skipped) === 1 ? "" : "s"))
+        if (parts.length === 0 && run.is_active)
+            return ({screening: "Préfiltre en cours", extraction: "Extraction en cours",
+                evaluation: "Évaluation en cours"})[run.phase] || "Préparation en cours"
+        return parts.join(" · ")
+    }
+
+    Item {
+        id: runHeader
         Layout.fillWidth: true
-        spacing: 12
+        implicitHeight: Math.max(runHeading.implicitHeight,
+            runSelector.visible ? runSelector.implicitHeight : 0,
+            headerActions.implicitHeight)
         ColumnLayout {
-            Layout.fillWidth: true
-            spacing: 5
+            id: runHeading
+            anchors.left: parent.left
+            anchors.top: parent.top
+            width: Math.max(0, (runSelector.visible ? runSelector.x : headerActions.x) - 10)
+            spacing: 3
             Text {
                 objectName: "analysisRunTitle"
                 Layout.fillWidth: true
                 text: "Analyse de " + root.total + (root.total === 1 ? " offre" : " offres")
                 color: Theme.ink
-                font.pixelSize: 16
+                font.pixelSize: 14
                 font.weight: Font.DemiBold
                 elide: Text.ElideRight
             }
             Text {
                 objectName: "analysisRunSummary"
                 Layout.fillWidth: true
-                text: "Analyse n°" + Number(root.run.sequence || 1)
-                    + " · " + root.submittedBatchCount + (root.submittedBatchCount <= 1 ? " Batch envoyé" : " Batch envoyés")
-                    + (root.batchCount > root.submittedBatchCount
-                        ? " · " + (root.batchCount - root.submittedBatchCount) + " programmés" : "")
-                    + " · " + root.analyzed + " / " + root.total
-                    + (root.total === 1 ? " offre analysée" : " offres analysées")
+                visible: text.length > 0
+                text: root.resultSummary()
                 color: Theme.inkMuted
                 font.pixelSize: 11
                 elide: Text.ElideRight
             }
         }
-        Pill {
-            objectName: "analysisRunStatus"
-            text: root.run.status_label || String(root.run.status || "")
-            tone: root.tone()
-            compact: true
+        AppSelect {
+            id: runSelector
+            objectName: "analysisRunSelector"
+            visible: root.historyOptions.length > 1
+            width: Math.min(260, Math.max(160,
+                runHeader.width - 2 * Math.max(300, headerActions.implicitWidth) - 20))
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: parent.top
+            implicitHeight: 32
+            fontPixelSize: 11
+            textRole: "label"
+            valueRole: "value"
+            model: root.historyOptions
+            currentIndex: Math.max(0, indexOfValue(root.runId))
+            onActivated: root.runSelected(String(currentValue))
+            Accessible.name: "Historique des analyses"
         }
-        AppButton {
-            objectName: "analysisRetryAction"
-            visible: Boolean(root.run.can_retry)
-            text: "Reprendre"
-            iconSource: Theme.icon("refresh")
-            refined: true
-            enabled: root.controlsEnabled
-            onClicked: root.retryRequested(root.runId)
-        }
-        AppButton {
-            objectName: "analysisCancelAction"
-            visible: Boolean(root.run.can_cancel)
-            text: "Annuler ce Batch"
-            kind: "danger"
-            refined: true
-            quiet: true
-            enabled: root.controlsEnabled
-            onClicked: root.cancelRequested(root.runId)
-        }
-        AppButton {
-            objectName: "analysisToggleDetails"
-            text: root.detailsExpanded ? "Masquer les détails" : "Voir les détails"
-            iconSource: Theme.icon("sliders")
-            refined: true
-            quiet: true
-            onClicked: root.detailsExpanded = !root.detailsExpanded
-            Accessible.name: text
+        RowLayout {
+            id: headerActions
+            anchors.right: parent.right
+            anchors.top: parent.top
+            width: implicitWidth
+            spacing: 8
+            Pill {
+                objectName: "analysisActiveCount"
+                visible: root.activeRunCount > 0
+                text: root.activeRunCount + (root.activeRunCount === 1
+                    ? " analyse en cours" : " analyses en cours")
+                tone: "accent"
+                compact: true
+            }
+            Pill {
+                objectName: "analysisRunStatus"
+                text: root.run.status_label || String(root.run.status || "")
+                tone: root.tone()
+                compact: true
+            }
+            AppButton {
+                objectName: "analysisRunDetailsToggle"
+                text: root.detailsExpanded ? "Réduire" : "Détails"
+                refined: true
+                quiet: true
+                fontPixelSize: 11
+                implicitHeight: 30
+                onClicked: root.detailsExpanded = !root.detailsExpanded
+            }
+            AppButton {
+                objectName: "analysisRetryAction"
+                visible: Boolean(root.run.can_retry)
+                text: "Reprendre"
+                iconSource: Theme.icon("refresh")
+                refined: true
+                fontPixelSize: 11
+                implicitHeight: 30
+                enabled: root.controlsEnabled
+                onClicked: root.retryRequested(root.runId)
+            }
+            AppButton {
+                objectName: "analysisCancelAction"
+                visible: Boolean(root.run.can_cancel)
+                text: "Annuler ce Batch"
+                kind: "danger"
+                refined: true
+                quiet: true
+                fontPixelSize: 11
+                implicitHeight: 30
+                enabled: root.controlsEnabled
+                onClicked: root.cancelRequested(root.runId)
+            }
         }
     }
 
@@ -146,8 +201,9 @@ Surface {
 
     AnalysisTimeline {
         objectName: "analysisTimeline"
+        visible: root.detailsExpanded && root.run.status !== "completed"
         Layout.fillWidth: true
-        Layout.preferredHeight: 100
+        Layout.preferredHeight: 82
         run: root.run
     }
 
@@ -155,42 +211,38 @@ Surface {
         objectName: "analysisRunDetails"
         visible: root.detailsExpanded
         Layout.fillWidth: true
-        spacing: 12
+        spacing: 8
 
         Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.line }
+        Text {
+            objectName: "analysisRunProvider"
+            Layout.fillWidth: true
+            text: [root.run.provider_label || (root.run.provider === "anthropic" ? "Claude · Anthropic" : "OpenAI"), root.run.model || ""].filter(Boolean).join(" · ")
+            color: Theme.inkMuted
+            font.pixelSize: 10
+            elide: Text.ElideRight
+        }
         GridLayout {
+            objectName: "analysisBatchDetails"
+            // A single Batch repeats the progress already shown by the
+            // timeline. Keep the breakdown only when it adds per-Batch detail.
+            visible: root.run.status === "completed" || root.hasMultipleBatches
             Layout.fillWidth: true
             columns: root.width >= 1000 ? 2 : 1
             columnSpacing: 12
             rowSpacing: 12
-            AnalysisBatchBreakdown {
-                objectName: "analysisExtractionBatches"
-                Layout.preferredWidth: 1
-                Layout.alignment: Qt.AlignTop
-                phase: (root.run.phase_batches || [])[0] || ({})
-                title: "Extraction des offres"
-                blocked: root.run.status === "blocked" && root.run.phase === "extraction"
+            Repeater {
+                model: root.run.phase_batches || []
+                delegate: AnalysisBatchBreakdown {
+                    required property var modelData
+                    objectName: modelData.phase === "screening" ? "analysisScreeningBatches" : modelData.phase === "extraction" ? "analysisExtractionBatches" : "analysisEvaluationBatches"
+                    Layout.preferredWidth: 1
+                    Layout.alignment: Qt.AlignTop
+                    phase: modelData
+                    title: modelData.phase === "screening" ? "Préfiltre des missions" : modelData.phase === "extraction" ? "Extraction des offres" : "Évaluation de la pertinence"
+                    blocked: root.run.status === "blocked" && root.run.phase === modelData.phase
+                }
             }
-            AnalysisBatchBreakdown {
-                objectName: "analysisEvaluationBatches"
-                Layout.preferredWidth: 1
-                Layout.alignment: Qt.AlignTop
-                phase: (root.run.phase_batches || [])[1] || ({})
-                title: "Évaluation de la pertinence"
-                blocked: root.run.status === "blocked" && root.run.phase === "evaluation"
-            }
-        }
-        Text {
-            objectName: "analysisRunResult"
-            visible: root.failedCount > 0
-            Layout.fillWidth: true
-            text: root.analyzed + " / " + root.total
-                + (root.total === 1 ? " analyse enregistrée" : " analyses enregistrées")
-                + (Number(root.run.failed || 0) > 0 ? " · " + root.run.failed + " en échec" : "")
-                + (Number(root.run.skipped || 0) > 0 ? " · " + root.run.skipped + " ignorées" : "")
-            color: Theme.warning
-            font.pixelSize: 11
-            wrapMode: Text.WordWrap
         }
         Text {
             objectName: "analysisLastCheck"
