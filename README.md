@@ -6,8 +6,9 @@ Le profil et les règles fournis ciblent les métiers IA et data, principalement
 
 [![macOS 13+](https://img.shields.io/badge/macOS-13%2B-111017?logo=apple&logoColor=white)](#installation)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
-[![Licence MIT](https://img.shields.io/badge/Licence-MIT-55bd92)](LICENSE)
 [![CI](https://github.com/lachtarnour/elan-career/actions/workflows/ci.yml/badge.svg)](https://github.com/lachtarnour/elan-career/actions/workflows/ci.yml)
+
+Copyright © 2026 Lachtar Nour. Tous droits réservés. Ce dépôt est accessible uniquement à des fins de consultation, de démonstration visuelle et d'évaluation technique. Toute utilisation du code doit être explicitement autorisée par l'auteur ; voir [LICENSE](LICENSE). Les instructions d'installation, de personnalisation et de développement ci-dessous sont réservées aux personnes disposant de cette autorisation.
 
 ## Démonstration
 
