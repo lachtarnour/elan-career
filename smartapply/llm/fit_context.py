@@ -23,7 +23,7 @@ DECISION_LEVELS = {
 }
 POLICY = {
     "name": "evidence_fit",
-    "weights": [50, 30, 20],
+    "weights": [35, 45, 20],
     "decision_levels": DECISION_LEVELS,
     "rounding": "ROUND_HALF_UP:0.01",
     "diagnostic_checks": "advisory",

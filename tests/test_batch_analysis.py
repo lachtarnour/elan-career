@@ -335,7 +335,7 @@ def test_restart_resumes_two_dependent_waves_and_keeps_full_analysis():
     assert counts()["paid"] == 4
     with session_scope() as session:
         jobs = [session.get(Job, job_id) for job_id in ids]
-        assert all(job.analysis.fit_score == 0.88 and job.analyzed_at is not None for job in jobs)
+        assert all(job.analysis.fit_score == 0.84 and job.analyzed_at is not None for job in jobs)
         assert all(job.ranked_at is None and job.score is not None for job in jobs)
 
 
@@ -1077,7 +1077,7 @@ def test_batch_preserves_wrapped_source_quotes_through_evaluation_and_storage(fr
     assert counts()["paid"] == (1 if from_cache else 2)
     with session_scope() as session:
         job = session.get(Job, ids[0])
-        assert job.analysis.fit_score == 0.88
+        assert job.analysis.fit_score == 0.84
         assert job.analysis.raw_response["supporting_excerpts"] == [source_quote]
         assert job.analysis.raw_response["offer_risks"] == extracted.offer_risks
         cached = session.scalar(select(LLMCache).where(LLMCache.purpose == "job_offer_extraction"))

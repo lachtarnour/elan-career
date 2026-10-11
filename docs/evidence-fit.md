@@ -29,7 +29,7 @@ Les transferts sont appréciés selon la capacité commune, la réalisation qui
 l’appuie, les différences de contexte et la portée restant non couverte.
 
 ```text
-score = (50 × missions + 30 × essentials + 20 × responsibilities) / 400
+score = (35 × missions + 45 × essentials + 20 × responsibilities) / 400
 ```
 
 La formule applique un seul arrondi final `Decimal / ROUND_HALF_UP` à 0,01,

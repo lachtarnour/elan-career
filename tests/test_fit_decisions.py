@@ -97,11 +97,11 @@ def inputs():
     [
         (("strong_fit", "strong_fit", "credible_fit"), 0.95),
         (("strong_fit", "strong_fit", "partial_core_fit"), 0.90),
-        (("weak_support", "strong_fit", "strong_fit"), 0.63),
-        (("strong_fit", "very_low_support", "strong_fit"), 0.70),
+        (("weak_support", "strong_fit", "strong_fit"), 0.74),
+        (("strong_fit", "very_low_support", "strong_fit"), 0.55),
         (("strong_fit", "strong_fit", "strong_fit"), 1.0),
         (("very_low_support", "very_low_support", "very_low_support"), 0),
-        (("strong_fit", "credible_fit", "credible_fit"), 0.88),
+        (("strong_fit", "credible_fit", "credible_fit"), 0.84),
     ],
 )
 def test_single_decision_table_and_one_rounding(states, score):
@@ -126,7 +126,7 @@ def test_all_125_combinations_use_only_the_ordinal_weighted_index(levels):
         "strong_fit",
     )
     expected = (
-        sum(Decimal(weight * level) for weight, level in zip((50, 30, 20), levels, strict=True))
+        sum(Decimal(weight * level) for weight, level in zip((35, 45, 20), levels, strict=True))
         / 400
     ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     score, diagnostic = calculate_fit_decisions(tuple(states[level] for level in levels))
@@ -704,7 +704,7 @@ def test_source_examples_check_inputs_rules_simulated_diagnostics_and_preserved_
     assert diagnostic["offer_source"]["offer_body"] == body
     assert diagnostic["evaluation"] == data
     assert diagnostic["offer_facts"] == facts.model_dump(mode="json") == original
-    assert public.fit_score == 0.88
+    assert public.fit_score == 0.84
     if case == "qualification":
         assert (
             diagnostic["evaluation"]["admissibility"]["mandatory_conditions"]["status"] == "unknown"
@@ -727,5 +727,5 @@ def test_invalid_source_citation_is_only_an_observation():
         }
     ]
     public, diagnostic = evaluate_fit(data, context, facts, extraction_provenance=provenance)
-    assert public.fit_score == 0.88
+    assert public.fit_score == 0.84
     assert any("quote not found" in text for text in diagnostic["diagnostic_checks"]["warnings"])

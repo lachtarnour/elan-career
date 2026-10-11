@@ -173,4 +173,4 @@ def test_new_offer_pipeline_saves_score_despite_malformed_annotations(isolated_d
     assert calls == ["OfferExtractionOutput", "JobFitDecisionEvaluation"]
     with session_scope() as session:
         saved = session.get(Job, job_id).analysis
-        assert saved.fit_score == 0.88 and saved.fit_diagnostics["diagnostic_checks"]["warnings"]
+        assert saved.fit_score == 0.84 and saved.fit_diagnostics["diagnostic_checks"]["warnings"]

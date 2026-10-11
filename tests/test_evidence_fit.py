@@ -393,7 +393,7 @@ def test_missing_batch_schema_with_identifiable_levels_is_nonblocking(
         )
         assert item.state == "completed"
         saved = session.get(Job, job_id).analysis
-        assert saved.fit_score == 0.88
+        assert saved.fit_score == 0.84
         assert saved.fit_diagnostics["evaluation"]["admissibility"] == raw["admissibility"]
         assert any(
             "schema unavailable" in warning
