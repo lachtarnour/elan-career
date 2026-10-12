@@ -355,8 +355,9 @@ LLM stages. The existing Skills and project reconstruction rules remain in place
    declared competence, past realizations and prospective contributions; it does
    not infer past use of a tool from a competence or intention. Findings must
    identify an exact passage, a reason, valid source references and a category.
-   Factual and language defects are blocking; style and structure suggestions
-   remain advisory. Existing style hints are not evidence about the candidate.
+   Factual and language defects trigger a targeted correction attempt; remaining
+   findings are shown in Ready without blocking dossier publication. Existing
+   style hints are not evidence about the candidate.
 
 The reviewer accepts conservative paraphrases and ordinary present motivation
 without requiring biographical proof. It still checks claims of specific past
@@ -427,10 +428,11 @@ factual or language defect found on confirmation still requires attention.
 Word, paragraph and summary-length counts remain advisory before and after a
 correction; a length deviation cannot silently undo a confirmed factual fix.
 
-Unavailable reviews, unresolved factual or language defects, and objective
-validation errors leave the documents available with `quality_rejected` status.
-Style and structure suggestions are exposed as warnings without blocking an
-otherwise valid application. The review trace, including model, reference date,
+Unavailable reviews, unresolved factual or language defects, and Python content
+validation errors leave the documents available with `ready_for_form_submission`
+status and visible review messages in Ready. This includes project/certificate
+selection, evidence quotations, CV structure and document-company checks.
+Style and structure suggestions are also exposed as warnings. The review trace, including model, reference date,
 findings and decision, is retained in `generated_documents` as `document_review`.
 This checks source consistency, not the real-world truth of the candidate's
 declarations. Review instructions are general source and language rules; they do

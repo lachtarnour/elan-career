@@ -25,6 +25,12 @@ Le parcours comporte des branches et des traitements Python indispensables :
    peuvent rejeter une correction et conserver les textes précédents.
 5. Validation finale, rendu DOCX/HTML/PDF et publication atomique.
 
+Les contrôles Python de contenu sont consultatifs : citations, sélection de
+projets et de certificats, structure du CV, longueur des textes et nom de
+l'employeur. Après la tentative de correction prévue, les problèmes restants
+sont enregistrés et affichés parmi les points à vérifier dans **Prêt**. Ils
+n'interrompent pas la génération du dossier, en Batch comme en immédiat.
+
 Les transports Batch existants sont réutilisés. Le coordinateur d'analyse
 est lié à ses trois phases ; la création possède donc un journal distinct
 et rejoue le même parcours `Applier` derrière un fournisseur de réponses

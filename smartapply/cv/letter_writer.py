@@ -71,11 +71,8 @@ class ApplicationTextWriter:
         job_id: int | None,
         refresh_cache: bool = False,
     ) -> tuple[AdaptedCV, MotivationLetter]:
-        """Write the summary and letter from the validated, frozen CV content."""
+        """Write from the frozen CV; Python findings remain advisory."""
         result = self.cv_validator.validate(cv)
-        if not result.ok:
-            raise LLMError("CV structure could not be finalized before text generation: "
-                           + "; ".join(result.errors))
         prompt = application_texts.build_user_prompt(
             profile=self.profile,
             analysis=analysis,
@@ -105,7 +102,10 @@ class ApplicationTextWriter:
         # Only the new summary enters the CV. No selection or skills pass runs
         # after this point, and an overlong summary is preserved for the review.
         adapted = AdaptedCV.model_validate(
-            {**cv.model_dump(), "professional_summary": texts.professional_summary}
+            {**cv.model_dump(), "professional_summary": texts.professional_summary,
+             "warnings": list(dict.fromkeys([
+                 *cv.warnings, *(f"validation_error:{error}" for error in result.errors),
+             ]))}
         )
         return adapted, self._normalize_letter(texts.to_motivation_letter(), language)
 

@@ -17,7 +17,6 @@ from smartapply.llm import (
     AssembledCV,
     CVSelection,
     JobAnalysis,
-    LLMError,
     MockLLMProvider,
     MotivationLetter,
     SkillSelectionBlock,
@@ -133,20 +132,25 @@ def test_second_call_sees_frozen_cv_and_only_adds_summary_without_adding_skills(
 
 
 @pytest.mark.parametrize("invalid_part", ["projects", "experiences"])
-def test_invalid_cv_structure_prevents_second_llm_call(text_inputs, invalid_part):
+def test_invalid_cv_structure_is_reported_without_blocking_text_generation(text_inputs, invalid_part):
     profile, cv, analysis, context = text_inputs
     if invalid_part == "projects":
         cv.selected_project_ids = ["proj_evidence_rag"]
     else:
         cv.selected_experiences[0].bullets[0].text = "An unsupported rewritten experience."
-    provider = MockLLMProvider({})
-    provider.complete_json = Mock(side_effect=AssertionError("Invalid CV reached text generation"))
+    provider = MockLLMProvider({"application_texts": ApplicationTexts(
+        professional_summary="Data Scientist working with research data.",
+        motivation_letter_subject="Application",
+        motivation_letter_body="I would like to contribute to your research work.",
+    )})
+    provider.complete_json = Mock(wraps=provider.complete_json)
     writer = ApplicationTextWriter(profile, provider)
 
-    with pytest.raises(LLMError):
-        writer.generate_texts(cv, analysis, **context)
-
-    provider.complete_json.assert_not_called()
+    generated, letter = writer.generate_texts(cv, analysis, **context)
+    assert generated.professional_summary and letter.body
+    assert any(w.startswith("validation_error:") for w in generated.warnings)
+    assert generated.selected_project_ids == cv.selected_project_ids
+    provider.complete_json.assert_called_once()
 
 
 def test_fit_revision_preserves_nonfit_generation_inputs(text_inputs):

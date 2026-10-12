@@ -192,6 +192,72 @@ def test_selection_correction_automatically_runs_before_writing(analyzed_jobs, m
     assert all(count == 1 for count in harness.submitted.values())
 
 
+@pytest.mark.parametrize("mode", ["immediate", "batch"])
+@pytest.mark.parametrize(
+    ("defect", "message", "point_key"),
+    [("project_count", "too_few_projects", "projects_minimum"),
+     ("project_evidence", "ungrounded_project_evidence", "projects_evidence"),
+     ("certificate", "unknown_certificate_id", "certificates_unknown"),
+     ("publisher", "publisher_reintroduced", "document_company")],
+)
+def test_python_content_findings_publish_ready_dossier_with_visible_messages(
+    analyzed_jobs, monkeypatch, tmp_path, mode, defect, message, point_key,
+):
+    from smartapply.database import write_session_scope
+    from smartapply.database.models import Job
+    from smartapply.desktop.services import DesktopService
+
+    ids = analyzed_jobs()
+    native_routes(monkeypatch, tmp_path)
+    if defect == "publisher":
+        with write_session_scope() as session:
+            job = session.get(Job, ids[0])
+            job.analysis.raw_response = {
+                **job.analysis.raw_response, "extracted_company_name": "LinkedIn",
+            }
+
+    def change(purpose, response):
+        if purpose in {"cv_adaptation", "cv_selection_correction"}:
+            if defect == "project_count":
+                return response.model_copy(update={"selected_project_ids": ["proj_evidence_rag"]})
+            if defect == "project_evidence":
+                response = response.model_copy(deep=True)
+                response.project_selection_reasons[0].offer_evidence = "Invented offer demand"
+            if defect == "certificate":
+                return response.model_copy(update={"selected_certificate_ids": ["unknown"]})
+        if defect == "publisher" and purpose == "application_texts":
+            return response.model_copy(update={"motivation_letter_subject": "Application to LinkedIn"})
+        return response
+
+    harness = Harness(monkeypatch, answer=lambda call, response: change(call.purpose, response))
+    if mode == "immediate":
+        original = harness.provider.complete_json
+
+        def respond(**kwargs):
+            purpose = kwargs["purpose"]
+            response = original(**{
+                **kwargs, "purpose": "cv_adaptation" if purpose == "cv_selection_correction" else purpose,
+            })
+            return change(purpose, response)
+
+        harness.provider.complete_json = respond
+    run_id = harness.coordinator().start(ids, mode=mode)
+    if mode == "batch":
+        harness.finish(run_id)
+    run, items, calls, _ = journal(run_id)
+    assert run.state == "completed" and items[0].state == "completed"
+    assert {"application_texts", "document_review"} <= {call.purpose for call in calls}
+    with session_scope() as session:
+        app = session.get(Application, items[0].application_id)
+        assert app.status == JobStatus.READY_FOR_FORM_SUBMISSION
+        assert any(message in warning for warning in app.validation_warnings)
+        assert app.documents and all(Path(doc.path).is_file() for doc in app.documents if doc.path)
+        app_id = app.id
+    detail = DesktopService().get_application(app_id)
+    assert detail.status == JobStatus.READY_FOR_FORM_SUBMISSION
+    assert point_key in {point["key"] for point in detail.review_points}
+
+
 def test_review_correction_and_confirmation_preserve_assembled_selection(
     analyzed_jobs, monkeypatch, tmp_path,
 ):

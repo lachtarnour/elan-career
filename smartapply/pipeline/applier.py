@@ -15,7 +15,6 @@ from smartapply.database import session_scope, write_session_scope
 from smartapply.database.models import Application, Job, JobStatus
 from smartapply.language import resolve_document_language
 from smartapply.llm import LLMProvider
-from smartapply.llm.provider import LLMError
 from smartapply.pipeline.application_renderer import ApplicationDocumentRenderer
 from smartapply.pipeline.apply.cv_writer import CvWriterMixin, _document_company_label
 from smartapply.pipeline.apply.persistence import ApplicationPersistenceMixin
@@ -150,7 +149,7 @@ class Applier(ApplicationPersistenceMixin, CvWriterMixin):
             letter.subject,
             letter.body,
         ):
-            raise LLMError("A neutralized publisher name appeared in generated document text")
+            report.validation_errors.append("publisher_reintroduced")
         check_cancelled(self.stop_requested)
         self._validate_letter(letter, adapted, analysis, report, language=offer_language)
         self._validate_cv_offer_alignment(adapted, analysis, job.title, report)

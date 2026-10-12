@@ -9,6 +9,7 @@ from smartapply.cv.assembly import assemble_cv
 from smartapply.cv.certificate_selection import certificate_policy_errors
 from smartapply.cv.project_selection import (
     MIN_PROJECTS,
+    repair_project_evidence,
     selectable_project_capacity,
     validate_project_selection,
 )
@@ -19,7 +20,6 @@ from smartapply.llm import (
     AssembledCV,
     CVSelection,
     JobAnalysis,
-    LLMError,
     LLMProvider,
     MotivationLetter,
     SkillSelectionBlock,
@@ -52,11 +52,10 @@ class CvAdapter:
         refresh_cache: bool = False,
     ) -> AssembledCV:
         capacity = selectable_project_capacity(self.profile)
-        if capacity < MIN_PROJECTS:
-            raise LLMError(
-                f"Insufficient eligible projects: policy allows {capacity}, "
-                f"but each CV requires at least {MIN_PROJECTS}"
-            )
+        selection_warnings = (
+            [f"validation_error:too_few_projects:min={MIN_PROJECTS}:eligible={capacity}"]
+            if capacity < MIN_PROJECTS else []
+        )
         prompt = cv_adaptation.build_user_prompt(
             profile=self.profile,
             analysis=analysis,
@@ -87,6 +86,10 @@ class CvAdapter:
                 effort=routes[attempt].reasoning,
                 max_completion_tokens=routes[attempt].max_output_tokens,
             )
+            if attempt == 1:
+                personalization = repair_project_evidence(
+                    personalization, analysis, job_description=job_description
+                )
             project_errors = validate_project_selection(
                 personalization, self.profile, analysis, job_description=job_description
             )
@@ -97,8 +100,8 @@ class CvAdapter:
             if not errors:
                 break
             if attempt == 1:
-                label = "CV selection" if certificate_errors else "Project selection"
-                raise LLMError(f"{label} could not be finalized: " + "; ".join(errors))
+                selection_warnings.extend(f"validation_error:{error}" for error in errors)
+                break
             if certificate_errors:
                 prompt += (
                     "\n\nThe previous CV selection violated these rules:\n- "
@@ -115,6 +118,9 @@ class CvAdapter:
                     "Prefer direct matches, then the strongest primary projects with "
                     "honest transferable relevance. Never invent a direct specialty match."
                 )
+        personalization = personalization.model_copy(update={
+            "warnings": list(dict.fromkeys([*personalization.warnings, *selection_warnings]))
+        })
         adapted = assemble_cv(personalization, self.profile)
         adapted = self._ensure_supported_offer_skills(
             adapted, analysis, job_description=job_description
@@ -153,8 +159,6 @@ class CvAdapter:
         validator = CvValidator(self.profile)
         if not validator.validate(assembled).ok:
             assembled, _ = validator.auto_fix(assembled)
-        if not validator.validate(assembled).ok:
-            raise LLMError("CV structure could not be finalized before text generation")
         writer = ApplicationTextWriter(self.profile, self.llm)
         context = dict(
             job_title=job_title,

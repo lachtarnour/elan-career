@@ -1,6 +1,6 @@
 """Anti-hallucination validator for adapted CVs.
 
-Hard rules (errors → reject / auto-fix):
+Structural rules (errors → auto-fix when possible, otherwise report):
 - Experiences and bullets must exactly match the profile, including their order.
 - Every experience source_id must exist in the profile.
 - Every bullet source_id must exist in the profile (experiences OR projects).
@@ -195,7 +195,7 @@ class CvValidator:
         return ValidationResult(ok=len(errors) == 0, errors=errors, warnings=warnings)
 
     def auto_fix(self, cv: _CV) -> tuple[_CV, list[str]]:
-        """Restore static experiences and skills; project failures require a new draft."""
+        """Restore static experiences and skills; keep project findings advisory."""
         removed: list[str] = []
         cleaned_experiences = profile_experiences(self.profile)
         if cv.selected_experiences != cleaned_experiences:
