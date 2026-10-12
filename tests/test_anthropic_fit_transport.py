@@ -56,7 +56,6 @@ def canonical():
         "not_documented",
         "contradicted",
     )
-    statuses = ("compatible", "incompatible", "unknown")
     value = {
         "decision": dict(
             zip(("missions", "essentials", "responsibilities"), STATES[2:], strict=True)
@@ -66,13 +65,6 @@ def canonical():
                 "findings": [{**copy.deepcopy(finding), "support": support} for support in supports]
             }
             for axis in ("missions", "essentials", "responsibilities")
-        },
-        "admissibility": {
-            dimension: {
-                "status": "unknown",
-                "findings": [{**copy.deepcopy(finding), "status": status} for status in statuses],
-            }
-            for dimension in ("mandatory_conditions", "candidate_preferences")
         },
         "reliability": {
             "offer_information": "Alternative ou obligation à préciser",
@@ -140,15 +132,14 @@ def raw_wire(value=None):
 
 
 @pytest.mark.parametrize("states", list(itertools.product(STATES, repeat=3)))
-@pytest.mark.parametrize(
-    "null_blocks", [(False, False), (True, False), (False, True), (True, True)]
-)
-def test_all_axis_combinations_and_nullable_blocks_roundtrip_losslessly(states, null_blocks):
+@pytest.mark.parametrize("null_reliability", [False, True])
+def test_all_axis_combinations_and_nullable_reliability_roundtrip_losslessly(
+    states, null_reliability
+):
     value = canonical()
     value["decision"] = dict(zip(value["decision"], states, strict=True))
-    for key, absent in zip(("admissibility", "reliability"), null_blocks, strict=True):
-        if absent:
-            value[key] = None
+    if null_reliability:
+        value["reliability"] = None
     before = copy.deepcopy(value)
     wire = encode_fit_transport(value)
     source = body()["response_format"]["json_schema"]
@@ -162,19 +153,9 @@ def test_all_axis_combinations_and_nullable_blocks_roundtrip_losslessly(states, 
     assert calculate_fit_decisions(parsed.decisions) == calculate_fit_decisions(tuple(states))
 
 
-def test_all_admissibility_status_combinations_are_preserved():
-    for first, second in itertools.product(("compatible", "incompatible", "unknown"), repeat=2):
-        value = canonical()
-        for key, status in zip(value["admissibility"], (first, second), strict=True):
-            value["admissibility"][key]["status"] = status
-        assert read_fit_response(raw_wire(value)).raw == value
-
-
 def test_empty_annotations_remain_empty_without_inventing_explanations():
     value = canonical()
     for group in value["dimensions"].values():
-        group["findings"] = []
-    for group in value["admissibility"].values():
         group["findings"] = []
     for key in ("issues", "neutral_offer_refs", "offer_interpretations"):
         value[key] = []
@@ -206,7 +187,6 @@ def test_native_schema_has_no_unions_optional_properties_or_unused_definitions()
     assert set(schema["properties"]) == {
         "decision",
         GROUPED_KEY,
-        "admissibility_records",
         "reliability_records",
     }
     assert "$defs" not in schema and "$ref" not in str(schema)
@@ -216,6 +196,26 @@ def test_native_schema_has_no_unions_optional_properties_or_unused_definitions()
     assert params["max_tokens"] == 32768 and "temperature" not in params
     assert "tools" not in params and "tool_choice" not in params and "thinking" not in params
     assert request == frozen
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_obsolete_annotations_are_preserved_raw_without_conversion(legacy):
+    wire = encode_legacy_fit_transport(canonical()) if legacy else encode_fit_transport(canonical())
+    obsolete = {
+        "admissibility_records": [
+            {"dimension": "mandatory_conditions", "status": "unknown", "findings": []}
+        ],
+        "mandatory_condition_records": [{"status": "compatible", "findings": []}],
+        "candidate_preference_records": [{"status": "compatible", "findings": []}],
+    }
+    wire.update(copy.deepcopy(obsolete))
+    raw = json.dumps(wire)
+    parsed = read_fit_response(raw)
+    assert "admissibility" not in parsed.raw
+    assert all(parsed.raw[key] == value for key, value in obsolete.items())
+    assert parsed.original_text == raw
+    assert parsed.decisions == tuple(canonical()["decision"].values())
+    assert schema_observations(parsed)
 
 
 def test_unexpected_canonical_changes_fail_before_any_provider_call():
@@ -230,13 +230,10 @@ def test_unexpected_canonical_changes_fail_before_any_provider_call():
 @pytest.mark.parametrize(
     "changes",
     [
-        {"mandatory_condition_records": []},
-        {"mandatory_condition_records": [{}, {}]},
         {"reliability_records": [{}, {}]},
         {"reliability_records": "unconvertible"},
         {"mission_findings": "unconvertible", "issues": [{"origin": "garbage"}]},
         {MARKER: "unknown-format"},
-        {"admissibility": {"candidate_preferences": "ambiguous"}},
         {"dimensions": {"missions": "ambiguous"}},
         {"reliability": "ambiguous"},
         {"unknown_annotation": {"text": "Réserve à conserver"}},
@@ -399,7 +396,6 @@ def test_historical_canonical_responses_remain_byte_for_byte_readable():
     parsed = read_fit_response(raw)
     assert parsed.raw == canonical() and parsed.original_text == raw and parsed.observations == []
     legacy_schema = to_strict_schema(JobFitDecisionEvaluation)
-    del legacy_schema["properties"]["admissibility"]
     del legacy_schema["properties"]["reliability"]
     assert fit_transport_schema(legacy_schema, name="JobFitDecisionEvaluation") == legacy_schema
     nonfit = {"type": "object", "properties": {"x": {"type": "string"}}}
@@ -417,11 +413,11 @@ def test_unordered_batch_results_match_marker_without_saved_schema():
     )
 
 
-@pytest.mark.parametrize("suffix", ['"reliability_records":[', '"mandatory_condition_records":[{'])
+@pytest.mark.parametrize("suffix", ['"reliability_records":[', '"mission_findings":[{'])
 def test_incomplete_container_is_not_interpreted_as_absence(suffix):
     raw = json.dumps({"decision": canonical()["decision"], MARKER: FORMAT})[:-1] + "," + suffix
     parsed = read_fit_response(raw)
-    assert "admissibility" not in parsed.raw and "reliability" not in parsed.raw
+    assert "reliability" not in parsed.raw
     assert parsed.original_text == raw and any(
         "not interpreted as absent" in item for item in parsed.observations
     )
@@ -442,19 +438,6 @@ def test_duplicate_annotation_keys_are_not_silently_selected():
     [
         {GROUPED_KEY: {"technical_findings": [{"axis": "unknown", "text": "Must remain visible"}]}},
         {GROUPED_KEY: {"technical_findings": "unreadable"}},
-        {
-            "admissibility_records": [
-                {"dimension": "mandatory_conditions", "status": "unknown", "findings": []}
-            ]
-        },
-        {
-            "admissibility_records": [
-                {"dimension": "mandatory_conditions", "status": "unknown", "findings": []}
-            ]
-            * 2
-        },
-        {"admissibility_records": [{"dimension": "wrong", "status": "unknown", "findings": []}]},
-        {"admissibility_records": "unreadable"},
     ],
 )
 def test_grouping_never_drops_invalid_tags_or_fabricates_the_missing_dimension(changes):
@@ -466,8 +449,6 @@ def test_grouping_never_drops_invalid_tags_or_fabricates_the_missing_dimension(c
     assert calculate_fit_decisions(parsed.decisions)[0] == 0.71
     for key, value in changes.items():
         assert parsed.raw[key] == value
-    if "admissibility_records" in changes:
-        assert "admissibility" not in parsed.raw
 
 
 def test_interleaved_findings_keep_order_within_each_business_axis():
@@ -478,12 +459,6 @@ def test_interleaved_findings_keep_order_within_each_business_axis():
     ]
     parsed = read_fit_response(json.dumps(wire))
     assert parsed.raw == canonical()
-
-
-def test_both_admissibility_record_orders_preserve_status_and_evidence():
-    wire = encode_fit_transport(canonical())
-    wire["admissibility_records"].reverse()
-    assert read_fit_response(json.dumps(wire)).raw == canonical()
 
 
 def test_previous_flat_transport_is_readable_without_resubmission():
@@ -505,9 +480,9 @@ def test_empty_grouped_findings_are_explicit_empty_containers_not_invented_judge
 
 def test_missing_record_list_does_not_invent_an_absent_block():
     wire = encode_fit_transport(canonical())
-    del wire["admissibility_records"]
+    del wire["reliability_records"]
     parsed = read_fit_response(json.dumps(wire))
-    assert "admissibility" not in parsed.raw and schema_observations(parsed)
+    assert "reliability" not in parsed.raw and schema_observations(parsed)
 
 
 def test_prompt_is_compact_only_for_anthropic_and_signed_legacy_context_is_supported(

@@ -12,7 +12,6 @@ from pydantic import BaseModel, ValidationError
 from smartapply.llm.fit_partial_json import recover_truncated_json
 from smartapply.llm.provider import LLMValidationError
 from smartapply.llm.schemas import (
-    FitAdmissibility,
     FitDecisionAnnotations,
     FitDecisionDimension,
     FitDecisionFinding,
@@ -167,7 +166,6 @@ def annotation_view(response: FitDecisionResponse) -> JobFitDecisionEvaluation:
             return None
 
     return JobFitDecisionEvaluation(
-        admissibility=auxiliary("admissibility", FitAdmissibility),
         reliability=auxiliary("reliability", FitReliability),
         decision=FitDecisions(
             **dict(zip(AXES, response.decisions, strict=True)),
@@ -193,9 +191,8 @@ def annotation_view(response: FitDecisionResponse) -> JobFitDecisionEvaluation:
 
 def schema_observations(response: FitDecisionResponse) -> list[str]:
     observations = []
-    for name in ("admissibility", "reliability"):
-        if response.raw.get(name) is None:
-            observations.append(f"{name}: descriptive information unavailable")
+    if response.raw.get("reliability") is None:
+        observations.append("reliability: descriptive information unavailable")
     try:
         JobFitDecisionEvaluation.model_validate(response.raw)
     except ValidationError as exc:

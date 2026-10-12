@@ -1095,10 +1095,8 @@ Item {
                                                 + (modelData.llm_score !== null && modelData.llm_score !== undefined && !modelData.fit_current ? " *" : "")
                                             Accessible.name: "Indice technique " + (modelData.llm_score_text || "indisponible")
                                                 + ". " + (modelData.fit_status_label || "")
-                                                + ". " + (modelData.candidacy_label || "")
                                             ToolTip.visible: scoreHover.hovered
                                             ToolTip.text: (modelData.fit_status_label || "")
-                                                + "\n" + (modelData.candidacy_label || "")
                                             HoverHandler { id: scoreHover }
                                             color: modelData.llm_score === null || modelData.llm_score === undefined ? Theme.inkFaint : Theme.inkSoft
                                             font.pixelSize: root.tableTextSize - 1

@@ -369,9 +369,9 @@ def test_immediate_batch_cache_share_diagnostic_calculation_and_conversion(
         )
 
 
-@pytest.mark.parametrize("malformed_admissibility", [False, True])
+@pytest.mark.parametrize("malformed_reliability", [False, True])
 def test_missing_batch_schema_with_identifiable_levels_is_nonblocking(
-    isolated_db, malformed_admissibility
+    isolated_db, malformed_reliability
 ):
     job_id = seed_jobs()[0]
     with session_scope() as session:
@@ -379,11 +379,8 @@ def test_missing_batch_schema_with_identifiable_levels_is_nonblocking(
         body = copy.deepcopy(request.body)
         del body["response_format"]
         raw = evaluation.model_dump(mode="json")
-        if malformed_admissibility:
-            raw["admissibility"] = {
-                "mandatory_conditions": {"status": "invalid_status", "findings": 7},
-                "candidate_preferences": None,
-            }
+        if malformed_reliability:
+            raw["reliability"] = {"offer_information": 7, "business_uncertainties": None}
         import_result(
             session,
             run,
@@ -394,7 +391,7 @@ def test_missing_batch_schema_with_identifiable_levels_is_nonblocking(
         assert item.state == "completed"
         saved = session.get(Job, job_id).analysis
         assert saved.fit_score == 0.84
-        assert saved.fit_diagnostics["evaluation"]["admissibility"] == raw["admissibility"]
+        assert saved.fit_diagnostics["evaluation"]["reliability"] == raw["reliability"]
         assert any(
             "schema unavailable" in warning
             for warning in saved.fit_diagnostics["diagnostic_checks"]["warnings"]

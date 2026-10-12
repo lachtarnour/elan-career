@@ -106,10 +106,6 @@ def evaluation_from_user(user, *, levels=(4, 3, 3), reasons=None):
             "issues": [
                 {key: value for key, value in item.items() if key != "code"} for item in issues
             ],
-            "admissibility": {
-                dimension: {"status": "compatible", "findings": []}
-                for dimension in ("mandatory_conditions", "candidate_preferences")
-            },
             "reliability": {
                 "offer_information": "Activités et capacités attendues documentées",
                 "candidate_information": "Réalisations et compétences renseignées",

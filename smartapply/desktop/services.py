@@ -288,8 +288,6 @@ class JobRow:
     duplicate_candidate: DuplicateReviewDetail | None = None
     fit_current: bool = False
     fit_status_label: str = ""
-    candidacy_status: str = ""
-    candidacy_label: str = ""
     source_company: str = ""
     extracted_company_name: str = ""
     document_company: str = ""
@@ -313,7 +311,6 @@ class JobDetail(JobRow):
     risks: tuple[str, ...] = ()
     archive_reasons: tuple[str, ...] = ()
     fit_axes: tuple[dict, ...] = ()
-    fit_admissibility: tuple[dict, ...] = ()
     fit_reliability: tuple[dict, ...] = ()
     fit_warnings: tuple[str, ...] = ()
     application: ApplicationDetail | None = None
@@ -889,13 +886,13 @@ class DesktopService(AnalysisServiceMixin, GenerationServiceMixin):
             local_day = func.date(sort_column, "localtime")
             stmt = stmt.order_by(
                 (local_day.asc() if sort_ascending else local_day.desc()).nulls_last(),
-                *fit_ranking_columns(),
+                JobAnalysis.fit_score.desc().nulls_last(),
                 sort_column.desc().nulls_last(),
                 Job.id.asc(),
             )
         elif sort_key == "llm_score" or sort_key not in sort_columns:
             stmt = stmt.order_by(
-                *fit_ranking_columns(ascending=sort_ascending),
+                (JobAnalysis.fit_score.asc() if sort_ascending else JobAnalysis.fit_score.desc()).nulls_last(),
                 JobAnalysis.created_at.desc().nulls_last(), Job.id.asc(),
             )
         else:
@@ -923,10 +920,6 @@ class DesktopService(AnalysisServiceMixin, GenerationServiceMixin):
             fit_metadata = {
                 record[0].id: {
                     "policy_fingerprint": record.fit_policy,
-                    "admissibility": {
-                        "mandatory_conditions": {"status": record.fit_mandatory},
-                        "candidate_preferences": {"status": record.fit_preferences},
-                    },
                 }
                 for record in records
             }

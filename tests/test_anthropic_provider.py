@@ -113,7 +113,7 @@ def test_fit_wire_schema_keeps_fixed_values_and_constants():
     )
     wire = build_message_params(body)["output_config"]["format"]["schema"]
     assert set(wire["properties"]) == {
-        "decision", "fit_annotations", "admissibility_records", "reliability_records",
+        "decision", "fit_annotations", "reliability_records",
     }
     canonical = body["response_format"]["json_schema"]["schema"]
     canonical_decisions = canonical["$defs"]["FitDecisions"]["properties"]

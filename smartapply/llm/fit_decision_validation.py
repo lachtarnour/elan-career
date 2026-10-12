@@ -129,11 +129,14 @@ def inspect_decisions(evaluation, context, offer) -> list[str]:
 
     issue_coverage = set()
     task_coverage = set()
+    context_coverage = set()
     for issue in evaluation.issues:
         refs(issue.offer_refs, issue.candidate_refs, issue.axis)
         issue_coverage.update(issue.offer_refs)
         if issue.origin == "offer_information" and issue.axis in {"missions", "responsibilities"}:
             task_coverage.update(issue.offer_refs)
+        if issue.axis == "context" and issue.text.strip():
+            context_coverage.update(issue.offer_refs)
         if not issue.text.strip():
             observations.append(f"{issue.axis}: reservation explanation is empty")
         if issue.origin == "preference_alignment" and not any(
@@ -141,36 +144,6 @@ def inspect_decisions(evaluation, context, offer) -> list[str]:
             for ref in issue.candidate_refs
         ):
             observations.append("Preference reservation needs a declared preference")
-    admissibility_coverage = set()
-    if evaluation.admissibility is not None:
-        for name in ("mandatory_conditions", "candidate_preferences"):
-            dimension = getattr(evaluation.admissibility, name)
-            finding_statuses = {finding.status for finding in dimension.findings}
-            if dimension.status == "incompatible" and "incompatible" not in finding_statuses:
-                observations.append(f"{name}: incompatible status without an explanatory finding")
-            if dimension.status == "compatible" and finding_statuses & {"unknown", "incompatible"}:
-                observations.append(
-                    f"{name}: compatible status has unresolved or incompatible findings"
-                )
-            if dimension.status == "unknown" and "incompatible" in finding_statuses:
-                observations.append(f"{name}: unknown status has an incompatible finding")
-            for finding in dimension.findings:
-                refs(finding.offer_refs, finding.candidate_refs, name)
-                admissibility_coverage.update(finding.offer_refs)
-                if not finding.text.strip():
-                    observations.append(f"{name}: finding explanation is empty")
-                if finding.status in {"compatible", "incompatible"}:
-                    if not any(ref in candidate for ref in finding.candidate_refs):
-                        observations.append(
-                            f"{name}: established comparison lacks candidate references"
-                        )
-                    if name == "candidate_preferences" and not binding_preferences(
-                        finding.candidate_refs
-                    ):
-                        observations.append(
-                            f"{name}: established comparison lacks explicit binding preferences"
-                        )
-
     if evaluation.reliability is not None:
         for name in ("offer_information", "candidate_information", "traceability"):
             if not getattr(evaluation.reliability, name).strip():
@@ -184,16 +157,14 @@ def inspect_decisions(evaluation, context, offer) -> list[str]:
         if ref in whole_neutral or ref in optional:
             continue
         kind = entry["source_type"]
-        if kind == "required_skills" and ref not in (
-            covered["essentials"] | admissibility_coverage
-        ):
+        if kind == "required_skills" and ref not in (covered["essentials"] | context_coverage):
             observations.append(f"{ref}: essential expectation not covered")
         if kind == "main_tasks" and ref not in (
             covered["missions"] | covered["responsibilities"] | task_coverage
         ):
             observations.append(f"{ref}: task not covered")
         if kind == "constraints" and ref not in (
-            set.union(*covered.values()) | issue_coverage | admissibility_coverage
+            set.union(*covered.values()) | issue_coverage
         ):
             observations.append(
                 f"{ref}: constraint not covered (partial neutralisation is insufficient)"

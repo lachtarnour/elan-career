@@ -222,7 +222,7 @@ def test_both_real_providers_publish_the_same_nlp_application(isolated_db, monke
                 "proj_ner_camembert",
                 "proj_gpt2",
             ]
-            assert job.analysis.fit_score == 0.75
+            assert job.analysis.fit_score == 0.83
             assert (
                 job.analysis.fit_diagnostics["context"].get("provider", "openai") == provider_name
             )

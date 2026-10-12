@@ -2114,17 +2114,10 @@ card = page.findChild(QQuickItem, "offerFitEvaluation")
 assert not card.property("visible")
 bridge.job.update({
     "has_analysis": True, "llm_score": 0.70, "fit_current": True, "fit_status_label": "Évaluation actuelle",
-    "candidacy_label": "Candidature à vérifier",
     "fit_axes": [
         {"axis": "missions", "label": "Missions", "decision_label": "Crédible", "level": 3},
         {"axis": "essentials", "label": "Essentiels", "decision_label": "Crédible", "level": 3},
         {"axis": "responsibilities", "label": "Responsabilités", "decision_label": "Partiel", "level": 2},
-    ],
-    "fit_admissibility": [
-        {"dimension": "mandatory_conditions", "label": "Conditions obligatoires", "status": "unknown",
-         "status_label": "À confirmer", "findings": ["Habilitation non documentée."]},
-        {"dimension": "candidate_preferences", "label": "Préférences du candidat", "status": "",
-         "status_label": "Information indisponible", "findings": []},
     ],
     "fit_reliability": [{"label": "Traçabilité", "text": "Références problématiques."}],
     "fit_warnings": ["Citation invalide", "Références absentes"],
@@ -2141,7 +2134,6 @@ assert visual_item(card, "offerFitSegment_missions_2").property("color") != \
     visual_item(card, "offerFitSegment_missions_3").property("color")
 assert page.findChild(QQuickItem, "offerTechnicalScore") is None
 assert page.findChild(QQuickItem, "offerFitMethod") is None
-assert page.findChild(QQuickItem, "offerAdmissibility_mandatory_conditions") is None
 assert page.findChild(QQuickItem, "offerFitWarningsAction") is None
 bridge.job.update({"fit_warnings": [], "fit_current": False,
                    "fit_status_label": "Évaluation historique · à réévaluer"})

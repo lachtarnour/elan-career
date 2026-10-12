@@ -1,4 +1,4 @@
-"""Inspect saved Claude schemas and prove fit transport round trips, entirely offline.
+"""Inspect saved schemas and round-trip the current fit fields, entirely offline.
 
 No provider client, API call, submission, score persistence or LLM evaluation.
 """
@@ -19,6 +19,7 @@ from smartapply.llm.anthropic_transport import build_message_params
 from smartapply.llm.fit_response import read_fit_response
 from smartapply.llm.fit_scoring import calculate_fit_decisions
 from smartapply.llm.schemas import JobFitDecisionEvaluation
+from smartapply.llm.structured import to_strict_schema
 
 
 def schema_metrics(schema):
@@ -94,7 +95,12 @@ def main():
     prepared = []
     prompt_checks = []
     for request in canonical_requests:
-        body = request["body"]
+        # Archived benchmarks may use a retired contract. Rebuild only the output
+        # schema offline, keeping their source prompts and provider settings.
+        body = json.loads(json.dumps(request["body"]))
+        body["response_format"]["json_schema"]["schema"] = to_strict_schema(
+            JobFitDecisionEvaluation
+        )
         params = build_message_params(body)
         assert params["output_config"]["effort"] == "high"
         assert not {"tools", "tool_choice", "thinking"}.intersection(params)
@@ -124,8 +130,13 @@ def main():
     for provider, records in results.items():
         for offer_id, record in records.items():
             original = json.loads(record["response_text"])
+            current_fields = {
+                key: value
+                for key, value in original.items()
+                if key in JobFitDecisionEvaluation.model_fields
+            }
             try:
-                JobFitDecisionEvaluation.model_validate(original)
+                JobFitDecisionEvaluation.model_validate(current_fields)
             except ValidationError as exc:
                 rows.append(
                     {
@@ -137,10 +148,10 @@ def main():
                     }
                 )
                 continue
-            wire = encode_fit_transport(original)
+            wire = encode_fit_transport(current_fields)
             Draft202012Validator(schemas["proposed_native_strict"]).validate(wire)
             parsed = read_fit_response(json.dumps(wire, ensure_ascii=False))
-            assert parsed.raw == original and not parsed.observations, offer_id
+            assert parsed.raw == current_fields and not parsed.observations, offer_id
             JobFitDecisionEvaluation.model_validate(parsed.raw)
             assert calculate_fit_decisions(parsed.decisions) == calculate_fit_decisions(
                 tuple(
@@ -155,6 +166,7 @@ def main():
                     "canonical_valid": True,
                     "roundtrip_tested": True,
                     "exact_roundtrip": True,
+                    "archived_fields_excluded": sorted(set(original) - set(current_fields)),
                     "unchanged_score": True,
                 }
             )
@@ -211,9 +223,10 @@ def main():
         "roundtrip_records": rows,
         "limits": [
             "No offline test proves acceptance by the proprietary Anthropic grammar compiler.",
-            "The API constrains types/keys/enums, but not maxItems or paired-list presence.",
+            "The API constrains types/keys/enums, but not reliability maxItems.",
             "Full canonical conformance remains measured separately; defects only warn when decisions are usable.",
-            "Saved canonical outputs are converted offline; these are not new Claude completions or a quality measurement.",
+            "Only current fields of saved outputs are converted offline; retired fields are excluded from this audit projection.",
+            "Prepared requests retain archived prompts; they are offline schema artifacts, not submissions or current prompt examples.",
         ],
         "official_docs": "https://platform.claude.com/docs/en/build-with-claude/structured-outputs",
     }
