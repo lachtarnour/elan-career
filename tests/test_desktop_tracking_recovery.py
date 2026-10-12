@@ -102,6 +102,19 @@ def test_startup_reads_persisted_journal_before_provider_reconciliation(tracking
     assert calls == ["read"]
 
 
+def test_closing_during_initial_analysis_read_skips_provider_reconciliation(tracking_controller):
+    controller, pool, calls, local_read, _ = tracking_controller("analysis")
+    QCoreApplication.processEvents()
+    assert len(pool.pending) == 1 and pool.pending[0].fn is local_read
+    controller.bridge.shutdownRequested = True
+    controller.stop()
+    pool.finish_next()
+    QCoreApplication.processEvents()
+    assert calls == ["read"]
+    assert pool.pending == []
+    assert not controller.bridge._workers and not controller._timer.isActive()
+
+
 @pytest.mark.parametrize("kind", ["analysis", "generation"])
 def test_failed_reconciliation_keeps_persisted_tracking_and_history_navigation(tracking_controller, kind):
     controller, pool, calls, local_read, unavailable_sync = tracking_controller(kind)
@@ -376,6 +389,28 @@ def test_shutdown_drains_explicit_cancellation_queued_behind_monitor(make_bridge
     with session_scope() as session:
         persisted = session.get(run_cls, "run-0000")
         assert persisted.cancel_requested is True and persisted.state == "cancelled"
+
+
+def test_shutdown_drains_multiple_distinct_analysis_cancellations_once(make_bridge):
+    bridge = make_bridge()
+    controller = bridge._analysis_controller
+    calls = []
+    bridge.service.analysis_workspace = lambda: {"runs": []}
+    bridge.service.cancel_analysis_batch = lambda run_id: calls.append(run_id) or {"runs": []}
+    controller.refresh(sync=False)
+    for run_id in ("first", "first", "second"):
+        bridge.cancelAnalysisBatch(run_id)
+    assert controller._pending_cancellations == ["first", "second"]
+    bridge.requestShutdown()
+    controller._pool.finish_next()
+    assert not bridge.shutdownReady
+    for completed in ("first", "second"):
+        assert len(controller._pool.pending) == 1
+        assert controller._pool.pending[0] in bridge._workers
+        controller._pool.finish_next()
+        assert calls[-1] == completed
+        assert bridge.shutdownReady is (completed == "second")
+    assert calls == ["first", "second"] and controller._pending_cancellations == []
 
 
 @pytest.mark.parametrize("kind", ["analysis", "generation"])
