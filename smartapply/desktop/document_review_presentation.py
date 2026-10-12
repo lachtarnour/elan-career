@@ -49,6 +49,11 @@ _FIELD_PHRASES = {
 }
 
 _KNOWN_VALIDATION_ERRORS = {
+    "publisher_reintroduced": (
+        "document_company",
+        "Nom de l’employeur à vérifier",
+        "Vérifiez que les documents nomment bien l’employeur et non la plateforme de publication.",
+    ),
     "experience_order_mismatch": (
         "cv_experience_order",
         "Ordre des expériences du CV",

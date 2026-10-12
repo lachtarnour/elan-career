@@ -7,6 +7,13 @@ from smartapply.database.analysis_batches import (
     AnalysisBatchWave,
 )
 from smartapply.database.analysis_checkpoints import AnalysisCheckpoint
+from smartapply.database.generation_runs import (
+    GenerationCall,
+    GenerationItem,
+    GenerationItemContext,
+    GenerationRun,
+    GenerationWave,
+)
 from smartapply.database.models import (
     Application,
     AppSetting,
@@ -40,6 +47,11 @@ from smartapply.database.session import (
 )
 
 __all__ = [
+    "GenerationCall",
+    "GenerationItem",
+    "GenerationItemContext",
+    "GenerationRun",
+    "GenerationWave",
     "ScopeCheckpoint",
     "AnalysisCheckpoint",
     "AnalysisBatchItem",

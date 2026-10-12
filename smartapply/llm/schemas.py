@@ -258,29 +258,6 @@ class FitOfferInterpretation(BaseModel):
     text: str
 
 
-AdmissibilityState = Literal["compatible", "incompatible", "unknown"]
-
-
-class FitAdmissibilityFinding(BaseModel):
-    model_config = _strict
-    offer_refs: list[str]
-    candidate_refs: list[str]
-    status: AdmissibilityState
-    text: str
-
-
-class FitAdmissibilityDimension(BaseModel):
-    model_config = _strict
-    status: AdmissibilityState
-    findings: list[FitAdmissibilityFinding]
-
-
-class FitAdmissibility(BaseModel):
-    model_config = _strict
-    mandatory_conditions: FitAdmissibilityDimension
-    candidate_preferences: FitAdmissibilityDimension
-
-
 class FitReliability(BaseModel):
     model_config = _strict
     offer_information: str
@@ -294,7 +271,6 @@ class JobFitDecisionEvaluation(BaseModel):
 
     model_config = _strict
     decision: FitDecisions
-    admissibility: FitAdmissibility | None = None
     reliability: FitReliability | None = None
     dimensions: FitDecisionAnnotations
     issues: list[FitReservation]

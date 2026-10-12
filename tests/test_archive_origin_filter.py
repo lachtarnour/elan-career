@@ -32,12 +32,14 @@ def test_archive_filter_matches_labels_and_precedes_pagination(isolated_db):
             ("a-manual", {"archive_origin": "manual", "rejection_stage": "local_filter"}, "manual"),
             ("b-auto", {"archive_origin": "automatic_filter"}, "automatic_filter"),
             ("c-legacy", {"rejection_stage": "rules"}, "automatic_filter"),
+            ("c-conflict", {"rejection_stage": "extraction_screening", "rejection_reasons": ["manual_archive"]}, "manual"),
             ("d-mission", {"rejection_reasons": ["mission_clearly_outside"]}, "mission_screen"),
             ("e-manual", {"rejection_reasons": ["manual_archive"]}, "manual"),
             ("f-application", {"archive_origin": "manual"}, "manual"),
             ("g-unknown", None, ""),
             ("h-substring", {"rejection_reasons": ["not_manual_archive"]}, ""),
             ("h-object", {"rejection_reasons": {"cause": "manual_archive"}}, ""),
+            ("h-diagnostics", {"filter_disposition": "rejected", "reasons": ["manual_archive"]}, ""),
             ("i-duplicate", {"archive_origin": "manual"}, "confirmed_duplicate"),
         ]
         expected = {}

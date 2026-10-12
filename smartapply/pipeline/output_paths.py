@@ -9,8 +9,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+from smartapply.logging_setup import get_logger
+from smartapply.pipeline.output_publication import (
+    ApplicationPublicationJournal,
+    recover_application_publication,
+)
+
 if TYPE_CHECKING:
     from smartapply.pipeline.reports import ApplyReport
+
+logger = get_logger(__name__)
 
 
 _REPORT_PATH_FIELDS = (
@@ -29,10 +37,10 @@ def _filename_component(value: str, fallback: str) -> str:
     return " ".join(value.split()).strip(" .-") or fallback
 
 
-def application_document_stems(candidate_name: str, job_title: str) -> tuple[str, str]:
-    """Readable, portable names using the offer title and the candidate's chosen name."""
+def application_document_stems(candidate_name: str, cv_title: str) -> tuple[str, str]:
+    """Readable, portable names using the CV title and the candidate's chosen name."""
     name = _filename_component(candidate_name, "Candidate")
-    title = _filename_component(job_title, "Poste")
+    title = _filename_component(cv_title, "CV")
     descriptor = f"{name} - {title}"
     # Reserve room for the longest prefix and extension. Both documents retain
     # the same descriptor, even with long titles or multibyte Unicode characters.
@@ -68,7 +76,7 @@ class AtomicApplicationOutput:
         self.final_dir = (
             Path(final_dir).expanduser().resolve()
             if final_dir is not None
-            else application_output_dir(output_dir, application_id)
+            else application_output_dir(output_dir, application_id).expanduser().resolve()
         )
         self.final_dir.parent.mkdir(parents=True, exist_ok=True)
         token = uuid4().hex
@@ -76,26 +84,19 @@ class AtomicApplicationOutput:
         self.backup_dir = self.final_dir.parent / f".{self.final_dir.name}.backup-{token}"
         self._published = False
         self._committed = False
-        self._recover_interrupted_publish()
+        # The caller holds application_publication. A prior interrupted swap
+        # must be reconciled from its SQLite decision before a new one starts.
+        recover_application_publication(int(application_id))
+        if not self.final_dir.exists() and list(
+            self.final_dir.parent.glob(f".{self.final_dir.name}.backup-*")
+        ):
+            raise RuntimeError("An older application backup needs manual recovery")
+        self._journal = ApplicationPublicationJournal(
+            int(application_id), self.final_dir, self.staging_dir, self.backup_dir, token,
+        )
         self.staging_dir.mkdir(parents=False, exist_ok=False)
 
-    def _recover_interrupted_publish(self) -> None:
-        """Restore a backup left by a crash before the new directory appeared."""
-        backups = sorted(
-            self.final_dir.parent.glob(f".{self.final_dir.name}.backup-*"),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )
-        if not self.final_dir.exists() and backups:
-            backups[0].replace(self.final_dir)
-            backups = backups[1:]
-        for stale in backups:
-            _remove_tree(stale)
-        for stale in self.final_dir.parent.glob(f".{self.final_dir.name}.staging-*"):
-            _remove_tree(stale)
-
-    def publish(self, report: ApplyReport) -> None:
-        """Validate staged files, swap directories, and expose final paths."""
+    def _path_map(self, report: ApplyReport) -> dict[str, Path]:
         path_map: dict[str, Path] = {}
         for field_name in _REPORT_PATH_FIELDS:
             raw_path = getattr(report, field_name)
@@ -108,12 +109,27 @@ class AtomicApplicationOutput:
                 raise ValueError(
                     f"Artifact {field_name} was written outside the staging directory"
                 ) from exc
+            if relative_path.name != str(relative_path):
+                raise ValueError(f"Artifact {field_name} has an unsafe relative path")
             if not staged_path.is_file() or staged_path.stat().st_size <= 0:
                 raise RuntimeError(f"Artifact {field_name} is missing or empty")
             path_map[field_name] = relative_path
-
         if not path_map:
             raise RuntimeError("No application artifact was generated")
+        return path_map
+
+    def prepare(self, report: ApplyReport) -> None:
+        """Commit the recovery intent before entering the publication transaction."""
+        if self._journal.prepared:
+            raise RuntimeError("Application publication is already prepared")
+        paths = self._path_map(report)
+        self._journal.prepare([str(path) for path in paths.values()])
+
+    def publish(self, report: ApplyReport) -> None:
+        """Validate staged files, swap directories, and expose final paths."""
+        if not self._journal.prepared:
+            raise RuntimeError("Application publication was not prepared")
+        path_map = self._path_map(report)
 
         try:
             if self.final_dir.exists():
@@ -128,16 +144,27 @@ class AtomicApplicationOutput:
         for field_name, relative_path in path_map.items():
             setattr(report, field_name, str(self.final_dir / relative_path))
 
+    def mark_committed(self, session) -> None:
+        self._journal.mark_committed(session)
+
     def commit(self) -> None:
         """Keep the published directory and discard its temporary backup."""
         if not self._published:
             raise RuntimeError("Cannot commit application artifacts before publish")
         self._committed = True
-        _remove_tree(self.backup_dir)
+        try:
+            self._journal.recover()
+        except Exception:
+            # DB publication already committed. Retain the journal and backup
+            # for the next startup rather than reporting a false dossier failure.
+            logger.exception("Application publication cleanup remains pending")
 
     def rollback(self) -> None:
         """Remove staged output and restore the previous complete directory."""
         if self._committed:
+            return
+        if self._journal.prepared:
+            self._journal.recover()
             return
         if self._published:
             _remove_tree(self.final_dir)

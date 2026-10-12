@@ -94,7 +94,10 @@ def test_cv_selection_correction_uses_medium_independently_of_selection(
         )
         assert [params["max_tokens"] for params in calls] == [12345, 16000][:len(calls)]
         assert all("temperature" not in params for params in calls)
-        users = [params["messages"][0]["content"] for params in calls]
+        blocks = [params["messages"][0]["content"] for params in calls]
+        assert all(content[0]["cache_control"] == {"type": "ephemeral"} for content in blocks)
+        assert all("cache_control" not in content[1] for content in blocks)
+        users = ["".join(block["text"] for block in content) for content in blocks]
     else:
         assert all("output_config" not in params for params in calls)
         assert all("temperature" not in params for params in calls)

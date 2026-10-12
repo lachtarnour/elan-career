@@ -335,7 +335,7 @@ def test_restart_resumes_two_dependent_waves_and_keeps_full_analysis():
     assert counts()["paid"] == 4
     with session_scope() as session:
         jobs = [session.get(Job, job_id) for job_id in ids]
-        assert all(job.analysis.fit_score == 0.88 and job.analyzed_at is not None for job in jobs)
+        assert all(job.analysis.fit_score == 0.84 and job.analyzed_at is not None for job in jobs)
         assert all(job.ranked_at is None and job.score is not None for job in jobs)
 
 
@@ -597,6 +597,68 @@ def test_cancelled_preparation_creates_no_run_or_provider_batch():
     assert transport.created == [] and transport.upload_attempts == 0
     with session_scope() as session:
         assert session.scalar(select(func.count()).select_from(AnalysisBatchRun)) == 0
+
+
+def test_stop_during_upload_skips_paid_batch_creation():
+    ids = seed_jobs()
+    stopped = False
+
+    class StopDuringUpload(FakeTransport):
+        def upload(self, content):
+            nonlocal stopped
+            file_id = super().upload(content)
+            stopped = True
+            return file_id
+
+    transport = StopDuringUpload()
+    coordinator = BatchAnalysisCoordinator(
+        transport=transport, pipeline=pipeline(stop_requested=lambda: stopped)
+    )
+    run_id = coordinator.start(ids)
+    run, items, waves = journal(run_id)
+    assert transport.upload_attempts == 1
+    assert transport.created == [] and transport.cancelled == []
+    assert run.cancel_requested and run.state == "cancelled"
+    assert all(item.state == "cancelled" for item in items)
+    assert all(wave.state == "imported" for wave in waves)
+
+
+@pytest.mark.parametrize("tie_created_at", [False, True])
+def test_stop_during_later_upload_cancels_only_already_created_batch(monkeypatch, tie_created_at):
+    if tie_created_at:
+        monkeypatch.setattr(
+            AnalysisBatchWave.__table__.c.created_at.default, "arg",
+            lambda context: datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+    monkeypatch.setattr(
+        coordinator_module, "split_requests", lambda requests: [[request] for request in requests]
+    )
+    ids = seed_jobs(2)
+    stopped = False
+
+    class StopOnSecondUpload(FakeTransport):
+        def upload(self, content):
+            nonlocal stopped
+            file_id = super().upload(content)
+            if self.upload_attempts == 2:
+                stopped = True
+            return file_id
+
+    transport = StopOnSecondUpload()
+    run_id = BatchAnalysisCoordinator(
+        transport=transport, pipeline=pipeline(stop_requested=lambda: stopped)
+    ).start(ids)
+    run, _, waves = journal(run_id)
+    assert transport.upload_attempts == 2
+    assert transport.created == ["batch-1"]
+    assert transport.cancelled == ["batch-1"]
+    assert run.cancel_requested
+    assert len(waves) == 2
+    submitted = [wave for wave in waves if wave.provider_batch_id is not None]
+    unsubmitted = [wave for wave in waves if wave.provider_batch_id is None]
+    assert len(submitted) == len(unsubmitted) == 1
+    assert submitted[0].state == "cancelling"
+    assert unsubmitted[0].state == "imported"
 
 
 def test_stop_requested_while_submitting_cancels_provider_batch_before_evaluation():
@@ -924,6 +986,112 @@ def test_ambiguous_post_recovers_batch_accepted_before_timeout():
     assert len(transport.created) == 1
 
 
+def test_openai_screening_timeout_recovers_and_imports_paid_result():
+    ids = seed_jobs(screened=False)
+    transport = FakeTransport()
+    transport.accept_before_error = True
+    transport.create_error = TimeoutError("Screening accepted before response timeout")
+    coordinator = BatchAnalysisCoordinator(transport=transport, pipeline=pipeline())
+    run_id = coordinator.start(ids)
+
+    run, items, waves = journal(run_id)
+    assert run.state == "attention"
+    assert items[0].state == "screening_pending"
+    assert len(waves) == 1 and waves[0].state == "submitting"
+    assert waves[0].provider_batch_id is None
+    assert transport.created == ["batch-1"]
+    assert counts()["paid"] == 0
+
+    restarted = BatchAnalysisCoordinator(transport=transport)
+    restarted.sync()
+    run, items, waves = journal(run_id)
+    assert run.state == "active"
+    assert waves[0].provider_batch_id == "batch-1"
+    assert waves[0].state == "in_progress"
+    assert transport.recovered == [
+        {"elan_run_id": run_id, "elan_wave_id": waves[0].id}
+    ]
+    assert transport.created == ["batch-1"]
+
+    transport.complete("batch-1")
+    restarted.sync()
+    run, items, waves = journal(run_id)
+    assert waves[0].state == "imported"
+    assert len(waves[0].consumed_ids) == len(waves[0].requests)
+    assert items[0].scope_data["status"] == "valid"
+    assert counts()["paid"] == 1
+    assert transport.created == ["batch-1", "batch-2"]
+
+
+def test_unconfirmed_openai_screening_submission_waits_without_reposting():
+    ids = seed_jobs(screened=False)
+    transport = FakeTransport()
+    transport.create_error = TimeoutError("Unknown screening outcome")
+    coordinator = BatchAnalysisCoordinator(transport=transport, pipeline=pipeline())
+    run_id = coordinator.start(ids)
+
+    for _ in range(3):
+        coordinator.sync()
+    coordinator.retry(run_id)
+    run, items, waves = journal(run_id)
+    assert run.state == "attention"
+    assert items[0].state == "screening_pending"
+    assert waves[0].state == "submitting"
+    assert waves[0].consumed_ids == []
+    assert transport.created == ["batch-1"]
+    assert len(transport.recovered) >= 1
+
+
+def test_cancel_recovers_openai_screening_and_imports_partial_output():
+    ids = seed_jobs(screened=False)
+    transport = FakeTransport()
+    transport.accept_before_error = True
+    transport.create_error = TimeoutError("Screening accepted before response timeout")
+    coordinator = BatchAnalysisCoordinator(transport=transport, pipeline=pipeline())
+    run_id = coordinator.start(ids)
+
+    coordinator.cancel(run_id)
+    assert transport.recovered
+    assert transport.cancelled == ["batch-1"]
+    assert transport.created == ["batch-1"]
+    assert journal(run_id)[2][0].provider_batch_id == "batch-1"
+
+    transport.complete("batch-1", status="cancelled")
+    coordinator.sync()
+    run, items, waves = journal(run_id)
+    assert run.state == "cancelled"
+    assert waves[0].state == "imported"
+    assert items[0].scope_data["status"] == "valid"
+    assert counts()["paid"] == 1
+    assert transport.created == ["batch-1"]
+
+
+def test_openai_screening_retrieve_error_does_not_consume_accepted_wave():
+    ids = seed_jobs(screened=False)
+    transport = FakeTransport()
+    retrieve = transport.retrieve
+
+    def unavailable(batch_id):
+        raise TimeoutError("Screening status unavailable")
+
+    transport.retrieve = unavailable
+    coordinator = BatchAnalysisCoordinator(transport=transport, pipeline=pipeline())
+    run_id = coordinator.start(ids)
+    run, items, waves = journal(run_id)
+    assert run.state == "active"
+    assert "Screening status unavailable" in run.last_error
+    assert items[0].state == "screening_pending"
+    assert waves[0].state == "in_progress"
+    assert waves[0].provider_batch_id == "batch-1"
+    assert transport.created == ["batch-1"]
+
+    transport.retrieve = retrieve
+    coordinator.sync()
+    assert journal(run_id)[1][0].state == "screening_pending"
+    assert journal(run_id)[0].last_error == ""
+    assert transport.created == ["batch-1"]
+
+
 def test_multiple_metadata_matches_require_attention_without_another_post():
     ids = seed_jobs()
     transport = FakeTransport()
@@ -1024,6 +1192,7 @@ def _write_sync_cache(job_id, *, extraction=True, evaluation=False, extraction_a
                         model,
                         purpose,
                     ),
+                    6000,
                 ),
             )
             cache_set(
@@ -1077,7 +1246,7 @@ def test_batch_preserves_wrapped_source_quotes_through_evaluation_and_storage(fr
     assert counts()["paid"] == (1 if from_cache else 2)
     with session_scope() as session:
         job = session.get(Job, ids[0])
-        assert job.analysis.fit_score == 0.88
+        assert job.analysis.fit_score == 0.84
         assert job.analysis.raw_response["supporting_excerpts"] == [source_quote]
         assert job.analysis.raw_response["offer_risks"] == extracted.offer_risks
         cached = session.scalar(select(LLMCache).where(LLMCache.purpose == "job_offer_extraction"))
@@ -1112,6 +1281,142 @@ def test_all_cached_run_completes_without_any_upload_or_batch_creation():
     assert journal(run_id)[2] == []
     assert counts()["analyses"] == 1
     assert counts()["cached"] == 2 and counts()["paid"] == 0
+
+
+@pytest.mark.parametrize("change", ["source", "archive", "analysis", "application", "delete"])
+def test_batch_revalidates_captured_candidates_before_applying_scope_checkpoint(monkeypatch, change):
+    from smartapply.database import write_session_scope
+    from smartapply.database.models import Application, JobStatus
+    from smartapply.pipeline.process.scope_screening import save_scope, scope_request, scope_result
+    from tests.scope_fixtures import configured_scope_context
+
+    ids = seed_jobs(screened=False)
+    context = configured_scope_context()
+    with write_session_scope() as session:
+        job = session.get(Job, ids[0])
+        request = scope_request(context, build_analyzer_input(job))
+        screened = scope_result(JobScopeScreening(mission_screen={
+            "mission_relation": "clearly_outside", "mission_evidence": "sufficient",
+        }), context=context)
+        save_scope(session, job.id, request.cache_key, screened)
+
+    instance = pipeline()
+    original_candidates = instance.analysis_candidates
+
+    def change_after_capture(*args, **kwargs):
+        captured = original_candidates(*args, **kwargs)
+        with write_session_scope() as session:
+            job = session.get(Job, ids[0])
+            if change == "source":
+                job.description = "A new source body not represented by the saved screening."
+            elif change == "archive":
+                job.status = JobStatus.ARCHIVED
+                job.archived_at = datetime.now(timezone.utc)
+            elif change == "analysis":
+                job.analysis = JobAnalysis(fit_score=0.7, raw_response={"new_analysis": True})
+            elif change == "application":
+                job.application = Application(status=JobStatus.READY_FOR_FORM_SUBMISSION,
+                                              cv_json={"new_dossier": True})
+            else:
+                from smartapply.database.scope_checkpoints import ScopeCheckpoint
+
+                for checkpoint in session.query(ScopeCheckpoint).filter_by(job_id=job.id):
+                    session.delete(checkpoint)
+                session.delete(job)
+        return captured
+
+    monkeypatch.setattr(instance, "analysis_candidates", change_after_capture)
+    transport = FakeTransport()
+    with pytest.raises(ValueError, match="sélectionnées ont changé"):
+        BatchAnalysisCoordinator(transport=transport, pipeline=instance).start(ids)
+    assert transport.created == [] and transport.upload_attempts == 0
+    with session_scope() as session:
+        assert session.query(AnalysisBatchRun).count() == 0
+        assert session.query(AnalysisBatchItem).count() == 0
+        current = session.get(Job, ids[0])
+        if change == "delete":
+            assert current is None
+        elif change == "archive":
+            assert current.status == JobStatus.ARCHIVED
+            assert "extraction_screen" not in current.score.components
+        else:
+            assert current.archived_at is None
+            assert "extraction_screen" not in current.score.components
+            if change == "analysis":
+                assert current.analysis.raw_response == {"new_analysis": True}
+            elif change == "application":
+                assert current.application.cv_json == {"new_dossier": True}
+
+
+def test_batch_changed_candidate_does_not_discard_other_current_offers(monkeypatch):
+    from smartapply.database import write_session_scope
+
+    ids = seed_jobs(2)
+    instance = pipeline()
+    original_candidates = instance.analysis_candidates
+
+    def source_change_after_capture(*args, **kwargs):
+        captured = original_candidates(*args, **kwargs)
+        with write_session_scope() as session:
+            session.get(Job, ids[0]).description = "Changed after the initial admission."
+        return captured
+
+    monkeypatch.setattr(instance, "analysis_candidates", source_change_after_capture)
+    transport = FakeTransport()
+    coordinator = BatchAnalysisCoordinator(transport=transport, pipeline=instance)
+    run_id = coordinator.start(ids)
+    assert [item.job_id for item in journal(run_id)[1]] == [ids[1]]
+    assert len(transport.requests(transport.created[-1])) == 1
+    with session_scope() as session:
+        changed = session.get(Job, ids[0])
+        assert changed.archived_at is None
+        assert "extraction_screen" not in changed.score.components
+
+
+def test_batch_scope_checkpoint_uses_live_manual_bypass_and_score_components(monkeypatch):
+    from smartapply.database import write_session_scope
+    from smartapply.pipeline.process.scope_screening import save_scope, scope_request, scope_result
+    from tests.scope_fixtures import configured_scope_context
+
+    ids = seed_jobs(screened=False)
+    context = configured_scope_context()
+    with write_session_scope() as session:
+        job = session.get(Job, ids[0])
+        request = scope_request(context, build_analyzer_input(job))
+        save_scope(session, job.id, request.cache_key, scope_result(
+            JobScopeScreening(mission_screen={
+                "mission_relation": "clearly_outside", "mission_evidence": "sufficient",
+            }), context=context,
+        ))
+    instance = pipeline()
+    original_candidates = instance.analysis_candidates
+
+    def manual_choice_after_capture(*args, **kwargs):
+        captured = original_candidates(*args, **kwargs)
+        with write_session_scope() as session:
+            job = session.get(Job, ids[0])
+            job.score.components = {
+                **job.score.components,
+                "manual_filter_bypass": {
+                    "schema_version": 1,
+                    "origin": "manual_addition",
+                    "added_at": datetime.now(timezone.utc).isoformat(),
+                },
+                "independent_audit": {"retain": True},
+            }
+        return captured
+
+    monkeypatch.setattr(instance, "analysis_candidates", manual_choice_after_capture)
+    transport = FakeTransport()
+    run_id = BatchAnalysisCoordinator(transport=transport, pipeline=instance).start(ids)
+    with session_scope() as session:
+        job = session.get(Job, ids[0])
+        assert job.archived_at is None
+        assert job.score.components["manual_filter_bypass"]["origin"] == "manual_addition"
+        assert job.score.components["independent_audit"] == {"retain": True}
+        assert job.score.components["extraction_screen"]["decision"] == "evaluate_manual_override"
+    assert journal(run_id)[1][0].state == "extraction_pending"
+    assert journal(run_id)[2][0].phase == "extraction"
 
 
 def test_unknown_output_ids_do_not_publish_or_record_usage():

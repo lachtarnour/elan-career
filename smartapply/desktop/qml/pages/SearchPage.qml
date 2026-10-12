@@ -6,6 +6,7 @@ import "../components"
 Item {
     id: root
     property var selectedSourceKeys: ["serpapi", "francetravail"]
+    readonly property bool searchRunning: AppBridge.searchRunning
     function selectedSources() {
         var readiness = AppBridge.diagnostics.source_ready || ({})
         return selectedSourceKeys.filter(function(key) { return Boolean(readiness[key]) })
@@ -18,7 +19,7 @@ Item {
         selectedSourceKeys = next
     }
     function runSearch() {
-        if (AppBridge.shutdownRequested || selectedSources().length === 0 || !queryField.text.trim()) return
+        if (AppBridge.shutdownRequested || searchRunning || selectedSources().length === 0 || !queryField.text.trim()) return
         maxResults.commitInput()
         AppBridge.searchJobs(queryField.text, locationField.text, selectedSources(), maxResults.value, freshness.currentValue)
     }
@@ -90,6 +91,7 @@ Item {
                                     FormLabel { text: "LOCALISATION" }
                                     AppField {
                                         id: locationField
+                                        objectName: "searchLocation"
                                         Layout.fillWidth: true
                                         iconSource: Theme.icon("map-pin")
                                         placeholderText: "Ville, région ou pays"
@@ -138,12 +140,27 @@ Item {
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 12
-                                Item { Layout.fillWidth: true }
+                                Text {
+                                    objectName: "searchTaskProgress"
+                                    Layout.fillWidth: true
+                                    text: root.searchRunning ? (AppBridge.searchLabel || "Recherche en cours…") : ""
+                                    color: Theme.inkSoft
+                                    font.pixelSize: 12
+                                    elide: Text.ElideRight
+                                }
                                 AppButton {
-                                    text: "Rechercher"
+                                    objectName: "searchCancelAction"
+                                    visible: root.searchRunning && !AppBridge.shutdownRequested
+                                    text: "Arrêter"
+                                    quiet: true
+                                    onClicked: AppBridge.cancelSearch()
+                                }
+                                AppButton {
+                                    objectName: "searchStartAction"
+                                    text: root.searchRunning ? "Recherche…" : "Rechercher"
                                     iconSource: Theme.icon("search")
                                     kind: "primary"
-                                    enabled: !AppBridge.shutdownRequested && root.selectedSources().length > 0 && queryField.text.trim().length > 0
+                                    enabled: !AppBridge.shutdownRequested && !root.searchRunning && root.selectedSources().length > 0 && queryField.text.trim().length > 0
                                     onClicked: root.runSearch()
                                 }
                             }

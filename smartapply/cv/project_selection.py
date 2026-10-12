@@ -110,3 +110,42 @@ def validate_project_selection(
             if not reason.complementary_value.strip():
                 errors.append(f"missing_complementary_value:{pid}")
     return errors
+
+
+def repair_project_evidence(
+    selection: CVSelection,
+    analysis: JobAnalysis,
+    *,
+    job_description: str = "",
+) -> CVSelection:
+    """Replace only mechanically verifiable citations after the correction call.
+
+    Keep the native response immutable and preserve the initial validation path:
+    a saved correction request depends on the initial errors verbatim. This
+    fallback never chooses projects or infers relevance. A comma-separated list
+    is recoverable only when every entry equals a complete required-skill fact.
+    """
+    sources = [*analysis.main_tasks, *analysis.required_skills, job_description]
+    normalized_sources = [_normalized_quote(source) for source in sources if source.strip()]
+    skills = {_normalized_quote(skill): skill for skill in analysis.required_skills if skill.strip()}
+    repaired = selection.model_copy(deep=True)
+    for reason in repaired.project_selection_reasons:
+        evidence = _normalized_quote(reason.offer_evidence)
+        if not evidence or any(evidence in source for source in normalized_sources):
+            continue
+        replacement = None
+        # A model sometimes appends a sentence period to a complete task that
+        # has none. Compare whole facts, preserving internal punctuation/negation.
+        if evidence.endswith("."):
+            replacement = next(
+                (source for source in sources if _normalized_quote(source) == evidence[:-1]),
+                None,
+            )
+        if replacement is None:
+            parts = [part.strip() for part in evidence.split(",")]
+            if len(parts) > 1 and all(part in skills for part in parts):
+                replacement = skills[parts[0]]
+        if replacement is not None:
+            reason.offer_evidence = replacement
+            repaired.warnings.append(f"auto_fixed:project_offer_evidence:{reason.project_id}")
+    return repaired

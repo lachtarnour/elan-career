@@ -89,6 +89,11 @@ def update_application_tracking(
         if app.status == JobStatus.SENT:
             job.shortlisted_at = None
             job.shortlist_origin = None
+        if app.status == JobStatus.ARCHIVED and status is not None:
+            from smartapply.database.repository.jobs import mark_archived
+
+            mark_archived(session, job.id, origin="manual")
+            return app
         from smartapply.database.repository.offer_state import synchronize_offer_state
 
         synchronize_offer_state(job)

@@ -91,7 +91,10 @@ def save_application_settings(updates: dict[str, str]) -> dict:
             field = str(first.get("loc", ("paramètre",))[0]).upper()
             raise ValueError(f"Valeur invalide pour {field}. Vérifiez ce paramètre.") from None
 
+    # Capture the current paths before a save can change their persisted values.
+    config.get_settings()
     _atomic_update(config.ENV_FILE, changed, validate=validate)
+    config.reload_runtime_settings()
     return llm_configuration()
 
 

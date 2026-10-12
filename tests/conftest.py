@@ -65,7 +65,11 @@ def _fast_pdf(request, monkeypatch):
     if "real_pdf" in request.keywords:
         return
 
-    def _fake_pdf(html: str, pdf_path, *, base_dir=None):  # noqa: ARG001
+    def _fake_pdf(html: str, pdf_path, *, base_dir=None, stop_requested=None):  # noqa: ARG001
+        if stop_requested is not None and stop_requested():
+            from smartapply.pipeline.errors import TaskCancelledError
+
+            raise TaskCancelledError()
         path = Path(pdf_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"%PDF-1.4\n%%fake-test-fixture\n")

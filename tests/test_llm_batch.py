@@ -92,7 +92,11 @@ def test_request_preserves_sync_parameters_and_exact_cache_identity():
         system="Extract only documented facts.",
         user="Ingénieur IA",
         schema_name="Extraction",
-        extra={"temperature": 0.2, "schema": Extraction.model_json_schema()},
+        extra={
+            "temperature": 0.2,
+            "schema": Extraction.model_json_schema(),
+            "max_completion_tokens": 6000,
+        },
     )
     assert built.cache_key == expected
     assert built.body["messages"] == [
@@ -106,6 +110,24 @@ def test_request_preserves_sync_parameters_and_exact_cache_identity():
     assert strict["strict"] is True
     assert strict["schema"]["additionalProperties"] is False
     assert strict["schema"]["required"] == ["role", "skills"]
+
+
+def test_output_budget_changes_batch_cache_identity():
+    first = request()
+    legacy = make_cache_key(
+        model="gpt-5.4-mini", system="Extract only documented facts.",
+        user="Ingénieur IA", schema_name="Extraction",
+        extra={"temperature": 0.2, "schema": Extraction.model_json_schema()},
+    )
+    second = build_batch_request(
+        custom_id="job-42", system="Extract only documented facts.",
+        user="Ingénieur IA", schema=Extraction, model="gpt-5.4-mini",
+        max_completion_tokens=16000, purpose="job_analysis", temperature=0.2,
+    )
+    assert first.cache_key != second.cache_key
+    assert first.cache_key != legacy
+    assert first.body["max_completion_tokens"] == 6000
+    assert second.body["max_completion_tokens"] == 16000
 
 
 def test_jsonl_encoding_keeps_unicode_and_endpoint():

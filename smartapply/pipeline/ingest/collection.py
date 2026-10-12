@@ -178,6 +178,30 @@ def collect_round_robin(
                             cancelled=True,
                         )
                     continue
+                except (ScraperError, RequestException) as exc:
+                    if not raw_jobs:
+                        raise
+                    # A late pagination failure must not discard pages that
+                    # have already been collected. Stop this source and let
+                    # its normal persistence path save the partial collection.
+                    source_label = {
+                        "serpapi": "Google Jobs",
+                        "welcometothejungle": "Welcome to the Jungle",
+                    }.get(source_key, source_key)
+                    warning = (
+                        f"Recherche {source_label} incomplète : {exc}. "
+                        "Les offres déjà reçues sont conservées ; "
+                        "les requêtes restantes n’ont pas été lancées."
+                    )
+                    logger.warning("Partial source collection: source=%s error=%s", source_key, exc)
+                    return _CollectResult(
+                        raw_jobs,
+                        skipped_known,
+                        skipped_existing,
+                        hit_cap,
+                        cancelled=_should_stop(stop_requested),
+                        warnings=[warning],
+                    )
                 raw_seen += 1
                 if raw.external_id in seen_external_ids:
                     # Intra-call deduplication (e.g. the same offer surfaced

@@ -48,7 +48,7 @@ def repair_wttj_contracts(database: Path | str, *, backup: Path | str) -> int:
                 connection.rollback()
                 return 0
 
-            require_no_table_triggers(connection, tables=("jobs",))
+            revision_guard = require_no_table_triggers(connection, tables=("jobs",))
             online_backup(database, backup)
             result = connection.executemany(
                 "UPDATE jobs SET contract_type = ? WHERE id = ? AND contract_type = ?",
@@ -56,6 +56,7 @@ def repair_wttj_contracts(database: Path | str, *, backup: Path | str) -> int:
             )
             if result.rowcount != len(changes):
                 raise SQLiteSafetyError("WTTJ contract repair did not update the expected rows")
+            revision_guard.verify(connection, job_updates=len(changes))
             if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                 raise SQLiteSafetyError("WTTJ contract repair failed SQLite quick_check")
             connection.commit()

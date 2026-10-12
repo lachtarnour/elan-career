@@ -10,6 +10,7 @@ Commencer par le [README du projet](../README.md) pour installer et comprendre l
 | Comprendre le filtre local et les états affichés | [Filtrage et état des offres](filter-labels.md) |
 | Décider si deux annonces sont la même offre | [Doublons](duplicate-review.md) |
 | Suivre ou reprendre une analyse en lot | [Analyse Batch](batch-analysis.md) |
+| Créer et reprendre les CV et lettres en lot ou en immédiat | [Création des candidatures](batch-generation.md) |
 | Comprendre le préfiltre des missions | [Préfiltre après extraction](extraction-mission-screen.md) |
 | Comprendre le calcul de pertinence IA | [Évaluation de pertinence](evidence-fit.md) |
 | Configurer OpenAI ou Anthropic | [Fournisseurs IA](llm-providers.md) |

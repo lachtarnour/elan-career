@@ -23,7 +23,7 @@ DECISION_LEVELS = {
 }
 POLICY = {
     "name": "evidence_fit",
-    "weights": [50, 30, 20],
+    "weights": [35, 45, 20],
     "decision_levels": DECISION_LEVELS,
     "rounding": "ROUND_HALF_UP:0.01",
     "diagnostic_checks": "advisory",
@@ -206,7 +206,7 @@ def build_fit_context(
     from smartapply.llm.request_options import stage_effort
     from smartapply.llm.structured import to_strict_schema
 
-    runtime_settings = get_settings()
+    runtime_settings = settings or get_settings()
     transport_settings = settings or get_llm_settings()
     if provider is None:
         from smartapply.llm_policy import CallConfigurationError

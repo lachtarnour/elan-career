@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import load_only
 
 from smartapply.database import session_scope
@@ -275,16 +275,18 @@ def _run(run, waves, items, job_details, sequence, scope_enabled=False):
     }
 
 
-def analysis_workspace() -> dict:
+def analysis_workspace(*, run_ids=None, include_candidates=True) -> dict:
     with session_scope() as session:
+        run_filter = [] if run_ids is None else [AnalysisBatchRun.id.in_(run_ids)]
         scope_runs = set(
             session.scalars(
-                select(AnalysisBatchRun.id).where(AnalysisBatchRun.scope_context.is_not(None))
+                select(AnalysisBatchRun.id).where(AnalysisBatchRun.scope_context.is_not(None), *run_filter)
             )
         )
         runs = list(
             session.scalars(
                 select(AnalysisBatchRun)
+                .where(*run_filter)
                 .options(
                     load_only(
                         AnalysisBatchRun.id,
@@ -301,7 +303,14 @@ def analysis_workspace() -> dict:
                 .order_by(AnalysisBatchRun.created_at.desc(), AnalysisBatchRun.id.desc())
             )
         )
-        sequences = {run.id: len(runs) - index for index, run in enumerate(runs)}
+        if run_ids is None:
+            sequences = {run.id: len(runs) - index for index, run in enumerate(runs)}
+        else:
+            numbered = select(
+                AnalysisBatchRun.id,
+                func.row_number().over(order_by=(AnalysisBatchRun.created_at, AnalysisBatchRun.id)).label("sequence"),
+            ).subquery()
+            sequences = dict(session.execute(select(numbered).where(numbered.c.id.in_(run_ids))).all())
         runs = [run for run in runs if run.state != "cancelled"]
         visible_ids = [run.id for run in runs]
         items = list(
@@ -333,13 +342,14 @@ def analysis_workspace() -> dict:
                         AnalysisBatchWave.state,
                         AnalysisBatchWave.provider_data,
                         AnalysisBatchWave.created_at,
+                        AnalysisBatchWave.provider_batch_id,
                     )
                 )
                 .order_by(AnalysisBatchWave.created_at, AnalysisBatchWave.id)
             )
         )
         active_ids = {run.id for run in runs if run.state in ACTIVE_ANALYSIS_RUN_STATES}
-        available_ids = analysis_queue_job_ids(session)
+        available_ids = analysis_queue_job_ids(session) if include_candidates else []
         jobs = list(
             session.scalars(
                 select(Job)

@@ -10,12 +10,12 @@ Item {
     readonly property bool hasRun: Boolean(run.id)
     readonly property bool finished: run.status === "completed"
     readonly property bool reachedOutcome: hasRun && run.phase === "done"
-    implicitHeight: 82
+    implicitHeight: phases.some(function(phase) { return Boolean(phase.label) }) ? 100 : 82
 
     function phaseData(name) {
         for (var i = 0; i < phases.length; ++i)
             if (phases[i].phase === name) {
-                if (["attention", "blocked"].indexOf(run.status) >= 0 && run.phase === name)
+                if (["attention", "blocked", "paused", "interrupted"].indexOf(run.status) >= 0 && run.phase === name)
                     return Object.assign({}, phases[i], {
                         status: run.status, status_label: run.status_label
                     })
@@ -61,18 +61,20 @@ Item {
                 required property int index
                 Layout.fillWidth: true
                 Layout.preferredWidth: 1
+                Layout.alignment: Qt.AlignTop
                 number: index + 1
                 phase: root.phaseData(modelData.phase)
                 current: root.hasRun && root.run.is_active && root.run.status !== "attention"
                     && root.run.phase === modelData.phase
                 complete: phase.status === "completed" || phase.status === "skipped"
-                issue: ["failed", "expired", "attention", "blocked", "cancelled"].indexOf(phase.status) >= 0
+                issue: ["failed", "expired", "attention", "blocked", "cancelled", "paused", "interrupted"].indexOf(phase.status) >= 0
                 started: root.hasRun && (index === 0 || root.phases[index - 1].status === "completed" || root.run.phase === modelData.phase)
             }
         }
         AnalysisPhaseCard {
             Layout.fillWidth: true
             Layout.preferredWidth: 1
+            Layout.alignment: Qt.AlignTop
             number: root.stepCount
             phase: root.outcome
             complete: root.finished

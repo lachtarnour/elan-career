@@ -14,30 +14,11 @@ DECISION_LABELS = {
     "credible_fit": "Crédible",
     "strong_fit": "Fort",
 }
-STATUS_LABELS = {
-    "compatible": "Compatible",
-    "incompatible": "Incompatible",
-    "unknown": "À confirmer",
-}
 
 
 def fit_summary(diagnostics, *, has_score: bool) -> dict:
     raw = diagnostics if isinstance(diagnostics, dict) else {}
     current = has_score and raw.get("policy_fingerprint") == current_policy_fingerprint()
-    admissibility = raw.get("admissibility")
-    admissibility = admissibility if isinstance(admissibility, dict) else {}
-    statuses = []
-    for dimension in ("mandatory_conditions", "candidate_preferences"):
-        entry = admissibility.get(dimension)
-        status = entry.get("status") if isinstance(entry, dict) else None
-        statuses.append(status if isinstance(status, str) and status in STATUS_LABELS else "")
-    candidacy = (
-        "incompatible"
-        if "incompatible" in statuses
-        else "compatible"
-        if statuses == ["compatible", "compatible"]
-        else "to_verify"
-    )
     return {
         "fit_current": current,
         "fit_status_label": (
@@ -47,14 +28,6 @@ def fit_summary(diagnostics, *, has_score: bool) -> dict:
             if has_score
             else ""
         ),
-        "candidacy_status": candidacy if current else "",
-        "candidacy_label": {
-            "compatible": "Candidature envisageable",
-            "to_verify": "Candidature à vérifier",
-            "incompatible": "Incompatibilité confirmée",
-        }[candidacy]
-        if current
-        else "",
     }
 
 
@@ -109,33 +82,6 @@ def fit_detail(diagnostics, *, match_reasons=()) -> dict:
                 "findings": texts,
             }
         )
-    admissibility = raw.get("admissibility")
-    admissibility = admissibility if isinstance(admissibility, dict) else {}
-    dimensions = []
-    for dimension, label in (
-        ("mandatory_conditions", "Conditions obligatoires"),
-        ("candidate_preferences", "Préférences du candidat"),
-    ):
-        entry = admissibility.get(dimension)
-        entry = entry if isinstance(entry, dict) else {}
-        status = entry.get("status")
-        status = status if isinstance(status, str) and status in STATUS_LABELS else ""
-        findings = entry.get("findings")
-        findings = findings if isinstance(findings, list) else []
-        texts = [
-            item["text"]
-            for item in findings
-            if isinstance(item, dict) and isinstance(item.get("text"), str) and item["text"].strip()
-        ]
-        dimensions.append(
-            {
-                "dimension": dimension,
-                "label": label,
-                "status": status,
-                "status_label": STATUS_LABELS.get(status, "Information indisponible"),
-                "findings": texts,
-            }
-        )
     reliability = raw.get("reliability")
     reliability = reliability if isinstance(reliability, dict) else {}
     descriptions = []
@@ -165,7 +111,6 @@ def fit_detail(diagnostics, *, match_reasons=()) -> dict:
     warnings = checks.get("warnings")
     return {
         "fit_axes": tuple(axes),
-        "fit_admissibility": tuple(dimensions),
         "fit_reliability": tuple(descriptions),
         "fit_warnings": tuple(item for item in warnings if isinstance(item, str))
         if isinstance(warnings, list)

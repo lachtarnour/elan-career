@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from smartapply.concurrency import TaskConflictError, job_operation
 from smartapply.database import session_scope, write_session_scope
+from smartapply.database.ingest_revision import ingest_revision
 from smartapply.database.models import Job, JobDuplicateStatus, JobStatus
 from smartapply.database.repository import (
     get_known_external_ids,
@@ -190,6 +192,15 @@ class Ingestor:
             completed_source_run_ids=collection.completed_source_run_ids,
         )
         if collection.completed_source_run_ids and collection.source_run_journal_path:
+            if report.skipped_busy:
+                # Keep the paid Actor datasets available when a row could not
+                # be handled. Recovery may replay them without a new Actor POST.
+                report.warnings.append(
+                    "Le journal de récupération Apify est conservé : les offres "
+                    "occupées pourront être relues depuis les datasets existants, "
+                    "sans redémarrer ces Actors."
+                )
+                return report
             try:
                 ApifyRecoveryJournal(Path(collection.source_run_journal_path)).remove_many(
                     collection.completed_source_run_ids
@@ -257,16 +268,20 @@ class Ingestor:
         updated_pending = 0
         inserted_ids: set[int] = set()
         updated_ids: set[int] = set()
+        skipped_busy = 0
+        warnings = list(warnings or [])
         skipped_processed = 0
         skipped_existing = 0
         duplicate_review_ids: list[int] = []
         aliases_created = 0
         with session_scope() as session:
+            # Capture before reading rows: a commit during the reads will also
+            # invalidate the detached population at the later writer check.
+            known_revision = ingest_revision(session)
             known_jobs = list(session.scalars(
                 select(Job).options(selectinload(Job.application))
             ))
             session.expunge_all()
-        known_max = max((int(job.id) for job in known_jobs), default=0)
         copy_index = _StrictCopyIndex(known_jobs)
         for raw in raws:
             raw_filter_result = None
@@ -276,15 +291,13 @@ class Ingestor:
                 known_by_external = {job.external_id: job for job in known_jobs}
                 existing = known_by_external.get(raw.external_id)
                 native_key = _native_offer_key(raw.source, raw.source_data)
-                if existing is None and native_key is not None and native_key in (
+                skip_native = existing is None and native_key is not None and native_key in (
                     _KnownJobIndex.from_jobs(known_jobs).native_offer_ids
-                ):
-                    skipped_existing += 1
-                    break
+                )
                 probable = None
                 alias_target = None
                 alias_reason = None
-                if existing is None:
+                if existing is None and not skip_native:
                     manual_match = _matching_known_job(raw, known_jobs) if source == "manual" else None
                     if manual_match is not None:
                         existing = manual_match
@@ -303,7 +316,7 @@ class Ingestor:
                                 )
                             else:
                                 alias_target = exact_root
-                if existing is None and alias_target is None:
+                if existing is None and not skip_native and alias_target is None:
                     if source != "manual":
                         for copy in sorted(copy_index.candidates(raw), key=_job_identity_priority):
                             copy_root = _canonical_job(copy, known_jobs)
@@ -328,7 +341,7 @@ class Ingestor:
                 dependencies.update(int(job.id) for job in references)
                 snapshots = {int(job.id): _ingest_snapshot_key(job) for job in known_jobs
                              if int(job.id) in dependencies}
-                if existing is None and raw_filter_result is None:
+                if existing is None and not skip_native and raw_filter_result is None:
                     raw_filter_result = (
                         manual_filter_bypass_result() if manual_addition
                         else self._get_job_filter().evaluate(raw)
@@ -336,16 +349,59 @@ class Ingestor:
                 refreshed = []
                 refresh_scope = set()
                 retry = False
-                with (job_operation(dependencies, operation="enregistrement d’offre"),
-                      write_session_scope() as session):
-                    current_max = int(session.scalar(select(func.max(Job.id))) or 0)
-                    if current_max > known_max:
-                        # A manual addition during fetch can be the same offer.
-                        # Refresh it and recompute identity outside this scope.
-                        refreshed = list(session.scalars(
-                            select(Job).where(Job.id > known_max)
-                            .options(selectinload(Job.application))
+                reload_population = False
+                with _ingest_write_scope(dependencies) as (session, conflict):
+                    if conflict is not None:
+                        if source == "manual":
+                            raise conflict
+                        skipped_busy += 1
+                        warnings.append(
+                            f"Enregistrement de l’offre collectée {raw.external_id} "
+                            f"({raw.title} · {raw.company}) écarté : l’offre {conflict.job_id} "
+                            "ou son groupe de doublons est utilisé par un traitement. "
+                            "Les données existantes sont conservées."
+                        )
+                        logger.info(
+                            "Collected offer skipped while its group is busy: "
+                            "source=%s external_id=%s busy_job_id=%s",
+                            source, raw.external_id, conflict.job_id,
+                        )
+                        break
+                    current_revision = ingest_revision(session)
+                    if current_revision is None:
+                        # Other database backends, or callers that created the
+                        # tables without init_db, have no durable counter. Keep
+                        # their correctness with conservative snapshot checks.
+                        current_population = list(session.scalars(
+                            select(Job).options(selectinload(Job.application))
                         ))
+                        population_changed = {
+                            int(job.id): _ingest_snapshot_key(job) for job in current_population
+                        } != {
+                            int(job.id): _ingest_snapshot_key(job) for job in known_jobs
+                        }
+                    else:
+                        population_changed = current_revision != known_revision
+                    current_exact = session.scalar(
+                        select(Job).where(Job.external_id == raw.external_id)
+                        .options(selectinload(Job.application))
+                    )
+                    known_exact = known_by_external.get(raw.external_id)
+                    if population_changed:
+                        # Source identities can change without max(id) growing,
+                        # including cross-source rows and delete/reinsert ABA.
+                        # Reload and redo matching only after releasing writer.
+                        reload_population = retry = True
+                    elif skip_native:
+                        skipped_existing += 1
+                        break
+                    elif current_exact is not None and (
+                        known_exact is None or int(current_exact.id) != int(known_exact.id)
+                    ):
+                        # SQLite can reuse deleted IDs without increasing max(id).
+                        # Recompute protections and reservations for the actual row.
+                        refreshed = [current_exact]
+                        refresh_scope = {int(known_exact.id)} if known_exact is not None else set()
                         session.expunge_all()
                         retry = True
                     else:
@@ -468,14 +524,22 @@ class Ingestor:
                                 elif source == "manual":
                                     job_ids.append(int(job.id))
                             session.flush()
+                            known_revision = ingest_revision(session)
                             _ = job.application
                             session.expunge_all()
                             refreshed = [job]
+                if reload_population:
+                    refresh_scope = {int(job.id) for job in known_jobs}
+                    with session_scope() as session:
+                        known_revision = ingest_revision(session)
+                        refreshed = list(session.scalars(
+                            select(Job).options(selectinload(Job.application))
+                        ))
+                        session.expunge_all()
                 refreshed_ids = {int(job.id) for job in refreshed} | refresh_scope
                 known_jobs = [job for job in known_jobs if int(job.id) not in refreshed_ids]
                 known_jobs.extend(refreshed)
                 copy_index.replace(refreshed, removed_ids=refreshed_ids)
-                known_max = max((int(job.id) for job in known_jobs), default=0)
                 if not retry:
                     break
 
@@ -523,6 +587,7 @@ class Ingestor:
             search_audit=search_audit or [],
             warnings=warnings or [],
             completed_source_run_ids=completed_source_run_ids or [],
+            skipped_busy=skipped_busy,
         )
 
     @staticmethod
@@ -541,6 +606,19 @@ __all__ = [
     "expand_query_for_source",
     "split_or_query",
 ]
+
+
+@contextmanager
+def _ingest_write_scope(job_ids):
+    """Only reservation conflicts are recoverable; actual writes must fail loudly."""
+    with ExitStack() as reservation:
+        try:
+            reservation.enter_context(job_operation(job_ids, operation="enregistrement d’offre"))
+        except TaskConflictError as exc:
+            yield None, exc
+            return
+        with write_session_scope() as session:
+            yield session, None
 
 
 def _ingest_snapshot_key(job: Job) -> tuple[str, str | None]:

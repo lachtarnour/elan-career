@@ -27,17 +27,25 @@ vert pour l’envoi, ambre pour l’archivage et les avertissements.
 - Le sélecteur « Origine de l’archivage », à côté du statut et visible uniquement pour « Archivée », filtre ces quatre provenances avant le comptage, la pagination et la sélection globale. « Tous les archivages » inclut aussi les archives historiques sans provenance. Le choix reste actif pendant la recherche, le tri et la pagination.
 - « Désarchiver et créer » conserve un override `manual_rescue` qui protège durablement l’offre du filtre automatique et du préfiltre des missions. Un doublon en attente arrête toute analyse et génération ; un lien confirmé est rouvert pour vérification. Les offres associées apparaissent dans Doublons, avec l’ancien dossier conservé jusqu’à une décision puis une préparation explicites.
 - Zoom de l’offre : sans déplacement du titre, effet immédiat et valeur initiale de 1,15 à chaque lancement.
-- Notifications : toasts superposés en haut et tâche active en bas à droite, sans modifier la géométrie du contenu.
+- Notifications : toasts superposés en haut et suivi des traitements actifs en bas à droite, sans modifier la géométrie du contenu.
 - Profil, descriptions, diagnostics : retour à la ligne et hauteur adaptée au contenu.
 
 Les tokens partagés sont dans [`Theme.qml`](../smartapply/desktop/qml/components/Theme.qml).
 
 ## Traitements et suivi
 
-Une seule opération longue s’exécute à la fois ; les demandes suivantes attendent
-leur tour. Les actions courtes passent par une file indépendante. Une offre et ses
-alias sont protégés pendant leur traitement, avec un motif explicite en cas de
-conflit. La navigation, les notes et les actions sur les autres offres restent disponibles.
+La recherche, l’analyse et la création du CV et de la lettre peuvent s’exécuter
+en parallèle. Le bridge garde l’ordre d’arrivée dans une file propre à chaque
+workflow ; ces files ne font pas attendre les autres workflows.
+Les contrôleurs d’analyse et de création conservent leurs workers indépendants
+et leur suivi Batch et immédiat.
+Chaque workflow affiche sa progression et son propre arrêt, qui ne vide pas les
+files des autres traitements. La Recherche désactive son bouton de lancement
+pendant sa propre exécution, tout en restant disponible pendant une analyse ou
+une création. Les actions courtes passent par une file indépendante. Une offre
+et ses alias restent protégés pendant leur traitement, avec un motif explicite
+en cas de conflit. La navigation, les notes et les actions sur les autres offres
+restent disponibles.
 L’ajout manuel enregistre d’abord l’offre, puis programme sa candidature. Une shortlist
 non analysée reste une intention annulable jusqu’au succès de l’analyse.
 L’ajout manuel constitue un choix explicite de conserver l’offre : les filtres de
@@ -49,6 +57,15 @@ Les changements enregistrés regroupent les actualisations sur 200 ms ; la progr
 ne recharge pas les listes. Chaque vue conserve une seule lecture active et la dernière
 demande suivante. Les listes affichent toutes les offres du statut choisi, sans plafond
 de 500, et conservent leur sélection et leur défilement.
+La liste des offres occupées est un instantané en mémoire : les getters QML et les
+tests d'appartenance ne consultent jamais SQLite. Un worker dédié actualise cet état
+sur changement des réservations locales, des runs de création, de leurs éléments ou
+des liens de doublons, quelle que soit la page ouverte. Les demandes sont regroupées.
+Une réponse ancienne peut ajouter une protection, mais seule une lecture à jour peut
+la retirer. L'interface reçoit une notification uniquement si la liste change.
+Une erreur temporaire conserve le dernier instantané et programme une nouvelle lecture.
+Chaque page copie cette liste une fois par notification ; les actions métier vérifient
+toujours les réservations réelles, même si l'instantané n'est pas encore actualisé.
 Une actualisation du même contexte garde la liste et le détail utilisables ; le masque
 de chargement reste réservé au premier affichage et aux changements de requête ou
 d’offre. Au retour sur Offres, la recherche, le filtre, le tri, les sélections et le
@@ -62,14 +79,17 @@ Elles sont enregistrées après 500 ms, à la perte de focus, au changement d’
 fermeture. La fermeture attend les sauvegardes et le nettoyage des tâches sans bloquer
 la fenêtre ; une sauvegarde échouée peut être réessayée. La maintenance historique est
 versionnée et reprise au prochain lancement après interruption. Pendant cette vérification,
-seules les opérations dépendant de la validation des doublons attendent.
+les opérations qui dépendent de la validation des offres et des doublons attendent
+sa réussite avant de démarrer. Cette attente préalable protège la cohérence de la
+base ; une fois la maintenance terminée, les trois workflows reprennent leur
+exécution indépendante. La navigation et les sauvegardes de notes restent disponibles.
 
 ## Vérification reproductible
 
 Depuis la racine du dépôt :
 
 ```sh
-.venv/bin/pytest tests/test_desktop_services.py tests/test_desktop_notifications.py tests/test_source_diagnostics_refresh.py tests/test_desktop_task_lifecycle.py tests/test_desktop_qml_responsiveness.py -q
+.venv/bin/pytest tests/test_desktop_services.py tests/test_desktop_notifications.py tests/test_source_diagnostics_refresh.py tests/test_desktop_task_lifecycle.py tests/test_desktop_workflow_concurrency.py tests/test_desktop_qml_responsiveness.py -q
 ```
 
 Les tests Qt chargent réellement QML avec des services inertes et des données fictives.
@@ -125,6 +145,37 @@ affichent le fournisseur et le modèle enregistrés dans leur journal, indépend
 des réglages actuels. Les anciens journaux désignent OpenAI.
 Les tests QML utilisent un runtime fictif isolé pour vérifier le panneau aux
 quatre tailles de fenêtre indiquées ci-dessus.
+
+## Lectures et suivi en usage continu
+
+L'interface dispose de modèles de lecture distincts des journaux d'exécution.
+La file Analyse est filtrée et triée globalement dans un worker, puis affichée
+par pages de 100. Ses identifiants éligibles et ceux correspondant au filtre
+restent globaux : la sélection de tous les résultats traverse les pages.
+La liste possède son propre signal ; une actualisation du suivi ne reconvertit
+pas la liste ni ne relance son tri. Les changements des offres, des preuves
+d'admission, des checkpoints et des réservations invalident la file.
+
+Les historiques Analyse et Génération sont consultables par pages de 20
+métadonnées. Seul le lot consulté charge ses étapes, ses offres et ses erreurs,
+sans les profils, prompts ou réponses brutes. Le lot consulté reste sélectionné
+pendant la navigation dans l'historique et les actualisations passives. Tous
+les traitements actifs, y compris ceux hors page, continuent à être suivis ;
+leur état terminal reste observé pour produire la notification de fin.
+Les lectures passives et les erreurs transitoires ne redémarrent pas le délai
+de contrôle des fournisseurs : les mises à jour continues ne repoussent donc
+pas indéfiniment le prochain suivi Batch.
+Une réponse de lecture devenue obsolète après une recherche, un tri ou une
+navigation est ignorée ; les demandes suivantes sont regroupées en une seule
+relecture de la vue courante.
+
+Ces modèles servent à l'affichage. L'exécution conserve ses gardes autoritaires
+en base : propriété du parcours, réservation, candidature existante, identité
+de l'offre et de l'analyse, doublons, annulation et incertitude des envois.
+Une attente Batch dont le dernier checkpoint reste en cours ne reconstruit pas
+le pipeline ; les contrôles de fraîcheur et de candidature sont néanmoins
+exécutés. Un checkpoint prêt ou terminal repasse par le mécanisme de reprise
+habituel et sa vérification de l'identité des requêtes.
 
 ## Avant distribution
 

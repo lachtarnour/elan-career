@@ -8,20 +8,24 @@ Surface {
     property var historyOptions: []
     property int activeRunCount: 0
     property bool controlsEnabled: true
+    property bool retryEnabled: true
     property bool detailsExpanded: false
     property bool errorsExpanded: false
     readonly property string runId: String(run.id || "")
     readonly property var errors: run.errors || []
     readonly property int total: Number(run.total || 0)
     readonly property int analyzed: Number(run.analyzed || 0)
+    readonly property bool generation: run.kind === "generation"
+    readonly property int generated: Number(run.generated || 0)
     readonly property int screenedOut: Number(run.screened_out || 0)
     readonly property int failedCount: Number(run.failed || 0) + Number(run.skipped || 0)
     readonly property bool hasMultipleBatches: (run.phase_batches || []).some(function(phase) {
         return (phase.batches || []).length > 1
     })
-    readonly property bool needsAction: ["blocked", "attention", "failed"].indexOf(run.status) >= 0
+    readonly property bool needsAction: ["blocked", "attention", "failed", "paused", "interrupted"].indexOf(run.status) >= 0
     signal retryRequested(string runId)
     signal cancelRequested(string runId)
+    signal abandonRequested(string runId)
     signal runSelected(string runId)
     padding: 0
     surfaceColor: "transparent"
@@ -34,7 +38,7 @@ Surface {
     function tone() {
         if (run.status === "completed") return "success"
         if (run.status === "failed") return "danger"
-        if (["attention", "blocked", "partial", "expired"].indexOf(run.status) >= 0) return "warning"
+        if (["attention", "blocked", "partial", "expired", "paused", "interrupted"].indexOf(run.status) >= 0) return "warning"
         if (run.status === "cancelled") return "neutral"
         return "accent"
     }
@@ -47,7 +51,8 @@ Surface {
 
     function actionMessage() {
         if (run.status === "blocked")
-            return "Le service d’analyse est indisponible. Les offres sont conservées pour la reprise."
+            return generation ? "Le service est indisponible. Les étapes enregistrées sont conservées pour la reprise."
+                : "Le service d’analyse est indisponible. Les offres sont conservées pour la reprise."
         if (run.status === "attention")
             return "L’envoi doit être vérifié avant de poursuivre. Les résultats enregistrés sont conservés."
         return "Le traitement a été interrompu. Vous pouvez reprendre les demandes restantes."
@@ -55,7 +60,9 @@ Surface {
 
     function resultSummary() {
         var parts = []
-        if (analyzed > 0)
+        if (generation && generated > 0)
+            parts.push(generated + (generated === 1 ? " créée" : " créées"))
+        if (!generation && analyzed > 0)
             parts.push(analyzed + (analyzed === 1 ? " analysée" : " analysées"))
         if (screenedOut > 0)
             parts.push(screenedOut + (screenedOut === 1 ? " écartée" : " écartées") + " au préfiltre")
@@ -64,7 +71,8 @@ Surface {
         if (Number(run.skipped || 0) > 0)
             parts.push(run.skipped + " ignorée" + (Number(run.skipped) === 1 ? "" : "s"))
         if (parts.length === 0 && run.is_active)
-            return ({screening: "Préfiltre en cours", extraction: "Extraction en cours",
+            return generation ? String(run.phase_label || "Préparation en cours")
+                : ({screening: "Préfiltre en cours", extraction: "Extraction en cours",
                 evaluation: "Évaluation en cours"})[run.phase] || "Préparation en cours"
         return parts.join(" · ")
     }
@@ -84,7 +92,8 @@ Surface {
             Text {
                 objectName: "analysisRunTitle"
                 Layout.fillWidth: true
-                text: "Analyse de " + root.total + (root.total === 1 ? " offre" : " offres")
+                text: (root.generation ? "Création de " : "Analyse de ") + root.total
+                    + (root.total === 1 ? " offre" : " offres")
                 color: Theme.ink
                 font.pixelSize: 14
                 font.weight: Font.DemiBold
@@ -113,9 +122,15 @@ Surface {
             textRole: "label"
             valueRole: "value"
             model: root.historyOptions
-            currentIndex: Math.max(0, indexOfValue(root.runId))
+            currentIndex: {
+                var target = root.runId
+                var options = root.historyOptions
+                for (var i = 0; i < options.length; ++i)
+                    if (String(options[i].value) === target) return i
+                return 0
+            }
             onActivated: root.runSelected(String(currentValue))
-            Accessible.name: "Historique des analyses"
+            Accessible.name: root.generation ? "Historique des créations" : "Historique des analyses"
         }
         RowLayout {
             id: headerActions
@@ -126,8 +141,9 @@ Surface {
             Pill {
                 objectName: "analysisActiveCount"
                 visible: root.activeRunCount > 0
-                text: root.activeRunCount + (root.activeRunCount === 1
-                    ? " analyse en cours" : " analyses en cours")
+                text: root.activeRunCount + (root.generation
+                    ? (root.activeRunCount === 1 ? " création en cours" : " créations en cours")
+                    : (root.activeRunCount === 1 ? " analyse en cours" : " analyses en cours"))
                 tone: "accent"
                 compact: true
             }
@@ -154,13 +170,13 @@ Surface {
                 refined: true
                 fontPixelSize: 11
                 implicitHeight: 30
-                enabled: root.controlsEnabled
+                enabled: root.controlsEnabled && root.retryEnabled
                 onClicked: root.retryRequested(root.runId)
             }
             AppButton {
                 objectName: "analysisCancelAction"
                 visible: Boolean(root.run.can_cancel)
-                text: "Annuler ce Batch"
+                text: root.generation ? "Arrêter" : "Annuler ce Batch"
                 kind: "danger"
                 refined: true
                 quiet: true
@@ -168,6 +184,18 @@ Surface {
                 implicitHeight: 30
                 enabled: root.controlsEnabled
                 onClicked: root.cancelRequested(root.runId)
+            }
+            AppButton {
+                objectName: "generationAbandonAction"
+                visible: root.generation && Boolean(root.run.can_abandon)
+                text: "Abandonner"
+                kind: "warning"
+                refined: true
+                quiet: true
+                fontPixelSize: 11
+                implicitHeight: 30
+                enabled: root.controlsEnabled
+                onClicked: root.abandonRequested(root.runId)
             }
         }
     }
@@ -191,7 +219,9 @@ Surface {
             Text {
                 objectName: "analysisRunError"
                 Layout.fillWidth: true
-                text: root.actionMessage()
+                text: root.actionMessage() + (root.generation && root.run.last_error
+                    ? " " + String(root.run.last_error) : "")
+                textFormat: Text.PlainText
                 color: Theme.warning
                 font.pixelSize: 11
                 wrapMode: Text.WordWrap
@@ -201,9 +231,9 @@ Surface {
 
     AnalysisTimeline {
         objectName: "analysisTimeline"
-        visible: root.detailsExpanded && root.run.status !== "completed"
+        visible: root.detailsExpanded && (root.generation || root.run.status !== "completed")
         Layout.fillWidth: true
-        Layout.preferredHeight: 82
+        Layout.preferredHeight: root.generation ? 100 : 82
         run: root.run
     }
 
@@ -217,7 +247,9 @@ Surface {
         Text {
             objectName: "analysisRunProvider"
             Layout.fillWidth: true
-            text: [root.run.provider_label || (root.run.provider === "anthropic" ? "Claude · Anthropic" : "OpenAI"), root.run.model || ""].filter(Boolean).join(" · ")
+            text: [root.generation ? (root.run.mode === "immediate" ? "Immédiat" : "Batch") : "",
+                root.run.provider_label || (root.run.provider === "anthropic" ? "Claude · Anthropic" : "OpenAI"),
+                root.run.model || ""].filter(Boolean).join(" · ")
             color: Theme.inkMuted
             font.pixelSize: 10
             elide: Text.ElideRight
@@ -239,7 +271,7 @@ Surface {
                     Layout.preferredWidth: 1
                     Layout.alignment: Qt.AlignTop
                     phase: modelData
-                    title: modelData.phase === "screening" ? "Préfiltre des missions" : modelData.phase === "extraction" ? "Extraction des offres" : "Évaluation de la pertinence"
+                    title: modelData.label || (modelData.phase === "screening" ? "Préfiltre des missions" : modelData.phase === "extraction" ? "Extraction des offres" : "Évaluation de la pertinence")
                     blocked: root.run.status === "blocked" && root.run.phase === modelData.phase
                 }
             }

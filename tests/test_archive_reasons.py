@@ -18,6 +18,10 @@ def test_diagnostics_are_not_persisted_as_rejection_causes() -> None:
         "offer_language:fr",
         "experience_structured_welcometothejungle:5",
         "experience_required_too_high:5+ years",
+        "role_title_veto:candidate_ai_mission",
+        "role_conflict:role_family_requires_relevance:data_platform",
+        "contract_conflict_non_decisive",
+        "qualification_satisfied:doctorate",
     ]
 
     audit = _rejection_audit_components("local_filter", reasons)
@@ -66,3 +70,10 @@ def test_mandatory_doctorate_has_a_human_readable_archive_label() -> None:
         ["qualification_required:doctorate"],
         archived=True,
     ) == ("Doctorat obligatoire non compatible avec le profil actuel",)
+
+
+def test_positive_filter_notes_cannot_be_archive_labels() -> None:
+    assert archive_reason_labels(
+        ["role_title_veto:candidate_ai_mission", "role_title_veto:target_role_title"],
+        archived=True,
+    ) == ("Raison d’archivage non enregistrée",)

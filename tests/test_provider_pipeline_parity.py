@@ -79,6 +79,8 @@ def _leaf_response(body, provider_name, fixtures, calls):
         schema_name = body["output_config"]["format"]["schema"]["title"]
         system = body["system"][0]["text"]
         user = body["messages"][0]["content"]
+        if isinstance(user, list):
+            user = "".join(block["text"] for block in user)
         output_limit = body["max_tokens"]
     purpose = _PURPOSE[schema_name]
     calls.append(
@@ -220,7 +222,7 @@ def test_both_real_providers_publish_the_same_nlp_application(isolated_db, monke
                 "proj_ner_camembert",
                 "proj_gpt2",
             ]
-            assert job.analysis.fit_score == 0.75
+            assert job.analysis.fit_score == 0.83
             assert (
                 job.analysis.fit_diagnostics["context"].get("provider", "openai") == provider_name
             )

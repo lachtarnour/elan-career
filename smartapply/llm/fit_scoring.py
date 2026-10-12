@@ -107,7 +107,6 @@ def evaluate_fit(
         **calculation,
         "evaluation": copy.deepcopy(response.raw),
         "original_response": response.original_text,
-        "admissibility": copy.deepcopy(response.raw.get("admissibility")),
         "reliability": copy.deepcopy(response.raw.get("reliability")),
         "used_levels": dict(zip(AXES, response.levels, strict=True)),
         "diagnostic_checks": {

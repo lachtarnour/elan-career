@@ -7,13 +7,42 @@ import hashlib
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from threading import RLock, get_ident
+from threading import RLock, get_ident, local
 
 from sqlalchemy import or_, select
 
 _lock = RLock()
 _claims: dict[int, tuple[int, str, int]] = {}
 _subscribers: set[Callable[[], None]] = set()
+_generation_context = local()
+
+
+@contextmanager
+def generation_owner(run_id: str | Iterable[str]) -> Iterator[None]:
+    """Allow only the coordinator of a durable run to enter its reserved offers."""
+    previous = getattr(_generation_context, "run_ids", frozenset())
+    _generation_context.run_ids = frozenset([run_id] if isinstance(run_id, str) else run_id)
+    try:
+        yield
+    finally:
+        _generation_context.run_ids = previous
+
+
+def _generation_claims(session, job_ids=None):
+    from smartapply.database.generation_runs import (
+        RESERVED_GENERATION_STATES,
+        TERMINAL_GENERATION_ITEM_STATES,
+        GenerationItem,
+        GenerationRun,
+    )
+
+    query = select(GenerationItem.job_id, GenerationRun.id).join(GenerationRun).where(
+        GenerationRun.state.in_(RESERVED_GENERATION_STATES),
+        GenerationItem.state.not_in(TERMINAL_GENERATION_ITEM_STATES),
+    )
+    if job_ids is not None:
+        query = query.where(GenerationItem.job_id.in_(job_ids))
+    return session.execute(query).all()
 
 
 class TaskConflictError(RuntimeError):
@@ -27,13 +56,27 @@ class TaskConflictError(RuntimeError):
         )
 
 
-def busy_job_ids() -> list[int]:
+def running_job_ids() -> list[int]:
+    """Live local operations, without stopped durable generation reservations."""
     with _lock:
-        return sorted(_claims)
+        claimed = set(_claims)
+    return sorted(_group_ids(claimed)) if claimed else []
+
+
+def busy_job_ids() -> list[int]:
+    from smartapply.database import session_scope
+
+    # Merge local and durable reservations before expanding aliases. Expanding
+    # the local set first would repeat the same group reads on every refresh.
+    with _lock:
+        claimed = set(_claims)
+    with session_scope() as session:
+        claimed.update(job_id for job_id, _ in _generation_claims(session))
+    return sorted(_group_ids(claimed)) if claimed else []
 
 
 def subscribe_resource_changes(callback: Callable[[], None]) -> Callable[[], None]:
-    """Subscribe to reservations; callbacks may run on any worker thread."""
+    """Observe local reservation membership changes on any worker thread."""
     with _lock:
         _subscribers.add(callback)
 
@@ -91,10 +134,17 @@ def job_operation(job_ids: Iterable[int], *, operation: str) -> Iterator[None]:
     owner = get_ident()
     with _lock:
         members = _group_ids(job_ids)
+        from smartapply.database import session_scope
+
+        with session_scope() as session:
+            for job_id, run_id in _generation_claims(session, members):
+                if run_id not in getattr(_generation_context, "run_ids", frozenset()):
+                    raise TaskConflictError(job_id, "création de candidature · reprise conservée")
         for job_id in members:
             claim = _claims.get(job_id)
             if claim is not None and claim[0] != owner:
                 raise TaskConflictError(job_id, claim[1])
+        membership_changed = any(job_id not in _claims for job_id in members)
         for job_id in members:
             claim = _claims.get(job_id)
             _claims[job_id] = (
@@ -102,18 +152,22 @@ def job_operation(job_ids: Iterable[int], *, operation: str) -> Iterator[None]:
                 operation if claim is None else claim[1],
                 1 if claim is None else claim[2] + 1,
             )
-    _notify()
+    if membership_changed:
+        _notify()
     try:
         yield
     finally:
+        membership_changed = False
         with _lock:
             for job_id in members:
                 claim = _claims[job_id]
                 if claim[2] == 1:
                     del _claims[job_id]
+                    membership_changed = True
                 else:
                     _claims[job_id] = (claim[0], claim[1], claim[2] - 1)
-        _notify()
+        if membership_changed:
+            _notify()
 
 
 def _publication_lock_path(application_id: int) -> Path:

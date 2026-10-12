@@ -5,10 +5,12 @@ from __future__ import annotations
 from PySide6.QtCore import QObject, QThreadPool, QTimer, Signal
 
 from smartapply.desktop.workers import TaskWorker
+from smartapply.desktop.workspace_view_state import WorkspaceViewState
 
 
-class AnalysisController(QObject):
+class AnalysisController(QObject, WorkspaceViewState):
     changed = Signal()
+    candidatesChanged = Signal()
     loadingChanged = Signal()
     errorChanged = Signal()
     operationChanged = Signal()
@@ -16,6 +18,7 @@ class AnalysisController(QObject):
     def __init__(self, bridge):
         super().__init__(bridge)
         self.bridge = bridge
+        self._init_view("analysis")
         self.workspace = {"candidates": [], "runs": [], "active_run_id": ""}
         self.loading = False
         self.error = ""
@@ -33,9 +36,10 @@ class AnalysisController(QObject):
         self._timer = QTimer(self)
         self._timer.setInterval(120_000)
         self._timer.timeout.connect(self.refresh)
-        # Reconcile stored provider IDs even if this page is never opened.
+        # Publish the persisted journal before attempting provider reconciliation.
         if hasattr(bridge.service, "sync_analysis_batches"):
-            QTimer.singleShot(0, self.refresh)
+            self._startup_sync_pending = True
+            QTimer.singleShot(0, lambda: self.refresh(sync=False))
 
     def refresh(self, *, sync=True):
         if self.bridge.shutdownRequested:
@@ -44,8 +48,13 @@ class AnalysisController(QObject):
             self._pending_read = self._pending_read or not sync
             return
         method = "sync_analysis_batches" if sync else "analysis_workspace"
+        if hasattr(self.bridge.service, method + "_view"):
+            method += "_view"
         if hasattr(self.bridge.service, method):
-            self._execute(getattr(self.bridge.service, method), operation="refresh")
+            self._execute(
+                getattr(self.bridge.service, method), operation="refresh",
+                syncing=method.startswith("sync_"),
+            )
 
     def start(self, ids):
         self._execute(
@@ -90,33 +99,50 @@ class AnalysisController(QObject):
 
     def stop(self):
         self._timer.stop()
+        self._startup_sync_pending = False
         self._pending_read = False
-        self._pending_cancellations.clear()
-        self.cancel_batch_start()
+        # Closing waits for Batch submission to be acknowledged and journalled.
+        # Keep cancellations explicitly requested before close in their queue.
         self.cancel_immediate()
 
-    def _execute(self, fn, *args, operation, on_result=None, cancellable=False):
+    def _execute(self, fn, *args, operation, on_result=None, cancellable=False, syncing=False):
         immediate = operation == "immediate"
-        if self.bridge.shutdownRequested or self._control_busy:
+        if (self.bridge.shutdownRequested and operation != "cancel") or self._control_busy:
             return
         if self._immediate_worker is not None and operation in {"immediate", "start"}:
             return
+        if operation == "start" and hasattr(self.bridge.service, "analysis_workspace_view"):
+            self._view["selected_run_id"] = ""
+            self._view_revision += 1
         if not immediate:
             self._control_busy = True
         self.loading = True
         self.operation = "immediate" if self._immediate_worker is not None else operation
-        self.error = ""
+        if operation != "refresh" or syncing:
+            self.error = ""
         self.loadingChanged.emit()
         self.operationChanged.emit()
         self.errorChanged.emit()
-        worker = TaskWorker(fn, *args, with_cancel=cancellable)
+        kwargs = {}
+        if hasattr(self.bridge.service, "analysis_workspace_view"):
+            options = self._view_options()
+            kwargs = options if operation == "refresh" else {"view": options}
+        worker = TaskWorker(fn, *args, with_cancel=cancellable, **kwargs)
         if operation == "immediate":
             self._immediate_worker = worker
         elif operation == "start":
             self._batch_start_worker = worker
         self.bridge._workers.add(worker)
+        self.bridge.busyChanged.emit()
         worker.signals.result.connect(on_result or self._loaded)
-        worker.signals.error.connect(self._failed)
+
+        def failed(message, trace):
+            self._failed(message, trace)
+            if syncing:
+                # A failed sync can still have committed partial progress.
+                self._pending_read = True
+
+        worker.signals.error.connect(failed)
 
         def finished():
             self.bridge._workers.discard(worker)
@@ -138,12 +164,23 @@ class AnalysisController(QObject):
             self.loadingChanged.emit()
             self.operationChanged.emit()
             pending, self._pending_read = self._pending_read, False
-            if not cancel_run_id and not self._control_busy and self._pending_cancellations:
-                cancel_run_id = self._pending_cancellations.pop(0)
-            if cancel_run_id and not self.bridge.shutdownRequested:
-                QTimer.singleShot(0, lambda: self.cancel(cancel_run_id))
-            if pending and not self.bridge.shutdownRequested:
-                QTimer.singleShot(0, lambda: self.refresh(sync=False))
+            if self._control_busy:
+                self._pending_read = self._pending_read or pending
+                if cancel_run_id and cancel_run_id not in self._pending_cancellations:
+                    self._pending_cancellations.append(cancel_run_id)
+            else:
+                if not cancel_run_id and self._pending_cancellations:
+                    cancel_run_id = self._pending_cancellations.pop(0)
+                if cancel_run_id:
+                    # Register the next worker before checking shutdown readiness.
+                    self.cancel(cancel_run_id)
+                    self._pending_read = self._pending_read or pending
+                elif not self.bridge.shutdownRequested:
+                    if pending:
+                        QTimer.singleShot(0, lambda: self.refresh(sync=False))
+                    elif self._startup_sync_pending:
+                        self._startup_sync_pending = False
+                        QTimer.singleShot(0, self.refresh)
             self.bridge._check_shutdown()
 
         worker.signals.finished.connect(finished)
@@ -158,7 +195,7 @@ class AnalysisController(QObject):
         worker = self._batch_start_worker
         if worker is not None and worker.cancel_requested:
             run_id = workspace.get("started_run_id")
-            run = next((run for run in workspace.get("runs", []) if run.get("id") == run_id), None)
+            run = next((run for run in self._observed_runs(workspace) if run.get("id") == run_id), None)
             if run and run.get("can_cancel"):
                 self._cancel_started_run_id = run_id
         self._loaded(workspace)
@@ -166,13 +203,13 @@ class AnalysisController(QObject):
     def _cancel_loaded(self, workspace, run_id):
         already_cancelling = any(
             run.get("id") == run_id and run.get("status") == "cancelling"
-            for run in self.workspace.get("runs", [])
+            for run in self._observed_runs(self.workspace)
         )
         self._loaded(workspace)
         if (
             not already_cancelling
             and not self.bridge.shutdownRequested
-            and not any(run.get("id") == run_id for run in workspace.get("runs", []))
+            and not any(run.get("id") == run_id for run in self._observed_runs(workspace))
         ):
             self.bridge.toastRequested.emit(
                 "Batch annulé",
@@ -205,8 +242,11 @@ class AnalysisController(QObject):
     def _loaded(self, workspace):
         if self.bridge.shutdownRequested:
             return
-        previous = {str(run["id"]): run for run in self.workspace.get("runs", [])}
-        remaining_ids = {str(run["id"]) for run in workspace.get("runs", [])}
+        workspace = self._accept_view(workspace)
+        if workspace is None:
+            return
+        previous = {str(run["id"]): run for run in self._observed_runs(self.workspace)}
+        remaining_ids = {str(run["id"]) for run in self._observed_runs(workspace)}
         for run_id, old in previous.items():
             if run_id not in remaining_ids and old.get("status") == "cancelling":
                 self.bridge.toastRequested.emit(
@@ -218,11 +258,11 @@ class AnalysisController(QObject):
         if workspace != self.workspace:
             self.workspace = workspace
             self.changed.emit()
-        if any(run.get("is_active") for run in workspace.get("runs", [])):
-            self._timer.start()
-        else:
-            self._timer.stop()
-        for run in workspace.get("runs", []):
+        if self._candidate_notify:
+            self._candidate_notify = False
+            self.candidatesChanged.emit()
+        self._update_timer()
+        for run in self._observed_runs(workspace):
             old = previous.get(str(run["id"]))
             if (
                 old
@@ -230,6 +270,12 @@ class AnalysisController(QObject):
                 and not run.get("is_active")
                 and run.get("status") in {"completed", "partial", "failed", "cancelled"}
             ):
+                if run.get("status") == "cancelled":
+                    self.bridge.toastRequested.emit(
+                        "Batch annulé", "Les offres restantes sont à nouveau disponibles.", "info",
+                    )
+                    self.bridge._refresh_workflow()
+                    continue
                 count = int(run.get("analyzed", 0))
                 failed = int(run.get("failed", 0))
                 message = f"{count} analyses enregistrées."
@@ -244,6 +290,15 @@ class AnalysisController(QObject):
             return
         self.error = message
         self.errorChanged.emit()
-        # Keep checking existing runs after transient connectivity failures.
-        if any(run.get("is_active") for run in self.workspace.get("runs", [])):
+        self._update_timer()
+
+    def _update_timer(self):
+        active = self.workspace.get(
+            "polling_run_count",
+            any(run.get("is_active") for run in self.workspace.get("runs", [])),
+        )
+        if self.bridge.shutdownRequested or not active:
+            self._timer.stop()
+        elif not self._timer.isActive():
+            # Passive reads and transient errors must preserve the next deadline.
             self._timer.start()

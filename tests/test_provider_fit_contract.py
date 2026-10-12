@@ -17,6 +17,7 @@ from smartapply.llm.fit_context import (
 )
 from smartapply.llm.fit_request import check_request_budget, complete_fit
 from smartapply.llm.provider import LLMValidationError
+from smartapply.llm.schemas import JobFitDecisionEvaluation
 from smartapply.offers import build_analyzer_input
 from smartapply.pipeline.process.analysis_checkpoint import (
     extraction_key,
@@ -55,6 +56,28 @@ def test_provider_change_preserves_fit_inputs_contract_and_policy(monkeypatch, t
     for key in ("user_template", "schema", "policy", "candidate_facts"):
         assert first[key] == second[key]
     assert first["context_fingerprint"] != second["context_fingerprint"]
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "model", "reasoning"),
+    [("openai", "gpt-5.4-mini", "medium"), ("anthropic", "claude-haiku-4-5", "auto")],
+)
+def test_fit_request_has_no_admissibility_contract(
+    monkeypatch, tmp_path, provider_name, model, reasoning
+):
+    configure_calls(
+        monkeypatch,
+        tmp_path,
+        job_fit_assessment=_fit_route(provider_name, model, reasoning),
+    )
+    context = build_fit_context(get_profile(), model, provider=provider_name)
+    schema_text = str(context["schema"])
+    prompt_text = context["system_prompt"] + build_fit_user(context, offer())
+    for removed in ("admissibility", "mandatory_conditions", "candidate_preferences"):
+        assert removed not in schema_text
+        assert removed not in prompt_text
+    assert "admissibilité" not in prompt_text.casefold()
+    assert "admissibility" not in JobFitDecisionEvaluation.model_fields
 
 
 def test_pending_context_keeps_its_route_when_json_changes(monkeypatch, tmp_path):
@@ -172,9 +195,16 @@ def test_extraction_checkpoints_remain_isolated_by_provider(isolated_db):
     with session_scope() as session:
         job = session.get(Job, job_id)
         source = build_analyzer_input(job)
-        openai_key = extraction_key(source, "shared-model-alias", provider="openai")
-        claude_key = extraction_key(source, "shared-model-alias", provider="anthropic")
+        openai_key = extraction_key(
+            source, "shared-model-alias", max_completion_tokens=6000, provider="openai"
+        )
+        claude_key = extraction_key(
+            source, "shared-model-alias", max_completion_tokens=6000, provider="anthropic"
+        )
         assert claude_key != openai_key
+        assert openai_key != extraction_key(
+            source, "shared-model-alias", max_completion_tokens=16000, provider="openai"
+        )
         save_extraction(session, job, openai_key, extraction_offer())
         assert load_extraction(session, job, openai_key) is not None
         assert load_extraction(session, job, claude_key) is None

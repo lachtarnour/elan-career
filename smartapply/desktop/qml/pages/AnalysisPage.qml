@@ -14,7 +14,23 @@ Item {
     // Analysis owns its list and run history. Passive refreshes never replace
     // the offer list, selected dossier or note drafts in the Offers workspace.
     readonly property var workspace: AppBridge.analysisWorkspace || ({})
-    readonly property var candidates: workspace.candidates || []
+    readonly property bool desktopView: Boolean(workspace.desktop_view)
+    readonly property var candidates: {
+        if (!desktopView) return workspace.candidates || []
+        var rows = AppBridge.analysisCandidates || []
+        return rows.slice()
+    }
+    readonly property var candidateIds: desktopView ? (workspace.candidate_ids || [])
+        : candidates.map(function(row) { return Number(row.id) })
+    readonly property var matchingCandidateIds: desktopView ? (workspace.matching_candidate_ids || [])
+        : filteredCandidates.map(function(row) { return Number(row.id) })
+    readonly property int candidatePage: Math.max(1, Number(workspace.candidate_page || 1))
+    readonly property int candidatePageSize: Math.max(1, Number(workspace.candidate_page_size || 100))
+    readonly property int candidateTotal: desktopView && !viewingLot ? Number(workspace.candidate_count || 0)
+        : filteredCandidates.length
+    readonly property int historyPage: Math.max(1, Number(workspace.history_page || 1))
+    readonly property int historyPageSize: Math.max(1, Number(workspace.history_page_size || 20))
+    readonly property int historyTotal: desktopView ? Number(workspace.history_total_count || 0) : runs.length
     readonly property var runs: workspace.runs || []
     readonly property bool loading: AppBridge.analysisWorkspaceLoading
     readonly property string operation: AppBridge.analysisWorkspaceOperation || ""
@@ -23,6 +39,10 @@ Item {
     readonly property string error: AppBridge.analysisWorkspaceError || ""
     readonly property bool controlsEnabled: (!loading || immediateRunning)
         && !AppBridge.shutdownRequested && !AppBridge.analysisArchiving
+    readonly property var busyJobIdsSnapshot: {
+        var ids = AppBridge.busyJobIds || []
+        return ids.slice()
+    }
     property string offerView: "available"
     readonly property bool viewingLot: offerView === "lot" && Boolean(selectedRun.id)
     readonly property var listedOffers: viewingLot ? (selectedRun.items || []) : candidates
@@ -31,16 +51,17 @@ Item {
     property string selectedRunId: ""
     property int listRevision: 0
     readonly property var filteredCandidates: {
+        if (desktopView && !viewingLot) return candidates
         var needle = query.trim().toLowerCase()
         return needle ? listedOffers.filter(function(row) {
             return [row.title, row.company, row.location, row.id, row.state_label]
                 .join(" ").toLowerCase().indexOf(needle) >= 0
         }) : listedOffers
     }
-    readonly property var selectedIds: candidates.filter(function(row) {
-        return Boolean(selectedOffers[String(row.id)])
-    }).map(function(row) { return Number(row.id) })
-    readonly property var reservedOfferIds: runs.filter(function(run) {
+    readonly property var selectedIds: candidateIds.filter(function(jobId) {
+        return Boolean(selectedOffers[String(jobId)])
+    }).map(Number)
+    readonly property var reservedOfferIds: desktopView ? (workspace.reserved_job_ids || []) : runs.filter(function(run) {
         return run.is_active || run.can_cancel || run.status === "cancelling"
     }).reduce(function(ids, run) {
         return ids.concat((run.items || []).map(function(row) { return Number(row.id) }))
@@ -48,7 +69,7 @@ Item {
 
     function canArchive(jobId) {
         return jobId > 0 && controlsEnabled
-            && (AppBridge.busyJobIds || []).indexOf(jobId) < 0
+            && root.busyJobIdsSnapshot.indexOf(jobId) < 0
             && reservedOfferIds.indexOf(jobId) < 0
     }
 
@@ -58,10 +79,54 @@ Item {
         archiveConfirm.open()
     }
     readonly property var selectedRun: {
+        if (desktopView) return workspace.selected_run || ({})
         var target = selectedRunId || String(workspace.active_run_id || "")
         for (var i = 0; i < runs.length; ++i)
             if (String(runs[i].id) === target) return runs[i]
         return runs.length > 0 ? runs[0] : ({})
+    }
+    property var historyOptions: []
+    property string historyOptionsSignature: ""
+
+    function updateHistoryOptions() {
+        var sources = (runs || []).map(function(run) {
+            return {id: String(run.id), sequence: Number(run.sequence || 1),
+                created_at: String(run.created_at || "")}
+        })
+        if (desktopView && selectedRun && selectedRun.id && !sources.some(function(source) {
+                return source.id === String(root.selectedRun.id)
+            })) sources.unshift({id: String(selectedRun.id), sequence: Number(selectedRun.sequence || 1),
+                created_at: String(selectedRun.created_at || "")})
+        var signature = JSON.stringify(sources)
+        if (signature === historyOptionsSignature) return
+        historyOptionsSignature = signature
+        historyOptions = sources.map(function(run) {
+            return {value: run.id, label: root.historyLabel(run)}
+        })
+    }
+
+    function loadCandidatePage(page) {
+        if (!desktopView) return
+        searchDebounce.stop()
+        listRevision += 1
+        offerTable.contentY = 0
+        AppBridge.setAnalysisCandidatePage(page)
+    }
+
+    function sortCandidates(key, ascending) {
+        if (!desktopView || viewingLot) return
+        if (searchDebounce.running) {
+            searchDebounce.stop()
+            AppBridge.setAnalysisCandidateQuery(query)
+        }
+        listRevision += 1
+        offerTable.contentY = 0
+        AppBridge.setAnalysisCandidateSort(key, ascending)
+    }
+
+    function chooseRun(runId) {
+        selectedRunId = runId
+        if (desktopView) AppBridge.selectAnalysisRun(runId)
     }
 
     function setSelected(jobId, checked) {
@@ -74,9 +139,9 @@ Item {
     function toggleVisible(checked) {
         var next = Object.assign({}, selectedOffers)
         if (viewingLot) return
-        filteredCandidates.forEach(function(row) {
-            if (checked) next[String(row.id)] = true
-            else delete next[String(row.id)]
+        matchingCandidateIds.forEach(function(jobId) {
+            if (checked) next[String(jobId)] = true
+            else delete next[String(jobId)]
         })
         selectedOffers = next
     }
@@ -94,19 +159,24 @@ Item {
     }
 
     function historyLabel(run) {
-        var created = new Date(String(run.created_at || ""))
+        var stamp = String(run.created_at || "")
+        if (!stamp) return "Analyse n°" + Number(run.sequence || 1)
+        var created = new Date(stamp)
         var date = isNaN(created.getTime()) ? "" : " · " + Qt.formatDateTime(created, "dd/MM HH:mm")
         return "Analyse n°" + Number(run.sequence || 1) + date
     }
 
     function preserveCandidateState() {
+        if (!offerTable) return
         var previousY = offerTable.contentY
         var revision = listRevision
         var next = ({})
-        candidates.forEach(function(row) {
-            if (selectedOffers[String(row.id)]) next[String(row.id)] = true
+        var ids = candidateIds || []
+        ids.forEach(function(jobId) {
+            if (selectedOffers[String(jobId)]) next[String(jobId)] = true
         })
-        selectedOffers = next
+        if (Object.keys(next).length !== Object.keys(selectedOffers).length)
+            selectedOffers = next
         Qt.callLater(function() {
             if (revision === listRevision)
                 offerTable.contentY = Math.min(previousY,
@@ -119,14 +189,27 @@ Item {
             AppBridge.selectAnalysisOffer(Number(offerTable.sortedOffers[0].id))
     }
 
-    Component.onCompleted: openFirstOffer()
+    Component.onCompleted: {
+        updateHistoryOptions()
+        openFirstOffer()
+    }
+    onRunsChanged: updateHistoryOptions()
+    onSelectedRunChanged: updateHistoryOptions()
     onCandidatesChanged: {
         preserveCandidateState()
         Qt.callLater(openFirstOffer)
     }
+    onCandidateIdsChanged: preserveCandidateState()
     onQueryChanged: {
         listRevision += 1
         offerTable.contentY = 0
+        if (desktopView && !viewingLot) searchDebounce.restart()
+    }
+
+    Timer {
+        id: searchDebounce
+        interval: 200
+        onTriggered: AppBridge.setAnalysisCandidateQuery(root.query)
     }
     onOfferViewChanged: {
         listRevision += 1
@@ -419,10 +502,57 @@ Item {
                     loading: root.loading
                     focusedOfferId: Number(AppBridge.analysisOfferId || 0)
                     searchActive: Boolean(root.query)
+                    serverSorted: root.desktopView && !root.viewingLot
+                    matchingOfferIds: root.desktopView && !root.viewingLot ? root.matchingCandidateIds : null
+                    onViewSortRequested: function(key, ascending) { root.sortCandidates(key, ascending) }
                     onSelectionToggled: function(jobId, checked) { root.setSelected(jobId, checked) }
                     onVisibleSelectionToggled: function(checked) { root.toggleVisible(checked) }
                     onOfferOpened: function(jobId, status) {
                         AppBridge.selectAnalysisOffer(jobId)
+                    }
+                }
+
+                RowLayout {
+                    objectName: "analysisCandidatePagination"
+                    visible: root.desktopView && !root.viewingLot
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: visible ? 34 : 0
+                    spacing: 8
+                    Text {
+                        Layout.fillWidth: true
+                        text: root.candidateTotal > 0
+                            ? ((root.candidatePage - 1) * root.candidatePageSize + 1) + "–"
+                                + Math.min(root.candidateTotal, root.candidatePage * root.candidatePageSize)
+                                + " / " + root.candidateTotal : "0 offre"
+                        color: Theme.inkMuted
+                        font.pixelSize: 11
+                    }
+                    AppButton {
+                        objectName: "analysisPreviousPageAction"
+                        text: "‹"
+                        Accessible.name: "Page précédente des offres à analyser"
+                        refined: true
+                        implicitWidth: 32
+                        implicitHeight: 30
+                        enabled: root.candidatePage > 1 && !root.loading && !searchDebounce.running
+                        onClicked: root.loadCandidatePage(root.candidatePage - 1)
+                    }
+                    Text {
+                        text: root.candidatePage + " / " + Math.max(1,
+                            Math.ceil(root.candidateTotal / root.candidatePageSize))
+                        color: Theme.inkSoft
+                        font.pixelSize: 11
+                    }
+                    AppButton {
+                        objectName: "analysisNextPageAction"
+                        text: "›"
+                        Accessible.name: "Page suivante des offres à analyser"
+                        refined: true
+                        implicitWidth: 32
+                        implicitHeight: 30
+                        enabled: root.candidatePage * root.candidatePageSize < root.candidateTotal
+                            && !root.loading && !searchDebounce.running
+                        onClicked: root.loadCandidatePage(root.candidatePage + 1)
                     }
                 }
 
@@ -448,7 +578,7 @@ Item {
                                 : !root.viewingLot && root.selectedIds.length > 0
                                     ? root.selectedIds.length + (root.selectedIds.length === 1
                                         ? " offre sélectionnée" : " offres sélectionnées")
-                                    : root.filteredCandidates.length + (root.filteredCandidates.length === 1
+                                    : root.candidateTotal + (root.candidateTotal === 1
                                         ? " offre affichée" : " offres affichées")
                             color: root.selectedIds.length > 0 || root.immediateRunning
                                 ? Theme.ink : Theme.inkMuted
@@ -538,16 +668,47 @@ Item {
                         strokeColor: "transparent"
                         run: root.selectedRun
                         activeRunCount: Number(root.workspace.active_run_count || 0)
-                        historyOptions: root.runs.map(function(run) {
-                            return {value: String(run.id), label: root.historyLabel(run)}
-                        })
+                        historyOptions: root.historyOptions
                         controlsEnabled: root.controlsEnabled
-                        onRunSelected: function(runId) { root.selectedRunId = runId }
+                        onRunSelected: function(runId) { root.chooseRun(runId) }
                         onRetryRequested: function(runId) { AppBridge.retryAnalysisBatch(runId) }
                         onCancelRequested: function(runId) {
                             cancelDialog.runId = runId
                             cancelDialog.blocked = root.selectedRun.status === "blocked"
                             cancelDialog.open()
+                        }
+                    }
+                    RowLayout {
+                        objectName: "analysisHistoryPagination"
+                        visible: root.desktopView
+                        Layout.fillWidth: true
+                        Text {
+                            Layout.fillWidth: true
+                            text: root.historyTotal + " analyses · page " + root.historyPage
+                                + " / " + Math.max(1, Math.ceil(root.historyTotal / root.historyPageSize))
+                            color: Theme.inkMuted
+                            font.pixelSize: 11
+                        }
+                        AppButton {
+                            objectName: "analysisPreviousHistoryPageAction"
+                            text: "‹"
+                            Accessible.name: "Page précédente de l’historique des analyses"
+                            refined: true
+                            implicitWidth: 32
+                            implicitHeight: 30
+                            enabled: root.historyPage > 1 && !root.loading
+                            onClicked: AppBridge.setAnalysisHistoryPage(root.historyPage - 1)
+                        }
+                        AppButton {
+                            objectName: "analysisNextHistoryPageAction"
+                            text: "›"
+                            Accessible.name: "Page suivante de l’historique des analyses"
+                            refined: true
+                            implicitWidth: 32
+                            implicitHeight: 30
+                            enabled: root.historyPage * root.historyPageSize < root.historyTotal
+                                && !root.loading
+                            onClicked: AppBridge.setAnalysisHistoryPage(root.historyPage + 1)
                         }
                     }
                 }

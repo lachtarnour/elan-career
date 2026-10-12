@@ -139,9 +139,10 @@ def test_frozen_request_without_effort_does_not_invent_one():
         max_completion_tokens=6000,
     )
     assert "effort" not in build_message_params(body)["output_config"]
-    assert request_cache_extra(Answer, 0.2, None) == {
+    assert request_cache_extra(Answer, 0.2, None, 6000) == {
         "temperature": 0.2,
         "schema": Answer.model_json_schema(),
+        "max_completion_tokens": 6000,
     }
 
 

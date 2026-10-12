@@ -71,7 +71,7 @@ def build_batch_request(
     provider: str = "openai",
     effort: str | None = None,
 ) -> BatchRequest:
-    """Keep prompts, structured output and exact-cache identity unchanged."""
+    """Build a request with the same exact-cache identity as immediate calls."""
     if not custom_id or not model or max_completion_tokens <= 0:
         raise ValueError("Batch requests need an ID, a model and a positive token limit")
     body = request_body(
@@ -90,7 +90,7 @@ def build_batch_request(
         system=system,
         user=user,
         schema_name=schema.__name__,
-        extra=request_cache_extra(schema, temperature, effort),
+        extra=request_cache_extra(schema, temperature, effort, max_completion_tokens),
         provider=provider,
     )
     return BatchRequest(custom_id=custom_id, body=body, cache_key=cache_key)

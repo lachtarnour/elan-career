@@ -448,7 +448,7 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(
     with session_scope() as session:
         job = session.get(Job, job_id)
         assert job.analyzed_at is not None
-        assert job.analysis.fit_score == 0.88
+        assert job.analysis.fit_score == 0.84
         assert job.analysis.required_skills == ["Python"]
         assert (
             job.analysis.raw_response["supporting_excerpts"] == offer_result().supporting_excerpts
@@ -459,7 +459,7 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(
     from smartapply.pipeline.apply.cv_writer import CvWriterMixin
 
     _, restored = CvWriterMixin()._load_job_analysis(job_id)
-    assert restored.fit_score == 0.88
+    assert restored.fit_score == 0.84
     assert restored.supporting_excerpts == offer_result().supporting_excerpts
     assert restored.offer_risks == offer_result().offer_risks
     # Cache retention cannot erase the source of a completed extraction.

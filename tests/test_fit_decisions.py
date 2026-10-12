@@ -97,11 +97,11 @@ def inputs():
     [
         (("strong_fit", "strong_fit", "credible_fit"), 0.95),
         (("strong_fit", "strong_fit", "partial_core_fit"), 0.90),
-        (("weak_support", "strong_fit", "strong_fit"), 0.63),
-        (("strong_fit", "very_low_support", "strong_fit"), 0.70),
+        (("weak_support", "strong_fit", "strong_fit"), 0.74),
+        (("strong_fit", "very_low_support", "strong_fit"), 0.55),
         (("strong_fit", "strong_fit", "strong_fit"), 1.0),
         (("very_low_support", "very_low_support", "very_low_support"), 0),
-        (("strong_fit", "credible_fit", "credible_fit"), 0.88),
+        (("strong_fit", "credible_fit", "credible_fit"), 0.84),
     ],
 )
 def test_single_decision_table_and_one_rounding(states, score):
@@ -126,7 +126,7 @@ def test_all_125_combinations_use_only_the_ordinal_weighted_index(levels):
         "strong_fit",
     )
     expected = (
-        sum(Decimal(weight * level) for weight, level in zip((50, 30, 20), levels, strict=True))
+        sum(Decimal(weight * level) for weight, level in zip((35, 45, 20), levels, strict=True))
         / 400
     ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     score, diagnostic = calculate_fit_decisions(tuple(states[level] for level in levels))
@@ -147,14 +147,8 @@ def test_all_125_combinations_use_only_the_ordinal_weighted_index(levels):
         },
         {"issues": [{"code": "confirmed_constraint_conflict"}, {"code": "substantial_core_gap"}]},
         {"fit_score": 0.01, "offer_interpretations": [{"source_quote": "invented"}]},
-        {"admissibility": None, "reliability": None},
-        {"admissibility": {"mandatory_conditions": 7}, "reliability": "invalid"},
-        {
-            "admissibility": {
-                dimension: {"status": "incompatible", "findings": []}
-                for dimension in ("mandatory_conditions", "candidate_preferences")
-            },
-        },
+        {"reliability": None},
+        {"reliability": "invalid"},
     ],
 )
 def test_annotations_cannot_change_score_or_add_caps(annotations):
@@ -200,7 +194,6 @@ def test_future_inspection_exception_or_mutation_never_changes_decision(monkeypa
     "suffix",
     [
         ',"issues":[{"text":"cut',
-        ',"admissibility":',
         ',"reliability":',
         ',"offer_interpre',
         ',"iss',
@@ -301,9 +294,9 @@ def test_source_changes_fit_identity_without_changing_global_candidate_context()
 
 
 @pytest.mark.parametrize("path", ["cache", "batch"])
-@pytest.mark.parametrize("admissibility", ["compatible", "unknown", "incompatible"])
+@pytest.mark.parametrize("reliability", [None, 42, "invalid"])
 def test_immediate_batch_and_cache_share_source_decisions_and_nonblocking_annotations(
-    isolated_db, path, admissibility
+    isolated_db, path, reliability
 ):
     job_id = seed_jobs()[0]
     context = inputs()[0]
@@ -329,11 +322,7 @@ def test_immediate_batch_and_cache_share_source_decisions_and_nonblocking_annota
         request = item_request(item, run, "evaluation", 6000)
         raw = {
             **decision_response(),
-            "admissibility": {
-                dimension: {"status": admissibility, "findings": []}
-                for dimension in ("mandatory_conditions", "candidate_preferences")
-            },
-            "reliability": 42,
+            "reliability": reliability,
             "issues": [{"invalid": True}],
         }
         content = json.dumps(raw)[:-1] + ',"trace'
@@ -367,7 +356,7 @@ def test_immediate_batch_and_cache_share_source_decisions_and_nonblocking_annota
         saved = session.get(Job, job_id).analysis
         assert saved.fit_score == immediate.fit_score == 0.95
         assert saved.fit_diagnostics["diagnostic_checks"]["warnings"]
-        assert saved.fit_diagnostics["evaluation"]["admissibility"] == raw["admissibility"]
+        assert saved.fit_diagnostics["evaluation"]["reliability"] == raw["reliability"]
         assert saved.fit_diagnostics["offer_source"] == diagnostic["offer_source"]
         assert saved.fit_diagnostics["request_user"] == diagnostic["request_user"]
         assert (
@@ -620,6 +609,7 @@ def test_historical_extraction_readers_and_source_input_remain_identical():
             "qualification",
             "Bac + 5 obligatoire, formation initiale de trois mois, contrat initial de cinq ans",
         ),
+        ("qualification_skill", "Bac + 5 obligatoire"),
     ],
 )
 def test_source_examples_check_inputs_rules_simulated_diagnostics_and_preserved_facts(case, body):
@@ -628,6 +618,8 @@ def test_source_examples_check_inputs_rules_simulated_diagnostics_and_preserved_
         facts.required_skills = ["Kubernetes"]
     elif case == "alternative":
         facts.required_skills = ["Python", "FastAPI", "TypeScript", "Node.js"]
+    elif case == "qualification_skill":
+        facts.required_skills = [body]
     else:
         facts.constraints = [body]
     original = facts.model_dump(mode="json")
@@ -669,27 +661,19 @@ def test_source_examples_check_inputs_rules_simulated_diagnostics_and_preserved_
             }
         ]
     else:
+        qualification_ref = (
+            "required_skills[0]" if case == "qualification_skill" else "constraints[0]"
+        )
         data["dimensions"]["essentials"]["findings"] = [
             finding
             for finding in data["dimensions"]["essentials"]["findings"]
-            if "constraints[0]" not in finding["offer_refs"]
+            if qualification_ref not in finding["offer_refs"]
         ]
-        data["admissibility"]["mandatory_conditions"] = {
-            "status": "unknown",
-            "findings": [
-                {
-                    "offer_refs": ["constraints[0]"],
-                    "candidate_refs": [],
-                    "status": "unknown",
-                    "text": "Qualification obligatoire à confirmer",
-                }
-            ],
-        }
         data["issues"] = [
             {
                 "axis": "context",
                 "origin": "offer_information",
-                "offer_refs": ["constraints[0]"],
+                "offer_refs": [qualification_ref],
                 "candidate_refs": [],
                 "text": "Qualification obligatoire à confirmer",
             }
@@ -704,11 +688,7 @@ def test_source_examples_check_inputs_rules_simulated_diagnostics_and_preserved_
     assert diagnostic["offer_source"]["offer_body"] == body
     assert diagnostic["evaluation"] == data
     assert diagnostic["offer_facts"] == facts.model_dump(mode="json") == original
-    assert public.fit_score == 0.88
-    if case == "qualification":
-        assert (
-            diagnostic["evaluation"]["admissibility"]["mandatory_conditions"]["status"] == "unknown"
-        )
+    assert public.fit_score == 0.84
     assert not any("not covered" in text for text in diagnostic["diagnostic_checks"]["warnings"])
     # A simulated diagnostic proves wiring and isolation, not future LLM judgement.
 
@@ -727,5 +707,5 @@ def test_invalid_source_citation_is_only_an_observation():
         }
     ]
     public, diagnostic = evaluate_fit(data, context, facts, extraction_provenance=provenance)
-    assert public.fit_score == 0.88
+    assert public.fit_score == 0.84
     assert any("quote not found" in text for text in diagnostic["diagnostic_checks"]["warnings"])

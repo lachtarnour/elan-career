@@ -20,6 +20,7 @@ from typing import Any, Protocol
 from smartapply.filtering import HardRejectResult
 from smartapply.filtering.types import HasJobFields
 from smartapply.maintenance._sqlite_safety import (
+    IngestRevisionGuard,
     canonical_json,
     file_sha256,
     fingerprint,
@@ -250,10 +251,11 @@ def apply_legacy_filter_migration(
         try:
             connection.execute("BEGIN IMMEDIATE")
             source_integrity = require_integrity(connection, label="source")
-            require_no_table_triggers(connection, tables=("jobs", "job_scores"))
+            revision_guard = require_no_table_triggers(connection, tables=("jobs", "job_scores"))
             records, results = _revalidate(plan, connection, rejector)
-            before = _immutable_table_digests(connection, plan)
+            before = _immutable_table_digests(connection, plan, revision_guard)
             backup_integrity = online_backup(database, backup)
+            changes_before = connection.total_changes
             for change in plan.changes:
                 components = _migrated_components(
                     records[change.job_id], results[change.job_id], change,
@@ -261,8 +263,17 @@ def apply_legacy_filter_migration(
                 )
                 _update_row(connection, change, components, applied_at=applied_at)
             _verify_updated_rows(plan, connection, records, results, applied_at)
-            if _immutable_table_digests(connection, plan) != before:
+            if _immutable_table_digests(connection, plan, revision_guard) != before:
                 raise LegacyFilterMigrationError("An unauthorized database value changed")
+            revision_guard.verify(
+                connection, job_updates=sum(change.archive for change in plan.changes),
+            )
+            job_updates = sum(change.archive for change in plan.changes)
+            expected_changes = (
+                len(plan.changes) + job_updates + revision_guard.additional_writes(job_updates)
+            )
+            if connection.total_changes - changes_before != expected_changes:
+                raise LegacyFilterMigrationError("An unexpected number of database rows changed")
             if connection.execute("PRAGMA foreign_key_check").fetchall():
                 raise LegacyFilterMigrationError("Foreign-key verification failed")
             post_integrity = require_integrity(connection, label="updated database before commit")
@@ -522,6 +533,7 @@ def _verify_updated_rows(
 
 def _immutable_table_digests(
     connection: sqlite3.Connection, plan: LegacyFilterMigrationPlan,
+    revision_guard: IngestRevisionGuard,
 ) -> dict[str, str]:
     """Compare all values, omitting only exactly authorized fields and rows."""
     changed = set(plan.change_ids)
@@ -540,6 +552,8 @@ def _immutable_table_digests(
         digest.update(canonical_json([tuple(row) for row in columns]).encode("utf-8"))
         for row in connection.execute(f"SELECT * FROM {quoted} ORDER BY {ordering}"):
             values = dict(row)
+            if table == "app_settings":
+                values = revision_guard.immutable_setting(values)
             if table == "job_scores" and values.get("job_id") in changed:
                 values.pop("components", None)
             if table == "jobs" and values.get("id") in archived:

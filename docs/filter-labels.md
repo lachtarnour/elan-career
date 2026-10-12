@@ -56,3 +56,24 @@ critère ; son rejet déterministe éventuel est lu dans l'historique enregistr�
 La visibilité du couple ne décide pas le doublon et ne débloque pas son analyse.
 
 La complétion des décisions applique uniquement les règles locales.
+
+## Raisons d’archivage
+
+Le détail affiche les motifs enregistrés dans `rejection_reasons`, ou les codes
+des contrôles déterministes ayant réellement bloqué l’offre. Les notes positives
+(`role_title_veto`, par exemple), les conflits non résolus et le contexte de
+collecte ne constituent pas des raisons d’archivage. Les anciennes listes mixtes
+de diagnostics sont utilisables uniquement si une décision de rejet est enregistrée.
+
+Le regroupement d’un doublon qui récupère un dossier archivé conserve la cause
+d’origine dans `archive_inheritance`, avec l’annonce source, le dossier et la
+date d’archivage source. Cette provenance ne modifie pas le filtre de la nouvelle
+annonce. Le détail explique le regroupement et le motif d’origine. La restauration
+retire cet héritage actif et le conserve dans son audit ; un nouvel archivage
+explicite remplace la cause active.
+
+Pour un ancien regroupement sans provenance, le détail peut retrouver la cause
+sur une unique annonce confirmée du groupe correspondant à l’URL d’envoi du dossier
+et au même événement d’archivage (horodatages dans la seconde).
+Cette lecture ne réécrit aucune donnée. Sans preuve suffisante, le détail indique
+**Raison d’archivage non enregistrée**.

@@ -10,10 +10,10 @@ from smartapply.config import get_llm_settings
 from smartapply.cv.adapter import CvAdapter
 from smartapply.cv.assembly import assemble_cv
 from smartapply.cv.certificate_selection import certificate_policy_errors
-from smartapply.cv.project_selection import validate_project_selection
+from smartapply.cv.project_selection import repair_project_evidence, validate_project_selection
 from smartapply.cv.role_contracts import apply_contract
 from smartapply.cv.validator import CvValidator
-from smartapply.llm import CVPersonalization, CVSelection, JobAnalysis, LLMError, MockLLMProvider
+from smartapply.llm import CVPersonalization, CVSelection, JobAnalysis, MockLLMProvider
 from smartapply.llm.openai_provider import _to_strict_schema
 from smartapply.profile import Project, get_profile
 from tests.llm_config_helpers import isolated_catalogue
@@ -234,6 +234,67 @@ class SequenceProvider(MockLLMProvider):
 
 
 @pytest.mark.parametrize(
+    ("skills", "task", "quote", "expected"),
+    [
+        (["Python", "machine learning", "bases de données", "Git", "Docker", "Google Cloud",
+          "semantic data modelling (données sémantiques)"], "",
+         "Python, machine learning, bases de données, Git, Docker, Google Cloud, "
+         "semantic data modelling (données sémantiques)", "Python"),
+        (["LLM", "RAG", "function calling"], "", "LLM, RAG, function calling", "LLM"),
+        ([], "Ensure AI models and recovery agents integrate with external services",
+         "Ensure AI models and recovery agents integrate with external services.",
+         "Ensure AI models and recovery agents integrate with external services"),
+        (["Python", "C/C++", "deep learning", "architecture logicielle"], "",
+         "Python, C/C++, deep learning, architecture logicielle", "Python"),
+    ],
+)
+def test_final_correction_repairs_verified_citations_and_preserves_native_responses(
+    inputs, skills, task, quote, expected,
+):
+    profile, analysis = inputs
+    analysis.required_skills = skills
+    if task:
+        analysis.main_tasks.append(task)
+    first = draft(["main1", "main2", "main3"])
+    first.project_selection_reasons[0].offer_evidence = "Invented offer demand"
+    final = draft(["main3", "main2", "main1"])
+    final.project_selection_reasons[0].offer_evidence = quote
+    before = final.model_dump()
+    provider = SequenceProvider([first, final])
+    cv = CvAdapter(profile, provider).adapt(
+        analysis, job_title="AI Engineer", job_company="Example"
+    )
+    assert [call["purpose"] for call in provider.calls] == [
+        "cv_adaptation", "cv_selection_correction",
+    ]
+    assert "ungrounded_project_evidence:main1" in provider.calls[1]["user"]
+    assert final.model_dump() == before
+    assert cv.selected_project_ids == final.selected_project_ids
+    assert cv.project_selection_reasons[0].offer_evidence == expected
+    assert "auto_fixed:project_offer_evidence:main3" in cv.warnings
+
+
+@pytest.mark.parametrize(
+    "quote",
+    ["Python, Kubernetes", "Py, SQL", "Python, SQL,", "Python, SQL in production",
+     "Deployment required.", "Experience of 5 years.", "Python, RAG"],
+)
+def test_evidence_repair_rejects_unsupported_terms_partial_skills_and_changed_facts(inputs, quote):
+    profile, analysis = inputs
+    analysis.required_skills = ["Python", "SQL"]
+    analysis.main_tasks += ["Deployment not required", "Experience of 3 years"]
+    # Generated keywords remain inadmissible as offer evidence.
+    analysis.cv_keywords_to_include = ["RAG"]
+    selection = draft(["main1", "main2", "main3"])
+    selection.project_selection_reasons[0].offer_evidence = quote
+    repaired = repair_project_evidence(selection, analysis)
+    assert repaired.model_dump() == selection.model_dump()
+    assert validate_project_selection(repaired, profile, analysis) == [
+        "ungrounded_project_evidence:main1"
+    ]
+
+
+@pytest.mark.parametrize(
     "quote",
     [
         "Développer des agents IA à partir : d’APIs de modèles de langage, de frameworks agentiques",
@@ -327,12 +388,13 @@ def test_cv_initial_and_correction_keep_distinct_efforts_in_one_snapshot(
     assert [call["purpose"] for call in provider.calls] == ["cv_adaptation", "cv_selection_correction"]
 
 
-def test_invalid_second_attempt_stops_before_letter(inputs):
+def test_invalid_second_attempt_returns_cv_with_diagnostics(inputs):
     profile, analysis = inputs
     provider = SequenceProvider([draft(["off"]), draft(["off"])])
     adapter = CvAdapter(profile, provider)
-    with pytest.raises(LLMError, match="Project selection could not be finalized"):
-        adapter.adapt_application(analysis, job_title="Data Scientist", job_company="Example")
+    cv = adapter.adapt(analysis, job_title="Data Scientist", job_company="Example")
+    assert "validation_error:disabled_project_id:off" in cv.warnings
+    assert "validation_error:too_few_projects:min=3" in cv.warnings
     assert [c["purpose"] for c in provider.calls] == ["cv_adaptation", "cv_selection_correction"]
 
 
@@ -390,16 +452,16 @@ def test_invalid_certificate_selection_retries_with_same_cv_schema(inputs, ids, 
     assert cv.selected_certificate_ids == []
 
 
-def test_second_invalid_certificate_selection_stops_generation(inputs):
+def test_second_invalid_certificate_selection_is_advisory(inputs):
     profile, analysis = inputs
     invalid = draft(["main1", "main2", "main3"]).model_copy(
         update={"selected_certificate_ids": ["missing"]}
     )
     provider = SequenceProvider([invalid, invalid])
-    with pytest.raises(LLMError, match="unknown_certificate_id:missing"):
-        CvAdapter(profile, provider).adapt(
-            analysis, job_title="Data Scientist", job_company="Example"
-        )
+    cv = CvAdapter(profile, provider).adapt(
+        analysis, job_title="Data Scientist", job_company="Example"
+    )
+    assert "validation_error:unknown_certificate_id:missing" in cv.warnings
     assert len(provider.calls) == 2
 
 
@@ -431,13 +493,14 @@ def test_short_selection_retries_complete_personalization(inputs, initial_ids):
     assert cv.selected_project_ids == final_ids
 
 
-def test_short_second_selection_stops_before_letter(inputs):
+def test_short_second_selection_is_advisory(inputs):
     profile, analysis = inputs
     provider = SequenceProvider([draft(["main1"]), draft(["main1", "main2"])])
-    with pytest.raises(LLMError, match="too_few_projects:min=3"):
-        CvAdapter(profile, provider).adapt_application(
-            analysis, job_title="Data Scientist", job_company="Example"
-        )
+    cv = CvAdapter(profile, provider).adapt(
+        analysis, job_title="Data Scientist", job_company="Example"
+    )
+    assert cv.selected_project_ids == ["main1", "main2"]
+    assert "validation_error:too_few_projects:min=3" in cv.warnings
     assert [call["purpose"] for call in provider.calls] == ["cv_adaptation", "cv_selection_correction"]
 
 
@@ -451,27 +514,30 @@ def test_short_second_selection_stops_before_letter(inputs):
         ["main1", "special1", "special2", "off"],
     ],
 )
-def test_insufficient_selectable_catalogue_stops_before_llm(inputs, available_ids):
+def test_insufficient_selectable_catalogue_is_advisory(inputs, available_ids):
     profile, analysis = inputs
     profile.projects = [project for project in profile.projects if project.id in available_ids]
-    provider = SequenceProvider([])
-    with pytest.raises(LLMError):
-        CvAdapter(profile, provider).adapt(
-            analysis, job_title="Data Scientist", job_company="Example"
-        )
-    assert provider.calls == []
+    response = draft(available_ids[:2])
+    provider = SequenceProvider([response, response])
+    cv = CvAdapter(profile, provider).adapt(
+        analysis, job_title="Data Scientist", job_company="Example"
+    )
+    assert len(provider.calls) == 2
+    assert any(w.startswith("validation_error:too_few_projects:") for w in cv.warnings)
 
 
 def test_unconfigured_specialized_project_cannot_complete_catalogue_capacity(inputs):
     profile, analysis = inputs
     profile.projects = [p for p in profile.projects if p.id in {"main1", "main2", "special1"}]
     profile.projects[-1].selection_policy.activation_conditions = [" "]
-    provider = SequenceProvider([])
-    with pytest.raises(LLMError, match="Insufficient eligible projects"):
-        CvAdapter(profile, provider).adapt(
-            analysis, job_title="Data Scientist", job_company="Example"
-        )
-    assert provider.calls == []
+    response = draft(["main1", "main2", "special1"])
+    provider = SequenceProvider([response, response])
+    cv = CvAdapter(profile, provider).adapt(
+        analysis, job_title="Data Scientist", job_company="Example"
+    )
+    assert len(provider.calls) == 2
+    assert "validation_error:too_few_projects:min=3:eligible=2" in cv.warnings
+    assert "validation_error:missing_activation_conditions:special1" in cv.warnings
 
 
 def test_historical_snapshot_without_policy_or_reasons_remains_readable(inputs):

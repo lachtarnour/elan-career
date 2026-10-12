@@ -149,8 +149,6 @@ class CvWriterMixin:
             refresh_cache=refresh_cache,
         )
         assembled = self._validate_with_auto_fix(assembled, report)
-        if not self.validator.validate(assembled).ok:
-            raise LLMError("CV structure could not be finalized before text generation")
         context = dict(
             job_title=job.title,
             job_company=document_company,
@@ -231,6 +229,11 @@ class CvWriterMixin:
         return result.cv, result.letter
 
     def _validate_with_auto_fix(self, adapted, report: ApplyReport):
+        report.validation_warnings.extend(
+            warning for warning in adapted.warnings
+            if warning.startswith(("validation_error:", "auto_fixed:"))
+            and warning not in report.validation_warnings
+        )
         result = self.validator.validate(adapted)
         if not result.ok:
             adapted, removed = self.validator.auto_fix(adapted)

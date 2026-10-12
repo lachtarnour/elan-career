@@ -12,6 +12,7 @@ from functools import wraps
 from pathlib import Path
 from threading import Lock
 from time import monotonic
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import case, func, or_, select, update
@@ -61,9 +62,11 @@ from smartapply.database.session import (
     startup_maintenance_pending,
 )
 from smartapply.desktop.analysis_services import AnalysisServiceMixin
+from smartapply.desktop.archive_presentation import job_archive_reasons
 from smartapply.desktop.classification_explanation import classification_explanation
 from smartapply.desktop.document_review_presentation import present_document_review
 from smartapply.desktop.fit_presentation import fit_detail, fit_summary
+from smartapply.desktop.generation_services import GenerationServiceMixin
 from smartapply.desktop.llm_settings import (
     llm_configuration,
     reasoning_options,
@@ -79,7 +82,6 @@ from smartapply.desktop.source_health import (
 from smartapply.filtering.types import FilterDisposition
 from smartapply.jobsearch.archive_reasons import (
     ARCHIVE_ORIGINS,
-    archive_reason_labels,
     archive_sub_label,
 )
 from smartapply.jobsearch.offer_state import (
@@ -286,8 +288,6 @@ class JobRow:
     duplicate_candidate: DuplicateReviewDetail | None = None
     fit_current: bool = False
     fit_status_label: str = ""
-    candidacy_status: str = ""
-    candidacy_label: str = ""
     source_company: str = ""
     extracted_company_name: str = ""
     document_company: str = ""
@@ -311,7 +311,6 @@ class JobDetail(JobRow):
     risks: tuple[str, ...] = ()
     archive_reasons: tuple[str, ...] = ()
     fit_axes: tuple[dict, ...] = ()
-    fit_admissibility: tuple[dict, ...] = ()
     fit_reliability: tuple[dict, ...] = ()
     fit_warnings: tuple[str, ...] = ()
     application: ApplicationDetail | None = None
@@ -348,6 +347,8 @@ class ApplicationDetail:
     review_points: tuple[dict, ...] = ()
     review_corrected: bool = False
     source_company: str = ""
+    cv_html_path: str = ""
+    letter_html_path: str = ""
 
     @property
     def output_directory(self) -> str:
@@ -355,6 +356,8 @@ class ApplicationDetail:
             self.cv_pdf_path,
             self.cv_docx_path,
             self.letter_pdf_path,
+            self.cv_html_path,
+            self.letter_html_path,
         ):
             if raw:
                 return str(Path(raw).expanduser().resolve().parent)
@@ -425,7 +428,7 @@ class SearchResult:
         return sum(int(report.get("persisted", 0)) for report in self.reports)
 
 
-class DesktopService(AnalysisServiceMixin):
+class DesktopService(AnalysisServiceMixin, GenerationServiceMixin):
     """Small synchronous facade; the GUI runs slow calls through TaskWorker."""
 
     READY_STATUSES = READY_APPLICATION_STATUSES
@@ -883,13 +886,13 @@ class DesktopService(AnalysisServiceMixin):
             local_day = func.date(sort_column, "localtime")
             stmt = stmt.order_by(
                 (local_day.asc() if sort_ascending else local_day.desc()).nulls_last(),
-                *fit_ranking_columns(),
+                JobAnalysis.fit_score.desc().nulls_last(),
                 sort_column.desc().nulls_last(),
                 Job.id.asc(),
             )
         elif sort_key == "llm_score" or sort_key not in sort_columns:
             stmt = stmt.order_by(
-                *fit_ranking_columns(ascending=sort_ascending),
+                (JobAnalysis.fit_score.asc() if sort_ascending else JobAnalysis.fit_score.desc()).nulls_last(),
                 JobAnalysis.created_at.desc().nulls_last(), Job.id.asc(),
             )
         else:
@@ -917,10 +920,6 @@ class DesktopService(AnalysisServiceMixin):
             fit_metadata = {
                 record[0].id: {
                     "policy_fingerprint": record.fit_policy,
-                    "admissibility": {
-                        "mandatory_conditions": {"status": record.fit_mandatory},
-                        "candidate_preferences": {"status": record.fit_preferences},
-                    },
                 }
                 for record in records
             }
@@ -1054,18 +1053,6 @@ class DesktopService(AnalysisServiceMixin):
             # those rows as « Archivée » via the application status; keep the
             # detail panel consistent so its archive reason is not hidden.
             archived = base.status == JobStatus.ARCHIVED
-            raw_archive_reasons = (
-                components.get("rejection_reasons")
-                or (components.get("reasons") if archived else [])
-                or []
-            )
-            if archived and job.canonical_job_id is not None:
-                reference = canonical_job(session, job.id)
-                raw_archive_reasons = [
-                    f"duplicate_reference:{reference.title} — {reference.source_company} (n° {reference.id})"
-                    if reference is not None
-                    else f"duplicate_of:{job.canonical_job_id}"
-                ]
             return JobDetail(
                 **base_values,
                 **fit_detail(
@@ -1086,11 +1073,7 @@ class DesktopService(AnalysisServiceMixin):
                 classification_reasons=classification_reasons,
                 match_reasons=_text_list(analysis.match_reasons if analysis else None),
                 risks=_text_list(analysis.risks if analysis else None),
-                archive_reasons=archive_reason_labels(
-                    raw_archive_reasons,
-                    stage=str(components.get("rejection_stage") or ""),
-                    archived=archived,
-                ),
+                archive_reasons=job_archive_reasons(session, job, archived=archived),
                 application=(
                     self._application_detail_from(job.application, analysis=analysis)
                     if job.application and not _is_reusable_reservation(job.application)
@@ -1112,6 +1095,8 @@ class DesktopService(AnalysisServiceMixin):
         for doc in sorted(app.documents, key=lambda item: item.id):
             docs[doc.doc_type] = doc
         letter_pdf = docs.get("motivation_letter_pdf")
+        cv_html = docs.get("cv_html")
+        letter_html = docs.get("motivation_letter_html")
         warnings = _text_list(app.validation_warnings)
         review = present_document_review(warnings)
         return ApplicationDetail(
@@ -1135,6 +1120,8 @@ class DesktopService(AnalysisServiceMixin):
             cv_docx_path=app.cv_docx_path or "",
             cv_pdf_path=app.cv_pdf_path or "",
             letter_pdf_path=letter_pdf.path or "" if letter_pdf else "",
+            cv_html_path=cv_html.path or "" if cv_html else "",
+            letter_html_path=letter_html.path or "" if letter_html else "",
             match_reasons=_text_list(analysis.match_reasons if analysis else None),
             risks=_text_list(analysis.risks if analysis else None),
             warnings=warnings,
@@ -1285,13 +1272,20 @@ class DesktopService(AnalysisServiceMixin):
         )
 
     def shortlist_summary(self) -> ShortlistSummary:
-        from smartapply.pipeline.apply.persistence import reservation_is_stale
-
         with session_scope() as session:
             jobs = (
                 session.execute(
                     select(Job)
-                    .options(joinedload(Job.application).joinedload(Application.documents))
+                    .options(
+                        load_only(Job.id, raiseload=True),
+                        joinedload(Job.application).load_only(
+                            Application.id, Application.updated_at, Application.created_at,
+                            Application.cv_docx_path, Application.cv_pdf_path,
+                            raiseload=True,
+                        ).joinedload(Application.documents).load_only(
+                            GeneratedDocument.id, raiseload=True,
+                        ),
+                    )
                     .where(
                         Job.shortlisted_at.is_not(None),
                         Job.analyzed_at.is_not(None),
@@ -1306,22 +1300,26 @@ class DesktopService(AnalysisServiceMixin):
                 .scalars()
                 .all()
             )
-            grouped_ids = application_ids_for_confirmed_groups(session, [job.id for job in jobs])
-            ready = sum(
-                job.id not in grouped_ids
-                or (job.application is not None and reservation_is_stale(job.application))
-                for job in jobs
-            )
-            return ShortlistSummary(total=len(jobs), ready_to_generate=ready)
+            if not jobs:
+                return ShortlistSummary(total=0, ready_to_generate=0)
+            ready = self._ready_shortlist_job_ids(session, jobs)
+            return ShortlistSummary(total=len(jobs), ready_to_generate=len(ready))
 
     def shortlisted_generation_ids(self) -> list[int]:
-        from smartapply.pipeline.apply.persistence import reservation_is_stale
-
         with session_scope() as session:
             jobs = (
                 session.execute(
                     select(Job)
-                    .options(joinedload(Job.application).joinedload(Application.documents))
+                    .options(
+                        load_only(Job.id, raiseload=True),
+                        joinedload(Job.application).load_only(
+                            Application.id, Application.updated_at, Application.created_at,
+                            Application.cv_docx_path, Application.cv_pdf_path,
+                            raiseload=True,
+                        ).joinedload(Application.documents).load_only(
+                            GeneratedDocument.id, raiseload=True,
+                        ),
+                    )
                     .where(
                         Job.shortlisted_at.is_not(None),
                         Job.analyzed_at.is_not(None),
@@ -1337,13 +1335,50 @@ class DesktopService(AnalysisServiceMixin):
                 .scalars()
                 .all()
             )
-            grouped_ids = application_ids_for_confirmed_groups(session, [job.id for job in jobs])
-            return [
-                int(job.id)
-                for job in jobs
-                if job.id not in grouped_ids
-                or (job.application is not None and reservation_is_stale(job.application))
-            ]
+            if not jobs:
+                return []
+            ready = self._ready_shortlist_job_ids(session, jobs)
+            return [int(job.id) for job in jobs if job.id in ready]
+
+    @staticmethod
+    def _ready_shortlist_job_ids(session, jobs: list[Job]) -> set[int]:
+        from smartapply.pipeline.apply.persistence import reservation_is_stale
+        from smartapply.pipeline.generation.coordinator import reserved_generation_job_ids
+        from smartapply.pipeline.generation.offer_resume import resumable_generation_job_ids
+
+        job_ids = [job.id for job in jobs]
+        grouped_ids = application_ids_for_confirmed_groups(session, job_ids)
+        reserved = reserved_generation_job_ids(session)
+        resumable = resumable_generation_job_ids(session, job_ids=job_ids)
+        ready: set[int] = set()
+        stale_applications: dict[int, int] = {}
+        for job in jobs:
+            if job.id in resumable:
+                ready.add(job.id)
+            elif job.id not in reserved:
+                if job.id not in grouped_ids:
+                    ready.add(job.id)
+                elif job.application is not None:
+                    application = job.application
+                    # Documents, saved paths and the reservation age can rule
+                    # out reuse without decoding the stored CV. Only an old,
+                    # otherwise empty reservation needs its exact JSON truth.
+                    metadata = SimpleNamespace(
+                        documents=application.documents,
+                        cv_docx_path=application.cv_docx_path,
+                        cv_pdf_path=application.cv_pdf_path,
+                        cv_json=None,
+                        updated_at=application.updated_at,
+                        created_at=application.created_at,
+                    )
+                    if reservation_is_stale(metadata):
+                        stale_applications[application.id] = job.id
+        if stale_applications:
+            ready.update(stale_applications[application_id]
+                         for application_id, cv_json in session.execute(select(
+                             Application.id, Application.cv_json,
+                         ).where(Application.id.in_(stale_applications))) if not cv_json)
+        return ready
 
     def shortlist_requires_analysis(self, job_id: int) -> bool:
         with session_scope() as session:
@@ -1632,7 +1667,9 @@ class DesktopService(AnalysisServiceMixin):
                         )
                     )
                     filter_ids = persisted_job_ids | {int(value) for value in references}
-                pipeline.filter_pending(job_ids=sorted(filter_ids))
+                # Stop prevents new remote work, but the rows already kept
+                # must become visible to the normal offer/analysis queues.
+                pipeline.filter_pending(job_ids=sorted(filter_ids), cancellable=False)
             except Exception as exc:
                 logger.exception("Search deterministic rejection failed")
                 result.errors.append(f"Rejet déterministe : {exc}")
@@ -1683,37 +1720,72 @@ class DesktopService(AnalysisServiceMixin):
         pipeline.prepare_analysis(job_ids=ids)
         return asdict(pipeline.analyze_jobs(ids))
 
-    def update_shortlist(self, *, top_k: int, progress=None, stop_requested=None) -> dict[str, Any]:
+    def update_shortlist(
+        self,
+        *,
+        top_k: int,
+        search: str = "",
+        mission_relation: str = "",
+        min_llm_score: float | None = None,
+        progress=None,
+        stop_requested=None,
+    ) -> dict[str, Any]:
         """Apply Top-K directly from persisted scores without rebuilding Pipeline."""
+        from contextlib import ExitStack
+
+        if mission_relation not in {"", "direct", "adjacent", "clearly_outside", "unknown"}:
+            raise ValueError(f"Unsupported mission relation: {mission_relation}")
+        if min_llm_score is not None and not 0 <= min_llm_score <= 1:
+            raise ValueError("Minimum IA score requires a value from 0 to 1")
         if progress:
             progress("Mise à jour de la Top sélection…")
         ensure_startup_maintenance_complete()
-        with write_session_scope() as session:
-            candidates = list(
-                session.execute(
-                    select(Job)
-                    .join(JobAnalysis, JobAnalysis.job_id == Job.id)
-                    .outerjoin(Application, Application.job_id == Job.id)
-                    .options(
-                        joinedload(Job.score),
-                        joinedload(Job.analysis),
-                    )
-                    .where(
-                        Job.archived_at.is_(None),
-                        Job.filtered_at.is_not(None),
-                        # The final Top selection is based on the LLM fit
-                        # score; pending offers are not eligible yet.
-                        Job.analyzed_at.is_not(None),
-                        or_(
-                            Job.duplicate_review_status.is_(None),
-                            Job.duplicate_review_status != JobDuplicateStatus.PENDING,
-                        ),
-                        JobAnalysis.fit_score.is_not(None),
-                        current_fit_expression(),
-                        Application.id.is_(None),
-                    )
-                    .order_by(*fit_ranking_columns(), Job.id.asc())
+        # Release offer leases after the transaction commits, so a concurrent
+        # pipeline cannot capture a snapshot from before these decisions.
+        with ExitStack() as reservations, write_session_scope() as session:
+            stmt = (
+                select(Job)
+                .join(JobAnalysis, JobAnalysis.job_id == Job.id)
+                .outerjoin(JobScore, JobScore.job_id == Job.id)
+                .outerjoin(Application, Application.job_id == Job.id)
+                .options(joinedload(Job.score), joinedload(Job.analysis))
+                .where(
+                    Job.archived_at.is_(None),
+                    Job.filtered_at.is_not(None),
+                    # Include the previous selection for repeatable Top-K updates.
+                    Job.analyzed_at.is_not(None),
+                    or_(
+                        Job.duplicate_review_status.is_(None),
+                        Job.duplicate_review_status != JobDuplicateStatus.PENDING,
+                    ),
+                    JobAnalysis.fit_score.is_not(None),
+                    current_fit_expression(),
+                    Application.id.is_(None),
                 )
+                .order_by(*fit_ranking_columns(), Job.id.asc())
+            )
+            if min_llm_score is not None:
+                stmt = stmt.where(JobAnalysis.fit_score >= min_llm_score)
+            if mission_relation:
+                stmt = stmt.where(
+                    func.json_extract(
+                        JobScore.components, "$.extraction_screen.mission_relation"
+                    ) == mission_relation
+                )
+            needle = search.strip()
+            if needle:
+                term = f"%{needle}%"
+                stmt = stmt.where(or_(
+                    Job.title.ilike(term),
+                    Job.source_company.ilike(term),
+                    func.json_extract(
+                        JobAnalysis.raw_response, "$.extracted_company_name"
+                    ).ilike(term),
+                    Job.location.ilike(term),
+                    Job.source.ilike(term),
+                ))
+            candidates = list(
+                session.execute(stmt)
                 .unique()
                 .scalars()
                 .all()
@@ -1724,11 +1796,26 @@ class DesktopService(AnalysisServiceMixin):
                 if is_current_hard_reject_survivor(
                     job.score.components if job.score is not None else None
                 )
+                and not ShortlistMixin._manually_excluded_from_shortlist(job)
             ]
             shortlist_n = min(max(1, int(top_k)), len(candidates)) if candidates else 0
-            selected = candidates[:shortlist_n]
-            shortlisted = ShortlistMixin._replace_automatic_shortlist(session, selected)
-            return {
+            selected = []
+            skipped_busy_ids = set()
+            for job in candidates:
+                if len(selected) >= shortlist_n:
+                    break
+                try:
+                    reservations.enter_context(
+                        job_operation([job.id], operation="shortlist automatique")
+                    )
+                except TaskConflictError:
+                    skipped_busy_ids.add(int(job.id))
+                else:
+                    selected.append(job)
+            shortlisted = ShortlistMixin._replace_automatic_shortlist(
+                session, selected, reservations=reservations, skipped_busy_ids=skipped_busy_ids,
+            )
+            report = {
                 "total": len(candidates),
                 "kept_after_filter": len(candidates),
                 "duplicates_removed": 0,
@@ -1736,7 +1823,13 @@ class DesktopService(AnalysisServiceMixin):
                 "shortlisted": len(shortlisted),
                 "ranked_ids": [int(job.id) for job in candidates],
                 "shortlisted_ids": [int(job.id) for job in shortlisted],
+                "skipped_busy": len(skipped_busy_ids),
+                "skipped_busy_ids": sorted(skipped_busy_ids),
             }
+        # The persisted total includes manual additions and ready counts respect
+        # existing dossiers and generation reservations. Read only after commit.
+        report["shortlist_summary"] = asdict(self.shortlist_summary())
+        return report
 
     @_protect_offer("analyse")
     def analyze_job(self, job_id: int, *, progress=None, stop_requested=None) -> dict[str, Any]:

@@ -205,7 +205,8 @@ def test_search_filters_the_reference_of_a_new_duplicate_before_returning(isolat
                 source=collection.source, fetched=1, persisted=1, job_ids=[duplicate]
             )
 
-        def filter_pending(self, *, job_ids):
+        def filter_pending(self, *, job_ids, cancellable=True):
+            assert cancellable is False
             filtered.extend(job_ids)
 
     monkeypatch.setattr("smartapply.pipeline.Pipeline", Pipeline)

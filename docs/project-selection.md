@@ -34,12 +34,12 @@ Un projet spécialisé doit apporter une contribution distincte et répondre à 
 besoin explicite ; la simple présence de Python ou PyTorch ne suffit pas à
 l'activer. Le minimum de trois n'autorise ni l'assouplissement de cette règle ni
 la sélection de projets désactivés. Si le catalogue ne permet pas trois choix
-admissibles, la génération s'arrête en signalant la limite.
+admissibles, la génération signale cette limite dans le dossier et continue.
 
 Le même appel choisit de zéro à deux certificats pertinents parmi les
 identifiants de `certificates.json`. Une liste vide signifie qu'aucun certificat
-n'améliore cette candidature. Le code refuse les identifiants inconnus, les
-doublons et plus de deux choix, puis utilise exactement la même sélection et le
+n'améliore cette candidature. Le code signale les identifiants inconnus, les
+doublons et plus de deux choix, puis utilise la même sélection et le
 même ordre dans les exports HTML/PDF et DOCX. Aucun appel LLM supplémentaire
 n'est ajouté. Les anciens snapshots, créés avant cette sélection, restent
 compatibles et continuent d'afficher les certificats historiques.
@@ -48,6 +48,9 @@ Le modèle juge la pertinence et la complémentarité. Le code contrôle les
 identifiants, doublons, catégories, minimum et maximum de trois projets, la limite
 de certificats, la présence des justifications et l'existence des extraits cités.
 Ce dernier contrôle ne prouve pas la pertinence sémantique d'une justification.
+Ces contrôles Python sont consultatifs : leurs résultats sont conservés dans le
+dossier et affichés parmi les points à vérifier dans **Prêt**. Ils ne bloquent
+ni la rédaction de la lettre ni la publication des documents.
 
 La recherche de l'extrait applique la même normalisation typographique à la
 citation et aux sources : Unicode, casse, espaces et retours à la ligne,
@@ -60,8 +63,22 @@ Cette normalisation ne sert pas à localiser les passages à remplacer lors de
 la relecture, qui conserve ses contrôles exacts.
 
 Une sélection invalide déclenche une seule nouvelle tentative de personnalisation
-complète. Si elle échoue aussi, la génération s'arrête avant la lettre. Aucun
-correctif automatique ne retire ou n'ajoute un projet sous un résumé existant.
+complète. Après cette correction, deux défauts de citation peuvent être réparés
+localement : un point final ajouté à une mission complète, ou une liste séparée
+par des virgules dont chaque élément correspond exactement à une compétence
+requise. Dans ce dernier cas, la citation devient la première compétence de la
+liste, reprise telle quelle depuis l'offre. La réponse IA originale reste dans
+le journal ; le snapshot CV conserve la citation réparée et un avertissement
+`auto_fixed:project_offer_evidence`. Aucun projet, justification ou compétence
+candidat n'est modifié. Les autres erreurs sont signalées, sans appel IA
+supplémentaire. Le contrôle initial reste identique pour pouvoir rejouer les
+demandes de correction déjà sauvegardées.
+
+Si la sélection reste invalide, la génération conserve cette sélection et ses
+diagnostics, puis continue vers le résumé, la lettre et le rendu. Le dossier
+terminé est **Prêt à candidater**, avec les points à vérifier. Un catalogue de
+moins de trois projets éligibles est également signalé sans interrompre la
+création. Aucun correctif automatique ne retire ou n'ajoute un projet sous un résumé existant.
 Le parcours normal n'ajoute aucun appel LLM.
 
 La lettre reçoit le CV final et les preuves des seuls projets retenus. HTML,

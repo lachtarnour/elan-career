@@ -1,6 +1,6 @@
 """Lossless fit representation for Claude's native JSON output grammar.
 
-The four-key native representation groups repeated findings by axis/dimension.
+The three-key native representation groups repeated technical findings by axis.
 The canonical business schema and decisions stay intact. Cardinality is an
 explicit transport invariant, checked only as advisory diagnostics. Historical
 flat outputs remain readable; malformed records are never repaired or retried.
@@ -21,18 +21,14 @@ _DIMENSIONS = {
     "essential_findings": "essentials",
     "responsibility_findings": "responsibilities",
 }
-_ADMISSIBILITY = {
-    "mandatory_condition_records": "mandatory_conditions",
-    "candidate_preference_records": "candidate_preferences",
-}
 
 
 def fit_transport_schema(source: dict, *, name: str) -> dict:
-    """Build a small grammar: four root keys and one structure per annotation kind."""
+    """Build a small grammar: three root keys and one structure per annotation kind."""
     from smartapply.llm.structured import to_strict_schema
 
-    if name != JobFitDecisionEvaluation.__name__ or not {"admissibility", "reliability"}.issubset(
-        source.get("properties", {})
+    if name != JobFitDecisionEvaluation.__name__ or "reliability" not in source.get(
+        "properties", {}
     ):
         return copy.deepcopy(source)
     if source != to_strict_schema(JobFitDecisionEvaluation):
@@ -61,12 +57,6 @@ def fit_transport_schema(source: dict, *, name: str) -> dict:
         **finding["properties"],
     }
     finding["required"] = list(finding["properties"])
-    admissibility = inline(source["$defs"]["FitAdmissibilityDimension"])
-    admissibility["properties"] = {
-        "dimension": {"type": "string", "enum": list(_ADMISSIBILITY.values())},
-        **admissibility["properties"],
-    }
-    admissibility["required"] = list(admissibility["properties"])
     annotations = obj(
         {
             "technical_findings": {"type": "array", "items": finding},
@@ -82,11 +72,6 @@ def fit_transport_schema(source: dict, *, name: str) -> dict:
             {
                 "decision": inline(source["properties"]["decision"]),
                 GROUPED_KEY: annotations,
-                "admissibility_records": {
-                    "type": "array",
-                    "items": admissibility,
-                    "description": "[] means canonical admissibility=null; otherwise exactly two records, one per dimension.",
-                },
                 "reliability_records": {
                     "type": "array",
                     "items": inline(source["$defs"]["FitReliability"]),
@@ -102,8 +87,6 @@ def encode_legacy_fit_transport(value: dict) -> dict:
     JobFitDecisionEvaluation.model_validate(value)
     value = copy.deepcopy(value)
     wire = {"decision": value["decision"], MARKER: FORMAT}
-    for target, key in _ADMISSIBILITY.items():
-        wire[target] = [] if value.get("admissibility") is None else [value["admissibility"][key]]
     wire["reliability_records"] = [] if value.get("reliability") is None else [value["reliability"]]
     for target, key in _DIMENSIONS.items():
         wire[target] = value["dimensions"][key]["findings"]
@@ -149,23 +132,6 @@ def decode_legacy_fit_transport(value: dict) -> tuple[dict, list[str]]:
             result["dimensions"] = dimensions
     else:
         warnings.append("Claude fit transport: simultaneous canonical and wire dimensions")
-    if "admissibility" not in result:
-        groups = [result.get(key) for key in _ADMISSIBILITY]
-        if all(isinstance(group, list) and not group for group in groups):
-            result["admissibility"] = None
-            for key in _ADMISSIBILITY:
-                del result[key]
-        elif all(isinstance(group, list) and len(group) == 1 for group in groups):
-            result["admissibility"] = {
-                key: result.pop(wire)[0] for wire, key in _ADMISSIBILITY.items()
-            }
-        else:
-            warnings.append(
-                "Claude fit transport: admissibility cardinality/presence inconsistent; "
-                "all records retained raw"
-            )
-    else:
-        warnings.append("Claude fit transport: simultaneous canonical and wire admissibility")
     if "reliability" not in result:
         group = result.get("reliability_records")
         if isinstance(group, list) and len(group) <= 1:
@@ -197,9 +163,6 @@ def encode_fit_transport(value: dict) -> dict:
                 key: value[key] for key in ("issues", "neutral_offer_refs", "offer_interpretations")
             },
         },
-        "admissibility_records": []
-        if value.get("admissibility") is None
-        else [{"dimension": key, **value["admissibility"][key]} for key in _ADMISSIBILITY.values()],
         "reliability_records": [] if value.get("reliability") is None else [value["reliability"]],
     }
 
@@ -259,33 +222,6 @@ def decode_fit_transport(value: dict) -> tuple[dict, list[str]]:
             del raw[GROUPED_KEY]
     else:
         warnings.append("Claude fit transport: unreadable annotation group retained raw")
-    if "admissibility_records" in raw:
-        records = raw.get("admissibility_records")
-        if "admissibility" in raw:
-            warnings.append("Claude fit transport: simultaneous canonical and wire admissibility")
-        elif isinstance(records, list) and not records:
-            raw["admissibility"] = None
-            del raw["admissibility_records"]
-        elif (
-            isinstance(records, list)
-            and len(records) == 2
-            and all(
-                isinstance(item, dict) and item.get("dimension") in _ADMISSIBILITY.values()
-                for item in records
-            )
-            and {item["dimension"] for item in records} == set(_ADMISSIBILITY.values())
-        ):
-            dimensions = {}
-            for record in records:
-                dimension = copy.deepcopy(record)
-                key = dimension.pop("dimension")
-                dimensions[key] = dimension
-            raw["admissibility"] = dimensions
-            del raw["admissibility_records"]
-        else:
-            warnings.append(
-                "Claude fit transport: admissibility cardinality/dimensions invalid; records retained raw"
-            )
     if "reliability_records" in raw:
         records = raw.get("reliability_records")
         if "reliability" in raw:

@@ -38,7 +38,7 @@ class AnthropicProvider(StructuredProvider):
 
         @retry(
             retry=retry_if_exception_type((APIConnectionError, APITimeoutError, RateLimitError)),
-            stop=stop_after_attempt(3),
+            stop=stop_after_attempt(1 if getattr(self, "_disable_ambiguous_retries", False) else 3),
             wait=wait_exponential(multiplier=1, min=2, max=10),
             reraise=True,
         )

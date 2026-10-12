@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 
 from smartapply.llm.anthropic_fit_transport import fit_transport_schema
+from smartapply.llm.prompts.cache_layout import candidate_cache_prefix_end
 from smartapply.llm.provider import LLMError
 from smartapply.llm.request_options import validate_request_effort
 from smartapply.llm.structured import Completion
@@ -66,12 +67,22 @@ def build_message_params(body: dict) -> dict:
                     preserve_constants(a, b)
 
     preserve_constants(source_schema, schema)
+    user = messages[1]["content"]
+    prefix_end = candidate_cache_prefix_end(user, schema_name=contract["name"])
+    user_content = user
+    if prefix_end is not None:
+        # Adapt only the wire representation: journal/cache identity and every
+        # prompt character stay unchanged. Never cache the offer-specific tail.
+        user_content = [
+            {"type": "text", "text": user[:prefix_end], "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": user[prefix_end:]},
+        ]
     params = {
         "model": body["model"],
         "system": [
             {"type": "text", "text": messages[0]["content"], "cache_control": {"type": "ephemeral"}}
         ],
-        "messages": [{"role": "user", "content": messages[1]["content"]}],
+        "messages": [{"role": "user", "content": user_content}],
         "output_config": {"format": {"type": "json_schema", "schema": schema}},
         "max_tokens": body["max_completion_tokens"],
     }

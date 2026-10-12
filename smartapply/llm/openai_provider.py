@@ -44,6 +44,9 @@ class OpenAIProvider(StructuredProvider):
         reraise=True,
     )
     def _call_openai(self, **kwargs):
+        return self._call_openai_once(**kwargs)
+
+    def _call_openai_once(self, **kwargs):
         return self._client_lazy().chat.completions.create(**kwargs)
 
     @staticmethod
@@ -52,7 +55,8 @@ class OpenAIProvider(StructuredProvider):
         return record_usage(session, **kwargs)
 
     def _generate(self, body):
-        response = self._call_openai(**body)
+        call = self._call_openai_once if getattr(self, "_disable_ambiguous_retries", False) else self._call_openai
+        response = call(**body)
         choice = response.choices[0]
         usage = getattr(response, "usage", None)
         details = getattr(usage, "prompt_tokens_details", None)

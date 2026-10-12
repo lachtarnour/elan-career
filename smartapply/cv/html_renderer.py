@@ -7,10 +7,13 @@ two-column experience/education rows, then compact skills/projects/languages.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
 import tempfile
+import time
+from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 
@@ -26,6 +29,9 @@ from smartapply.profile import Profile, Project
 
 TEMPLATES_DIR = Path(__file__).with_name("templates")
 _PDF_COUNT_RE = re.compile(rb"/Count\s+(\d+)")
+_CHROME_RENDER_TIMEOUT_SECONDS = 60
+_CHROME_POLL_SECONDS = 0.1
+_CHROME_TERMINATE_GRACE_SECONDS = 2
 
 
 @lru_cache(maxsize=1)
@@ -54,7 +60,32 @@ def _chrome_executable() -> str | None:
     return None
 
 
-def html_to_pdf(html: str, pdf_path: str | Path, *, base_dir: str | Path | None = None) -> Path:
+def _stop_chrome(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=_CHROME_TERMINATE_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=_CHROME_TERMINATE_GRACE_SECONDS)
+
+
+def _check_render_cancelled(stop_requested: Callable[[], bool] | None) -> None:
+    if stop_requested is not None and stop_requested():
+        # Import here because the pipeline imports this CV renderer at startup.
+        from smartapply.pipeline.errors import TaskCancelledError
+
+        raise TaskCancelledError()
+
+
+def html_to_pdf(
+    html: str,
+    pdf_path: str | Path,
+    *,
+    base_dir: str | Path | None = None,
+    stop_requested: Callable[[], bool] | None = None,
+) -> Path:
     """Render HTML to PDF with WeasyPrint when installed, otherwise Chrome.
 
     Chrome is intentionally supported because it is commonly available on the
@@ -62,6 +93,7 @@ def html_to_pdf(html: str, pdf_path: str | Path, *, base_dir: str | Path | None 
     """
     pdf_path = Path(pdf_path).resolve()
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    _check_render_cancelled(stop_requested)
 
     weasyprint_html = _weasyprint_html()
     if weasyprint_html is not None:
@@ -91,23 +123,45 @@ def html_to_pdf(html: str, pdf_path: str | Path, *, base_dir: str | Path | None 
         tmp.write(html)
         tmp_html = Path(tmp.name)
 
+    fd, temporary_pdf = tempfile.mkstemp(suffix=".pdf", dir=str(pdf_path.parent))
+    os.close(fd)
+    tmp_pdf = Path(temporary_pdf)
+    tmp_pdf.unlink()
+
     try:
-        subprocess.run(
-            [
-                chrome,
-                "--headless=new",
-                "--disable-gpu",
-                "--no-sandbox",
-                "--no-pdf-header-footer",
-                f"--print-to-pdf={pdf_path}",
-                tmp_html.resolve().as_uri(),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
+        command = [
+            chrome,
+            "--headless=new",
+            "--disable-gpu",
+            "--no-sandbox",
+            "--no-pdf-header-footer",
+            f"--print-to-pdf={tmp_pdf}",
+            tmp_html.resolve().as_uri(),
+        ]
+        process = subprocess.Popen(
+            command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
+        try:
+            deadline = time.monotonic() + _CHROME_RENDER_TIMEOUT_SECONDS
+            while True:
+                _check_render_cancelled(stop_requested)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Chrome PDF rendering timed out")
+                try:
+                    returncode = process.wait(timeout=min(_CHROME_POLL_SECONDS, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            if returncode:
+                raise subprocess.CalledProcessError(returncode, command)
+            _check_render_cancelled(stop_requested)
+            tmp_pdf.replace(pdf_path)
+        finally:
+            _stop_chrome(process)
     finally:
         tmp_html.unlink(missing_ok=True)
+        tmp_pdf.unlink(missing_ok=True)
 
     return pdf_path
 
@@ -245,13 +299,19 @@ class HtmlApplicationRenderer:
         path.write_text(html, encoding="utf-8")
         return path
 
-    def save_cv_pdf(self, adapted: AdaptedCV, path: str | Path) -> Path:
-        path = html_to_pdf(self.render_cv_html(adapted), path, base_dir=TEMPLATES_DIR)
+    def save_cv_pdf(
+        self, adapted: AdaptedCV, path: str | Path, *,
+        stop_requested: Callable[[], bool] | None = None,
+    ) -> Path:
+        render_options = {"stop_requested": stop_requested} if stop_requested else {}
+        path = html_to_pdf(self.render_cv_html(adapted), path, base_dir=TEMPLATES_DIR,
+                           **render_options)
         if pdf_page_count(path) > 1:
             path = html_to_pdf(
                 self.render_cv_html(adapted, force_one_page=True),
                 path,
                 base_dir=TEMPLATES_DIR,
+                **render_options,
             )
         return path
 
@@ -264,6 +324,7 @@ class HtmlApplicationRenderer:
         path: str | Path,
         language: str = "fr",
         letter_headline: str | None = None,
+        stop_requested: Callable[[], bool] | None = None,
     ) -> Path:
         html = self.render_letter_html(
             letter=letter,
@@ -272,7 +333,8 @@ class HtmlApplicationRenderer:
             language=language,
             letter_headline=letter_headline,
         )
-        return html_to_pdf(html, path, base_dir=TEMPLATES_DIR)
+        render_options = {"stop_requested": stop_requested} if stop_requested else {}
+        return html_to_pdf(html, path, base_dir=TEMPLATES_DIR, **render_options)
 
     def _contact_line(self) -> str:
         return "  |  ".join(item["label"] for item in self._contact_items())

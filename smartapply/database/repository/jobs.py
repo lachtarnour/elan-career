@@ -26,7 +26,10 @@ _SCORE_COMPONENT_KEYS = frozenset(
     }
 )
 _ACTIVE_REJECTION_KEYS = frozenset(
-    {"rejection_stage", "rejection_reasons", "rejection_summary", "reasons", "hard_reject", "archive_origin"}
+    {
+        "rejection_stage", "rejection_reasons", "rejection_summary", "reasons",
+        "hard_reject", "archive_origin", "archive_inheritance",
+    }
 )
 
 
@@ -178,6 +181,13 @@ def mark_archived(
             from smartapply.database.repository.scores import set_score
 
             previous = dict(job.score.components) if job.score and job.score.components else {}
+            previous.pop("archive_inheritance", None)
+            if origin == "manual":
+                previous.update(
+                    rejection_stage="manual",
+                    rejection_reasons=["manual_archive"],
+                    rejection_summary="manual_archive",
+                )
             set_score(session, job_id, components={**previous, "archive_origin": origin})
         job.archived_at = datetime.now(timezone.utc)
         # Archiving removes the offer from Top sélection as well. Keeping the
@@ -232,6 +242,7 @@ def rescue_archived_job(
         "reasons": list(previous_components.get("rejection_reasons", []) or []),
         "summary": previous_components.get("rejection_summary"),
         "archive_origin": previous_components.get("archive_origin"),
+        "archive_inheritance": previous_components.get("archive_inheritance"),
     }
     components = {
         key: value

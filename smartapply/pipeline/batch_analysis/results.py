@@ -81,14 +81,20 @@ def new_item(
     model="",
     provider="openai",
     effort=None,
+    max_completion_tokens=None,
     screening_context,
 ) -> AnalysisBatchItem:
     analyzer_input = build_analyzer_input(job)
+    if session is not None and max_completion_tokens is None:
+        raise ValueError("Extraction output budget is required to resume a saved response")
     saved = (
         load_extraction(
             session,
             job,
-            extraction_key(analyzer_input, model, provider=provider, effort=effort),
+            extraction_key(
+                analyzer_input, model, max_completion_tokens=max_completion_tokens,
+                provider=provider, effort=effort,
+            ),
         )
         if session
         else None
@@ -278,6 +284,7 @@ def accept_result(
             or extraction_key(
                 AnalyzerInput(**item.analyzer_input),
                 run.model,
+                max_completion_tokens=run.max_completion_tokens,
                 provider=run.provider,
                 effort=run.extraction_effort,
             ),

@@ -58,16 +58,9 @@ def test_unusable_response_is_one_call_no_cache(isolated_db, monkeypatch, conten
     "annotations",
     [
         {},
-        {"admissibility": None, "reliability": None},
-        {"admissibility": "broken", "reliability": 42, "dimensions": False, "issues": {}},
+        {"reliability": None},
+        {"reliability": 42, "dimensions": False, "issues": {}},
         {
-            "admissibility": {
-                dimension: {"status": status, "findings": []}
-                for dimension, status in (
-                    ("mandatory_conditions", "unknown"),
-                    ("candidate_preferences", "incompatible"),
-                )
-            },
             "reliability": {
                 "offer_information": "Condition obligatoire peu renseignée",
                 "candidate_information": "Qualification non documentée",
@@ -87,7 +80,8 @@ def test_annotations_never_refresh_usable_cache_or_trigger_another_call(
         user=build_fit_user(context, facts),
         schema_name="JobFitDecisionEvaluation",
         extra=request_cache_extra(
-            JobFitDecisionEvaluation, context["temperature"], context.get("effort")
+            JobFitDecisionEvaluation, context["temperature"], context.get("effort"),
+            context["max_completion_tokens"],
         ),
     )
     with session_scope() as session:
@@ -115,8 +109,8 @@ def test_annotations_never_refresh_usable_cache_or_trigger_another_call(
         assert public.fit_score == 0.95
         assert diagnostics["diagnostic_checks"]["warnings"]
         assert diagnostics["original_response"] == content
-        if "admissibility" in raw:
-            assert diagnostics["evaluation"]["admissibility"] == raw["admissibility"]
+        if "reliability" in raw:
+            assert diagnostics["evaluation"]["reliability"] == raw["reliability"]
     assert len(calls) == 1
     with session_scope() as session:
         entries = {entry.cache_key: entry.response for entry in session.scalars(select(LLMCache))}
@@ -173,4 +167,4 @@ def test_new_offer_pipeline_saves_score_despite_malformed_annotations(isolated_d
     assert calls == ["OfferExtractionOutput", "JobFitDecisionEvaluation"]
     with session_scope() as session:
         saved = session.get(Job, job_id).analysis
-        assert saved.fit_score == 0.88 and saved.fit_diagnostics["diagnostic_checks"]["warnings"]
+        assert saved.fit_score == 0.84 and saved.fit_diagnostics["diagnostic_checks"]["warnings"]

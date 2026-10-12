@@ -35,6 +35,7 @@ from smartapply.filtering import (
 )
 from smartapply.filtering.types import HasJobFields
 from smartapply.maintenance._sqlite_safety import (
+    IngestRevisionGuard,
     SQLiteSafetyError,
     online_backup,
     require_no_table_triggers,
@@ -244,7 +245,7 @@ def apply_backfill(
             for record in _load_records_by_id(connection, plan.change_ids)
         }
         current_results = _validate_current_rows(plan, current, rejector)
-        _require_trigger_free_targets(connection)
+        revision_guard = _require_trigger_free_targets(connection)
 
         table_counts_before = _table_counts(connection)
         immutable_before = {
@@ -270,13 +271,17 @@ def apply_backfill(
                 components=components,
             )
 
-        expected_changes = 2 * len(plan.changes)
+        expected_changes = 2 * len(plan.changes) + revision_guard.additional_writes(len(plan.changes))
         actual_changes = connection.total_changes - changes_before
         if actual_changes != expected_changes:
             raise BackfillError(
                 "Metadata-only backfill wrote an unexpected number of rows: "
                 f"expected {expected_changes}, got {actual_changes}"
             )
+        try:
+            revision_guard.verify(connection, job_updates=len(plan.changes))
+        except SQLiteSafetyError as exc:
+            raise BackfillError(str(exc)) from exc
 
         updated = {
             int(record["job__id"]): record
@@ -600,9 +605,9 @@ def _backup_database_locked(database: Path, backup: Path) -> str:
         raise BackfillError(str(exc)) from exc
 
 
-def _require_trigger_free_targets(connection: sqlite3.Connection) -> None:
+def _require_trigger_free_targets(connection: sqlite3.Connection) -> IngestRevisionGuard:
     try:
-        require_no_table_triggers(connection, tables=("jobs", "job_scores"))
+        return require_no_table_triggers(connection, tables=("jobs", "job_scores"))
     except SQLiteSafetyError as exc:
         raise BackfillError(str(exc)) from exc
 

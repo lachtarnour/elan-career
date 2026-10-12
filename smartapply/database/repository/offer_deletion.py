@@ -20,6 +20,15 @@ from smartapply.database.analysis_batches import (
     AnalysisBatchWave,
 )
 from smartapply.database.analysis_checkpoints import AnalysisCheckpoint
+from smartapply.database.generation_runs import (
+    RESERVED_GENERATION_STATES,
+    TERMINAL_GENERATION_ITEM_STATES,
+    GenerationCall,
+    GenerationItem,
+    GenerationItemContext,
+    GenerationRun,
+    GenerationWave,
+)
 from smartapply.database.models import (
     DuplicateReviewEvent,
     Job,
@@ -61,6 +70,26 @@ def assert_no_active_batch(session: Session, job_ids: set[int]) -> None:
         raise ValueError(
             "Annulez le batch de cette offre et attendez sa fin avant de la supprimer."
         )
+    generation = session.scalar(
+        select(GenerationItem.id)
+        .join(GenerationRun)
+        .where(
+            GenerationItem.job_id.in_(job_ids),
+            GenerationRun.state.in_(RESERVED_GENERATION_STATES),
+            ~GenerationItem.state.in_(TERMINAL_GENERATION_ITEM_STATES),
+        )
+        .limit(1)
+    )
+    if generation is not None:
+        raise ValueError("Cette offre appartient à une création inachevée. Reprenez ou abandonnez son parcours avant de la supprimer.")
+    provider_work = session.scalar(
+        select(GenerationCall.id).join(GenerationItem).join(GenerationWave).where(
+            GenerationItem.job_id.in_(job_ids),
+            GenerationWave.state.in_(("prepared", "submitting", "submission_unknown", "submitted")),
+        ).limit(1)
+    )
+    if provider_work is not None:
+        raise ValueError("Attendez la fin du lot de création avant de supprimer cette offre.")
 
 
 def _json_fragments(value):
@@ -91,7 +120,11 @@ def _cache_evidence(session: Session, jobs: list[Job]) -> tuple[set[str], set[st
             )
         )
     )
-    keys.update(session.scalars(select(ScopeCheckpoint.screening_key).where(ScopeCheckpoint.job_id.in_(ids))))
+    keys.update(
+        session.scalars(
+            select(ScopeCheckpoint.screening_key).where(ScopeCheckpoint.job_id.in_(ids))
+        )
+    )
     fragments: set[str] = set()
     for job in jobs:
         if job.analysis:
@@ -201,11 +234,55 @@ def _erase_exact_responses(session: Session, keys: set[str], fragments: set[str]
             session.delete(cached)
 
 
+def _erase_generation_journal(
+    session: Session, ids: set[int], keys: set[str], fragments: set[str]
+) -> None:
+    items = list(session.scalars(select(GenerationItem).where(GenerationItem.job_id.in_(ids))))
+    item_ids = {item.id for item in items}
+    run_ids = {item.run_id for item in items}
+    calls = list(
+        session.scalars(select(GenerationCall).where(GenerationCall.item_id.in_(item_ids)))
+    )
+    call_ids = {call.id for call in calls}
+    for item in items:
+        fragments.update(_json_fragments(item.result))
+    for call in calls:
+        keys.add(call.request_key)
+        fragments.update(_json_fragments(call.response_data))
+    for wave in session.scalars(select(GenerationWave).where(GenerationWave.run_id.in_(run_ids))):
+        requests = []
+        removed_custom_ids = set()
+        for request in wave.requests:
+            if request["call_id"] in call_ids:
+                keys.add(request["cache_key"])
+                removed_custom_ids.add(request["custom_id"])
+            else:
+                requests.append(request)
+        wave.requests = requests
+        wave.consumed_ids = [
+            value for value in wave.consumed_ids if value not in removed_custom_ids
+        ]
+    # Calls own foreign keys to both the item and wave, so erase them first.
+    session.execute(delete(GenerationCall).where(GenerationCall.item_id.in_(item_ids)))
+    session.execute(delete(GenerationItemContext).where(GenerationItemContext.item_id.in_(item_ids)))
+    session.execute(delete(GenerationItem).where(GenerationItem.job_id.in_(ids)))
+    for run_id in run_ids:
+        if (
+            session.scalar(
+                select(GenerationItem.id).where(GenerationItem.run_id == run_id).limit(1)
+            )
+            is None
+        ):
+            session.execute(delete(GenerationWave).where(GenerationWave.run_id == run_id))
+            session.execute(delete(GenerationRun).where(GenerationRun.id == run_id))
+
+
 def erase_offer_rows(session: Session, jobs: list[Job]) -> None:
     ids = {job.id for job in jobs}
     external_ids = {job.external_id for job in jobs}
     keys, fragments = _cache_evidence(session, jobs)
     _erase_batch_journal(session, ids, keys, fragments)
+    _erase_generation_journal(session, ids, keys, fragments)
     _erase_exact_responses(session, keys, fragments)
     session.execute(
         delete(LLMUsage).where(
