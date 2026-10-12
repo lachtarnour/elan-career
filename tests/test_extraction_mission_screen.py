@@ -220,7 +220,7 @@ def test_immediate_kept_offer_passes_only_offer_facts_to_fit(isolated_db) -> Non
             )
         assert kwargs["purpose"] == "job_fit_assessment"
         assert "mission_screen" not in kwargs["user"]
-        return evaluation_from_user(kwargs["user"], levels=(3, 3, 3))
+        return evaluation_from_user(kwargs["user"], score=0.75)
 
     analyzer = _analyzer(
         SimpleNamespace(name="openai", cheap_model="mock-cheap", complete_json=complete)
@@ -294,7 +294,7 @@ def test_immediate_invalid_screen_still_runs_fit(isolated_db, monkeypatch, scree
     monkeypatch.setattr(provider, "_call_openai", api)
     report = _analyzer(provider).analyze_jobs([job_id])
     assert report.analyzed == 1 and report.screened_out == 0
-    assert calls == ["JobScopeScreening", "OfferExtractionOutput", "JobFitDecisionEvaluation"]
+    assert calls == ["JobScopeScreening", "OfferExtractionOutput", "JobFitAssessment"]
     with session_scope() as session:
         job = session.get(Job, job_id)
         assert job.analysis is not None and job.archived_at is None
@@ -331,7 +331,7 @@ def test_immediate_screen_write_error_runs_fit_without_archiving(
             return OfferExtractionOutput.model_validate(
                 _offer().model_dump(exclude={"mission_screen"})
             )
-        return evaluation_from_user(kwargs["user"], levels=(3, 3, 3))
+        return evaluation_from_user(kwargs["user"], score=0.75)
 
     report = _analyzer(
         SimpleNamespace(name="openai", cheap_model="mock-cheap", complete_json=complete)
@@ -383,7 +383,7 @@ def test_immediate_user_choice_runs_fit_even_when_screen_is_decisive(
             return OfferExtractionOutput.model_validate(
                 _offer().model_dump(exclude={"mission_screen"})
             )
-        return evaluation_from_user(kwargs["user"], levels=(2, 2, 2))
+        return evaluation_from_user(kwargs["user"], score=0.50)
 
     analyzer = _analyzer(
         SimpleNamespace(name="openai", cheap_model="mock-cheap", complete_json=complete)

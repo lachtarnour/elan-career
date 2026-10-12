@@ -1,7 +1,7 @@
 # Préfiltre des missions avant extraction
 
 `job_scope_screening` produit uniquement `mission_screen`, avant toute nouvelle
-extraction, indépendamment du profil du candidat et d'`evidence_fit`.
+extraction, indépendamment du profil du candidat et du score IA global.
 Le prompt reprend à l'identique les instructions du préfiltre auparavant incluses
 dans le prompt d'extraction.
 Ce champ contient uniquement deux valeurs finies :
@@ -86,8 +86,8 @@ analyse ou une candidature restent protégées. La décision et ses deux valeurs
 sont enregistrées dans `job_scores.components.extraction_screen`. Une offre
 écartée est visible dans les archives et peut être reprise manuellement.
 
-Le préfiltre ne calcule aucun score. Ses valeurs ne sont pas transmises à
-`evidence_fit`, à `OfferAnalysis` ou aux documents de candidature. Le mode
+Le préfiltre ne calcule aucun score. Ses valeurs ne sont pas transmises au
+score IA global, à `OfferAnalysis` ou aux documents de candidature. Le mode
 immédiat et le Batch utilisent la même décision, y compris lors d'une reprise
 depuis le cache ou un checkpoint.
 

@@ -1,4 +1,4 @@
-"""One evaluation request; scoring decisions are independent of annotation quality."""
+"""One frozen evaluation request, shared by immediate and historical workflows."""
 
 from __future__ import annotations
 
@@ -91,7 +91,7 @@ def complete_fit(
     provider, context: dict, offer, *, job_id=None, extraction_provenance=None,
     refresh_cache=False,
 ):
-    """Freeze the request inputs; annotation inspections cannot veto its score."""
+    """Freeze inputs and preserve the validated global score returned by the provider."""
     context = copy.deepcopy(context)
     provider = frozen_provider(
         provider, context.get("provider"), context.get("model"),

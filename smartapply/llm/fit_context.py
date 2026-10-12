@@ -10,7 +10,7 @@ from typing import Any
 
 from smartapply.config import Settings, get_llm_settings, get_settings
 from smartapply.llm.prompts.loader import load_prompt
-from smartapply.llm.schemas import JobFitDecisionEvaluation, OfferAnalysis
+from smartapply.llm.schemas import JobFitAssessment, JobFitDecisionEvaluation, OfferAnalysis
 from smartapply.llm_policy import resolve_route
 from smartapply.profile import Bullet, Profile
 
@@ -21,7 +21,7 @@ DECISION_LEVELS = {
     "credible_fit": 3,
     "strong_fit": 4,
 }
-POLICY = {
+LEGACY_POLICY = {
     "name": "evidence_fit",
     "weights": [35, 45, 20],
     "decision_levels": DECISION_LEVELS,
@@ -30,9 +30,12 @@ POLICY = {
 }
 
 
+POLICY = {"name": "global_ai_fit", "version": "pre-pr15-rubric-v1", "score_source": "llm"}
+
+
 def fit_schema(context: dict):
-    """Accept only the current fit generation contract."""
-    return JobFitDecisionEvaluation
+    """Identify the contract without converting historical decisions to global scores."""
+    return JobFitDecisionEvaluation if context.get("policy") == LEGACY_POLICY else JobFitAssessment
 
 
 def fit_source(provenance: dict | None) -> dict:
@@ -202,6 +205,7 @@ def build_fit_context(
     max_completion_tokens=None,
     settings: Settings | None = None,
     effort: str | None = "auto",
+    reference_date: date | None = None,
 ) -> dict:
     from smartapply.llm.request_options import stage_effort
     from smartapply.llm.structured import to_strict_schema
@@ -227,8 +231,9 @@ def build_fit_context(
         "system_prompt": load_prompt(
             "job_fit/anthropic_system.j2" if provider == "anthropic" else "job_fit/system.j2"
         ),
+        "reference_date": (reference_date or date.today()).isoformat(),
         "user_template": load_prompt("job_fit/user.j2"),
-        "schema": to_strict_schema(JobFitDecisionEvaluation),
+        "schema": to_strict_schema(JobFitAssessment),
         "model": model,
         "temperature": 0.2,
         "configured_context_window": transport_settings.llm_context_window(provider),
@@ -291,7 +296,7 @@ def context_is_current(context: dict, profile: Profile) -> bool:
     # Transport settings may change while a Batch is running. The signed run
     # keeps its original model, parameters and provider; only facts, prompts,
     # schemas and policy must still match the current application contract.
-    for key in ("temperature", "configured_context_window"):
+    for key in ("temperature", "configured_context_window", "reference_date"):
         current[key] = copy.deepcopy(context[key])
     if "provider" not in context:
         # Historical OpenAI contexts were signed before the provider field was
@@ -313,6 +318,7 @@ def build_fit_user(context: dict, offer: OfferAnalysis, *, extraction_provenance
         _environment()
         .from_string(context["user_template"])
         .render(
+            reference_date=context["reference_date"],
             scoring_policy_json=json.dumps(context["policy"], ensure_ascii=False),
             candidate_json=json.dumps(context["candidate_facts"], ensure_ascii=False),
             declared_experience=context["declared_experience"],

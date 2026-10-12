@@ -17,7 +17,7 @@ from smartapply.pipeline.batch_analysis import coordinator as coordinator_module
 from smartapply.pipeline.batch_analysis.coordinator import BatchAnalysisCoordinator
 from smartapply.pipeline.batch_analysis.presentation import analysis_workspace
 from smartapply.pipeline.batch_analysis.results import schema_for_request
-from tests.fit_fixtures import decision_response, evaluation_from_user
+from tests.fit_fixtures import evaluation_from_user, global_response
 from tests.llm_config_helpers import change_call, configure_calls
 from tests.test_batch_analysis import (
     FakeTransport,
@@ -273,7 +273,7 @@ def test_native_cancel_keeps_received_extraction_and_never_submits_fit():
     assert counts()["analyses"] == 0 and len(native.created) == 1
 
 
-def test_native_truncated_fit_keeps_score_original_output_and_exact_cache(monkeypatch):
+def test_native_global_fit_preserves_score_and_exact_cache(monkeypatch):
     ids = seed_jobs(2, exact_copies=True)
     native = NativeClaudeClient()
     coordinator = BatchAnalysisCoordinator(
@@ -283,17 +283,16 @@ def test_native_truncated_fit_keeps_score_original_output_and_exact_cache(monkey
     native.complete("msgbatch-1")
     coordinator.sync()
     fit_id = native.inputs["msgbatch-2"][0]["custom_id"].partition("_")[2]
-    content = json.dumps(decision_response())[:-1] + ',"neutral_offer_re'
-    native.complete("msgbatch-2", answers={fit_id: content}, stop_reason="max_tokens")
+    content = json.dumps(global_response(score=0.6137))
+    native.complete("msgbatch-2", answers={fit_id: content})
     coordinator.sync()
     assert journal(first)[0].state == "completed"
     with session_scope() as session:
         from smartapply.database.models import Job
 
         analysis = session.get(Job, ids[0]).analysis
-        assert analysis.fit_score == 0.95
-        assert analysis.fit_diagnostics["original_response"] == content
-        assert analysis.fit_diagnostics["diagnostic_checks"]["warnings"]
+        assert analysis.fit_score == 0.6137
+        assert analysis.fit_diagnostics["evaluation"] == json.loads(content)
         assert session.scalar(select(LLMCache).where(LLMCache.response == content)) is not None
     # Another exact copy uses both cached results, including the recoverable
     # fit response. Its annotations cannot trigger another provider call.
@@ -313,5 +312,5 @@ def test_native_truncated_fit_keeps_score_original_output_and_exact_cache(monkey
         schema=schema_for_request(body), model=body["model"], purpose="job_fit_assessment",
         effort="high", max_completion_tokens=body["max_completion_tokens"],
     )
-    assert parsed.original_text == content and parsed.levels == (4, 4, 3)
+    assert parsed.fit_score == 0.6137
     assert native.created == ["msgbatch-1", "msgbatch-2"]

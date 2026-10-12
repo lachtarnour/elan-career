@@ -286,7 +286,7 @@ class JobFitAssessment(BaseModel):
     fit_score: float = Field(
         ge=0.0,
         le=1.0,
-        description="Ordinal technical fit index from the three weighted decisions, not a probability.",
+        description="Global candidate fit assessed by the LLM from the evidence, not a probability.",
     )
     match_reasons: list[str] = Field(
         description="Concrete matches between immutable offer requirements and candidate facts."

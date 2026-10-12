@@ -228,7 +228,7 @@ def test_fit_receives_complete_facts_without_cv_policy_or_invented_preferences()
     assert "Preferred locations:" not in prompt
     assert "junior to mid (1-3 years)" not in prompt
     assert profile.identity.email not in prompt
-    assert "2026-09-22" not in prompt
+    assert "2026-09-22" in prompt
 
 
 @pytest.mark.parametrize("field", ["required_skills", "seniority", "constraints", "main_tasks"])
@@ -410,7 +410,7 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(
         nonlocal fail_fit_once
         schema_name = kwargs["response_format"]["json_schema"]["name"]
         calls.append((schema_name, kwargs))
-        if schema_name == "JobFitDecisionEvaluation" and fail_fit_once:
+        if schema_name == "JobFitAssessment" and fail_fit_once:
             fail_fit_once = False
             raise RuntimeError("Temporary matching failure")
         result = (
@@ -438,8 +438,8 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(
     instance._analyze_one(job_id=job_id)
     assert [name for name, _ in calls] == [
         "OfferExtractionOutput",
-        "JobFitDecisionEvaluation",
-        "JobFitDecisionEvaluation",
+        "JobFitAssessment",
+        "JobFitAssessment",
     ]
     assert all(kwargs["model"] == "gpt-5.4-mini" for _, kwargs in calls)
     assert "NEW_DECLARED_SKILL" not in calls[0][1]["messages"][1]["content"]
@@ -448,7 +448,7 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(
     with session_scope() as session:
         job = session.get(Job, job_id)
         assert job.analyzed_at is not None
-        assert job.analysis.fit_score == 0.84
+        assert job.analysis.fit_score == 0.88
         assert job.analysis.required_skills == ["Python"]
         assert (
             job.analysis.raw_response["supporting_excerpts"] == offer_result().supporting_excerpts
@@ -459,7 +459,7 @@ def test_offer_cache_survives_profile_edit_or_failed_fit(
     from smartapply.pipeline.apply.cv_writer import CvWriterMixin
 
     _, restored = CvWriterMixin()._load_job_analysis(job_id)
-    assert restored.fit_score == 0.84
+    assert restored.fit_score == 0.88
     assert restored.supporting_excerpts == offer_result().supporting_excerpts
     assert restored.offer_risks == offer_result().offer_risks
     # Cache retention cannot erase the source of a completed extraction.

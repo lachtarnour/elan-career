@@ -1,9 +1,9 @@
-"""Add only nullable fit trace columns; never evaluate or repair job history."""
+"""Add fit trace columns and history without rewriting existing assessments."""
 
 from sqlalchemy import inspect, text
 
 from smartapply.database.analysis_batches import AnalysisBatchRun
-from smartapply.database.models import JobAnalysis
+from smartapply.database.models import JobAnalysis, JobFitHistory
 from smartapply.database.session import _build_add_column_sql, get_engine
 
 
@@ -21,4 +21,7 @@ def ensure_fit_schema() -> list[str]:
             statement = _build_add_column_sql(table.name, table.columns[field], engine.dialect)
             connection.execute(text(statement))
             executed.append(statement)
+        if not inspector.has_table(JobFitHistory.__tablename__):
+            JobFitHistory.__table__.create(connection)
+            executed.append("CREATE TABLE job_fit_history")
     return executed

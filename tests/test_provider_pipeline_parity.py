@@ -44,7 +44,7 @@ from tests.test_integration import SAMPLE_JOBS, _register_llm_fixtures
 _PURPOSE = {
     "JobScopeScreening": "job_scope_screening",
     "OfferExtractionOutput": "job_offer_extraction",
-    "JobFitDecisionEvaluation": "job_fit_assessment",
+    "JobFitAssessment": "job_fit_assessment",
     "CVSelection": "cv_adaptation",
     "ApplicationTexts": "application_texts",
     "DocumentTextReview": "document_review",
@@ -222,7 +222,7 @@ def test_both_real_providers_publish_the_same_nlp_application(isolated_db, monke
                 "proj_ner_camembert",
                 "proj_gpt2",
             ]
-            assert job.analysis.fit_score == 0.83
+            assert job.analysis.fit_score == 0.75
             assert (
                 job.analysis.fit_diagnostics["context"].get("provider", "openai") == provider_name
             )

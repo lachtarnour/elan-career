@@ -17,7 +17,7 @@ from smartapply.llm import (
     ApplicationTexts,
     CVSelection,
     DocumentTextReview,
-    JobFitDecisionEvaluation,
+    JobFitAssessment,
     MockLLMProvider,
     MotivationLetter,
     OfferExtractionOutput,
@@ -83,7 +83,7 @@ def _register_llm_responses() -> None:
     )
     MockLLMProvider.register(
         "job_fit_assessment",
-        lambda **kwargs: evaluation_from_user(kwargs["user"], levels=(2, 4, 4)),
+        lambda **kwargs: evaluation_from_user(kwargs["user"], score=0.75),
     )
     MockLLMProvider.register(
         "cv_adaptation",
@@ -663,7 +663,7 @@ def test_analysis_preserves_source_company_when_extraction_differs() -> None:
     )
     MockLLMProvider.register(
         "job_fit_assessment",
-        lambda **kwargs: evaluation_from_user(kwargs["user"], levels=(2, 4, 4)),
+        lambda **kwargs: evaluation_from_user(kwargs["user"], score=0.75),
     )
 
     from smartapply.database import session_scope
@@ -1100,7 +1100,7 @@ def test_application_selects_cv_then_generates_summary_and_letter_then_persists_
         "job_offer_extraction",
         "job_fit_assessment",
     ]
-    assert [call["schema"] for call in calls] == [JobScopeScreening, OfferExtractionOutput, JobFitDecisionEvaluation]
+    assert [call["schema"] for call in calls] == [JobScopeScreening, OfferExtractionOutput, JobFitAssessment]
     assert all(call["model"] == pipeline.llm.cheap_model for call in calls)
     calls.clear()
     with session_scope() as session:

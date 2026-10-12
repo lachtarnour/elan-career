@@ -41,12 +41,23 @@ Rectangle {
         anchors.margins: 10
         spacing: 6
 
+        Text {
+            objectName: "offerGlobalFitScore"
+            visible: !(root.offer.fit_axes || []).length
+            Layout.fillWidth: true
+            text: "Score IA : " + (typeof root.offer.llm_score === "number"
+                ? Math.round(root.offer.llm_score * 100) + " %" : "Indisponible")
+            color: Theme.ink
+            font.pixelSize: root.fontPixelSize
+            font.weight: Font.DemiBold
+        }
+
         Repeater {
-            model: [
+            model: (root.offer.fit_axes || []).length ? [
                 {axis: "missions", label: "Missions", accent: Theme.accentBright},
                 {axis: "essentials", label: "Compétences essentielles", accent: Theme.blue},
                 {axis: "responsibilities", label: "Responsabilités", accent: Theme.success}
-            ]
+            ] : []
             delegate: ColumnLayout {
                 id: axisRow
                 required property var modelData

@@ -194,6 +194,18 @@ class JobAnalysis(Base):
     job: Mapped[Job] = relationship(back_populates="analysis")
 
 
+class JobFitHistory(Base):
+    """Immutable analysis snapshots retained when its active fit is replaced."""
+
+    __tablename__ = "job_fit_history"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    snapshot: Mapped[Any] = mapped_column(JSON)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    archived_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class Application(Base):
     __tablename__ = "applications"
     __table_args__ = (Index("ix_applications_status_updated_at", "status", "updated_at"),)

@@ -1,4 +1,4 @@
-"""Calculate a score from model levels and retain advisory evidence diagnostics."""
+"""Validate global LLM scores and retain the historical three-axis reader."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import Any
 
 from smartapply.llm.fit_context import (
     DECISION_LEVELS,
+    LEGACY_POLICY,
     POLICY,
     fingerprint,
     fit_schema,
@@ -32,20 +33,56 @@ def calculate_fit_decisions(decisions) -> tuple[float, dict]:
     if len(decisions) != 3 or any(state not in DECISION_LEVELS for state in decisions):
         raise ValueError("Invalid fit decisions")
     levels = tuple(DECISION_LEVELS[state] for state in decisions)
-    raw = sum(
-        Decimal(weight * level) for weight, level in zip(POLICY["weights"], levels, strict=True)
-    ) / 400
+    raw = (
+        sum(
+            Decimal(weight * level)
+            for weight, level in zip(LEGACY_POLICY["weights"], levels, strict=True)
+        )
+        / 400
+    )
     score = raw.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     return float(score), {
-        "policy_name": POLICY["name"],
-        "policy_fingerprint": fingerprint(POLICY),
+        "policy_name": LEGACY_POLICY["name"],
+        "policy_fingerprint": fingerprint(LEGACY_POLICY),
         "used_decisions": dict(zip(AXES, decisions, strict=True)),
         "raw_score": str(raw),
         "final_score": str(score),
     }
 
 
-def evaluate_fit(
+def evaluate_fit(evaluation, context, offer, *, extraction_provenance=None):
+    """Persist the model's global judgement verbatim; retain legacy readers."""
+    if context.get("policy") == LEGACY_POLICY:
+        return _evaluate_legacy_fit(
+            evaluation, context, offer, extraction_provenance=extraction_provenance
+        )
+    from smartapply.llm.provider import LLMValidationError
+
+    if context.get("policy") != POLICY:
+        raise LLMValidationError("Incompatible fit policy")
+    try:
+        public = JobFitAssessment.model_validate(evaluation)
+    except ValueError as exc:
+        raise LLMValidationError(f"Invalid global fit response: {exc}") from exc
+    source = fit_source(extraction_provenance)
+    diagnostics = {
+        "policy_name": context["policy"]["name"],
+        "policy_fingerprint": fingerprint(context["policy"]),
+        "score_source": "llm",
+        "evaluation": public.model_dump(mode="json"),
+        "context": copy.deepcopy(context),
+        "offer_facts": offer.model_dump(mode="json"),
+        "offer_refs": offer_references(offer),
+        "offer_fingerprint": fingerprint(offer.model_dump(mode="json")),
+        "offer_source": source,
+        "source_fingerprint": source["fingerprint"],
+        "extraction_provenance": copy.deepcopy(extraction_provenance or {}),
+        "evaluated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return public.model_copy(deep=True), diagnostics
+
+
+def _evaluate_legacy_fit(
     evaluation: Any,
     context: dict,
     offer: OfferAnalysis,

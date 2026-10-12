@@ -113,9 +113,8 @@ def test_manual_bypass_allows_analysis_without_suppressing_fit_risks(isolated_db
                 required_skills=["Python"], main_tasks=["Build machine learning models"],
                 nice_to_have=[], cv_keywords_to_include=["Python"],
             )
-        evaluation = evaluation_from_user(kwargs["user"], levels=(0, 0, 2))
-        for issue in evaluation.issues:
-            issue.text = "Core responsibilities are not documented"
+        evaluation = evaluation_from_user(kwargs["user"], score=0.10)
+        evaluation.risks = ["Core responsibilities are not documented"]
         return evaluation
 
     pipeline = Pipeline(llm=SimpleNamespace(
@@ -128,11 +127,9 @@ def test_manual_bypass_allows_analysis_without_suppressing_fit_risks(isolated_db
         job = session.get(Job, job_id)
         assert job.archived_at is None and job.analysis.fit_score == 0.1
         assert job.analysis.risks == [
-            "Appui candidat à préciser : Core responsibilities are not documented"
+            "Core responsibilities are not documented"
         ]
-        assert job.analysis.fit_diagnostics["used_levels"] == {
-            "missions": 0, "essentials": 0, "responsibilities": 2,
-        }
+        assert job.analysis.fit_diagnostics["score_source"] == "llm"
         assert has_manual_filter_bypass(job.score.components)
 
 

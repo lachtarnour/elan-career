@@ -24,7 +24,7 @@ from smartapply.pipeline.batch_analysis.results import item_request
 from smartapply.pipeline.process.analysis_checkpoint import extraction_key
 from smartapply.pipeline.rescore import execute_rescore_plan, prepare_rescore_plan
 from smartapply.profile import get_profile
-from tests.fit_fixtures import decision_response
+from tests.fit_fixtures import global_response
 from tests.llm_config_helpers import change_call, configure_calls
 from tests.test_batch_analysis import extraction_offer, journal, offer, pipeline, seed_jobs
 from tests.test_evidence_fit import seeded_analysis
@@ -72,12 +72,12 @@ def test_frozen_fit_effort_survives_changed_effort_policy_and_transport_settings
 
         def complete_json(self, **kwargs):
             calls.append(kwargs)
-            return {**decision_response(), "issues": "malformed optional annotations"}
+            return global_response(score=0.95)
 
     result, diagnostics = complete_fit(Provider(), context, offer())
     assert len(calls) == 1 and calls[0]["effort"] == "high"
     assert result.fit_score == 0.95
-    assert diagnostics["diagnostic_checks"]["warnings"]
+    assert diagnostics["evaluation"]["fit_score"] == 0.95
 
 
 def test_immediate_freezes_both_efforts_before_extraction_and_uses_batch_cache_identity(
@@ -101,8 +101,8 @@ def test_immediate_freezes_both_efforts_before_extraction_and_uses_batch_cache_i
                 )
             return _message(body, extraction_offer().model_dump_json())
         # Truncated annotations are kept as observations; no repair is bought.
-        content = json.dumps(decision_response())[:-1] + ',"neutral_offer_re'
-        return _message(body, content, stop_reason="max_tokens")
+        content = json.dumps(global_response(score=0.95))
+        return _message(body, content)
 
     monkeypatch.setattr(provider, "_call_anthropic", call)
     report = runner(provider).analyze_jobs([job_id])
@@ -115,7 +115,7 @@ def test_immediate_freezes_both_efforts_before_extraction_and_uses_batch_cache_i
         job = session.get(Job, job_id)
         diagnostics = job.analysis.fit_diagnostics
         assert job.analysis.fit_score == 0.95
-        assert diagnostics["diagnostic_checks"]["warnings"]
+        assert diagnostics["evaluation"]["fit_score"] == 0.95
         assert diagnostics["context"]["effort"] == "high"
         assert diagnostics["extraction_provenance"]["effort"] == "high"
         run = AnalysisBatchRun(
@@ -236,7 +236,7 @@ def test_explicit_rescore_plan_freezes_extraction_and_fit_effort(
             return (
                 extraction_offer()
                 if kwargs["purpose"] == "job_offer_extraction"
-                else decision_response()
+                else global_response(score=0.95)
             )
 
     results = execute_rescore_plan(plan, Provider(), approved=True)

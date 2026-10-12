@@ -1,4 +1,4 @@
-"""Keep technical indices comparable in SQL rankings."""
+"""Rank comparable global assessments by their IA score."""
 
 from sqlalchemy import case, func
 
@@ -26,12 +26,9 @@ def comparable_fit_score():
 
 
 def fit_ranking_columns(*, ascending: bool = False):
-    current = current_fit_expression()
-    score = comparable_fit_score()
-    return (
-        case((current, 0), else_=1).asc(),
-        (score.asc() if ascending else score.desc()).nulls_last(),
-    )
+    """Callers filter comparable candidates; only the IA score determines rank."""
+    score = JobAnalysis.fit_score
+    return ((score.asc() if ascending else score.desc()).nulls_last(),)
 
 
 def fit_metadata_columns():

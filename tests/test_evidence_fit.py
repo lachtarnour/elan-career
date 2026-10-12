@@ -21,7 +21,6 @@ from smartapply.database.models import JobAnalysis as SavedAnalysis
 from smartapply.database.repository.llm_cache import cache_set
 from smartapply.llm import (
     JobFitAssessment,
-    JobFitDecisionEvaluation,
     LLMError,
 )
 from smartapply.llm.batch import BatchResult, build_batch_request
@@ -73,7 +72,7 @@ def explicit_fit_routes(monkeypatch, tmp_path):
     )
 
 
-def fixture(*, levels=(4, 3, 3), skills=None, constraints=None):
+def fixture(*, score=0.88, skills=None, constraints=None):
     profile = get_profile().model_copy(deep=True)
     context = build_fit_context(
         profile, resolve_route(get_llm_settings(), "job_fit_assessment").model
@@ -84,7 +83,7 @@ def fixture(*, levels=(4, 3, 3), skills=None, constraints=None):
             "constraints": constraints or [],
         }
     )
-    evaluation = evaluation_from_user(build_fit_user(context, facts), levels=levels)
+    evaluation = evaluation_from_user(build_fit_user(context, facts), score=score)
     return context, facts, evaluation
 
 
@@ -317,7 +316,7 @@ def batch_fixture(session, job_id):
         user=build_fit_user(
             context, facts, extraction_provenance={"analyzer_input": item.analyzer_input}
         ),
-        schema=JobFitDecisionEvaluation,
+        schema=JobFitAssessment,
         model=context["model"],
         purpose="job_fit_assessment",
         max_completion_tokens=12000,
@@ -326,15 +325,10 @@ def batch_fixture(session, job_id):
 
 
 @pytest.mark.parametrize("path", ["batch", "cache"])
-@pytest.mark.parametrize("warning", [False, True])
-def test_immediate_batch_cache_share_diagnostic_calculation_and_conversion(
-    isolated_db, path, warning
-):
+def test_immediate_batch_cache_share_diagnostic_calculation_and_conversion(isolated_db, path):
     job_id = seed_jobs()[0]
     with session_scope() as session:
         run, item, request, facts, evaluation = batch_fixture(session, job_id)
-        if warning:
-            evaluation.dimensions.missions.findings[0].candidate_refs.append("unknown_ref")
         expected, _ = complete_fit(
             SimpleNamespace(name="openai", complete_json=lambda **kwargs: evaluation),
             run.fit_context,
@@ -363,39 +357,27 @@ def test_immediate_batch_cache_share_diagnostic_calculation_and_conversion(
             key: getattr(job.analysis, key) for key in type(expected).model_fields
         } == expected.model_dump()
         assert job.analysis.fit_diagnostics["evaluation"] == evaluation.model_dump(mode="json")
-        assert bool(job.analysis.fit_diagnostics["diagnostic_checks"]["warnings"]) == warning
+        assert job.analysis.fit_score == evaluation.fit_score
         assert set(job.analysis.raw_response) == set(
             _assemble_analysis(facts, expected).model_dump()
         )
 
 
-@pytest.mark.parametrize("malformed_reliability", [False, True])
-def test_missing_batch_schema_with_identifiable_levels_is_nonblocking(
-    isolated_db, malformed_reliability
-):
+def test_missing_batch_schema_does_not_publish_an_unidentified_response(isolated_db):
     job_id = seed_jobs()[0]
     with session_scope() as session:
         run, item, request, _, evaluation = batch_fixture(session, job_id)
         body = copy.deepcopy(request.body)
         del body["response_format"]
-        raw = evaluation.model_dump(mode="json")
-        if malformed_reliability:
-            raw["reliability"] = {"offer_information": 7, "business_uncertainties": None}
         import_result(
             session,
             run,
             "evaluation",
             {"body": body, "cache_key": request.cache_key, "item_ids": [item.id]},
-            BatchResult(custom_id=request.custom_id, content=json.dumps(raw)),
+            BatchResult(custom_id=request.custom_id, content=evaluation.model_dump_json()),
         )
-        assert item.state == "completed"
-        saved = session.get(Job, job_id).analysis
-        assert saved.fit_score == 0.84
-        assert saved.fit_diagnostics["evaluation"]["reliability"] == raw["reliability"]
-        assert any(
-            "schema unavailable" in warning
-            for warning in saved.fit_diagnostics["diagnostic_checks"]["warnings"]
-        )
+        assert item.state == "evaluation_failed"
+        assert session.get(Job, job_id).analysis is None
 
 
 def test_grouped_batch_cannot_copy_response_to_different_offer(isolated_db):
@@ -511,7 +493,7 @@ def test_content_fingerprints_invalidate_context_and_cache_without_rewriting_his
             custom_id="fingerprint-test",
             system=current["system_prompt"],
             user=build_fit_user(current, offer()),
-            schema=JobFitDecisionEvaluation,
+            schema=JobFitAssessment,
             model=current["model"],
             purpose="job_fit_assessment",
             max_completion_tokens=current["max_completion_tokens"],
@@ -519,7 +501,7 @@ def test_content_fingerprints_invalidate_context_and_cache_without_rewriting_his
 
     previous_cache_key = request(context).cache_key
     if change == "policy":
-        monkeypatch.setitem(POLICY, "weights", [40, 40, 20])
+        monkeypatch.setitem(POLICY, "version", "revised-rubric")
         key = "policy_fingerprint"
     elif change == "prompt":
         original = fit_context.load_prompt
@@ -530,9 +512,9 @@ def test_content_fingerprints_invalidate_context_and_cache_without_rewriting_his
         )
         key = "prompt_fingerprint"
     elif change == "schema":
-        original = JobFitDecisionEvaluation.model_json_schema
+        original = JobFitAssessment.model_json_schema
         monkeypatch.setattr(
-            JobFitDecisionEvaluation,
+            JobFitAssessment,
             "model_json_schema",
             lambda *args, **kwargs: {
                 **original(*args, **kwargs),
@@ -552,23 +534,13 @@ def test_content_fingerprints_invalidate_context_and_cache_without_rewriting_his
     assert snapshot(job_id)["analysis"] == before
 
 
-def test_alternatives_and_peripheral_questions_do_not_introduce_code_penalties():
-    context, facts, evaluation = fixture(levels=(4, 4, 4), skills=["Python ou Julia"])
-    data = evaluation.model_dump()
-    data["issues"] = [
-        {
-            "axis": "context",
-            "origin": "offer_information",
-            "offer_refs": ["domain"],
-            "candidate_refs": [],
-            "text": "Question périphérique",
-        }
-    ]
-    public, diagnostic = evaluate_fit(JobFitDecisionEvaluation.model_validate(data), context, facts)
-    # The simulated interpretation chooses Python. Python validates one requirement;
-    # it does not split alternatives or infer missing Julia from their names.
-    assert public.fit_score == 1.0
-    assert "applied_caps" not in diagnostic
+def test_model_score_and_reservations_are_not_reweighted():
+    context, facts, evaluation = fixture(score=0.7319, skills=["Python ou Julia"])
+    evaluation.risks.append("Question périphérique à confirmer")
+    public, diagnostic = evaluate_fit(evaluation, context, facts)
+    assert public.fit_score == 0.7319
+    assert public.risks == evaluation.risks
+    assert "used_decisions" not in diagnostic
 
 
 def test_factual_profile_edit_during_immediate_request_prevents_publication(isolated_db):

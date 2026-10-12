@@ -292,7 +292,9 @@ def execute_rescore_plan(plan: dict, provider, *, approved=False, profile=None) 
         raise ValueError("Invalid or modified rescore plan")
     context = plan["context"]
     fit_provider = frozen_provider(
-        provider, context.get("provider"), context.get("model"),
+        provider,
+        context.get("provider"),
+        context.get("model"),
         purpose="job_fit_assessment",
         reasoning=context.get("configured_reasoning", context.get("effort")),
         max_output_tokens=context.get("max_completion_tokens"),
@@ -301,7 +303,9 @@ def execute_rescore_plan(plan: dict, provider, *, approved=False, profile=None) 
     extraction_name = extraction_request.get("provider")
     extraction_model = extraction_request.get("model")
     extraction_provider = frozen_provider(
-        provider, extraction_name, extraction_model,
+        provider,
+        extraction_name,
+        extraction_model,
         purpose="job_offer_extraction",
         reasoning=extraction_request.get("reasoning", extraction_request.get("effort")),
         max_output_tokens=extraction_request.get("max_completion_tokens"),
@@ -389,6 +393,9 @@ def execute_rescore_plan(plan: dict, provider, *, approved=False, profile=None) 
                         raise ValueError("Historical raw_response is not an exploitable object")
                     updated = {**raw, **fit.model_dump(mode="json")}
                     JobAnalysis.model_validate(updated)
+                    from smartapply.database.fit_history import archive_fit
+
+                    archive_fit(session, job.analysis)
                     job.analysis.fit_score = fit.fit_score
                     job.analysis.match_reasons = fit.match_reasons
                     job.analysis.risks = fit.risks

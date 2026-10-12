@@ -113,7 +113,7 @@ def test_unranked_offer_uses_its_own_score_foreign_key(isolated_db):
     ]
     with session_scope() as session:
         kept, rejected = session.get(Job, 1), session.get(Job, 2)
-        assert kept.analysis.fit_score == 0.84
+        assert kept.analysis.fit_score == 0.88
         assert kept.ranked_at is None and kept.score is not None
         assert rejected.analysis is None and rejected.analyzed_at is None
 

@@ -1093,7 +1093,7 @@ Item {
                                             horizontalAlignment: Text.AlignHCenter
                                             text: (modelData.llm_score_text || "—")
                                                 + (modelData.llm_score !== null && modelData.llm_score !== undefined && !modelData.fit_current ? " *" : "")
-                                            Accessible.name: "Indice technique " + (modelData.llm_score_text || "indisponible")
+                                            Accessible.name: "Score IA " + (modelData.llm_score_text || "indisponible")
                                                 + ". " + (modelData.fit_status_label || "")
                                             ToolTip.visible: scoreHover.hovered
                                             ToolTip.text: (modelData.fit_status_label || "")
@@ -2212,7 +2212,7 @@ Item {
                     rightPadding: 6
                     Accessible.name: "Score IA minimum"
                     ToolTip.visible: hovered
-                    ToolTip.text: "Le seuil porte sur l’indice technique actuel. Les évaluations historiques restent visibles pour réévaluation."
+                    ToolTip.text: "Le seuil porte sur le score IA global actuel. Les évaluations historiques restent visibles pour réévaluation."
                     Accessible.description: AppBridge.minimumLlmScorePercent < 0
                         ? "Aucun seuil" : Math.round(value) + " pour cent"
                     onMoved: {

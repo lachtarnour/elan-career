@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 
 _TEXT_BOUNDARIES = {
+    "JobFitAssessment": "\n=== IMMUTABLE OFFER ANALYSIS JSON ===\n",
     "JobFitDecisionEvaluation": "\n=== IMMUTABLE OFFER ANALYSIS JSON ===\n",
     "CVSelection": "\n=== JOB ===\n",
 }

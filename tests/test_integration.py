@@ -140,7 +140,7 @@ def _register_llm_fixtures() -> None:
     )
     MockLLMProvider.register(
         "job_fit_assessment",
-        lambda **kwargs: evaluation_from_user(kwargs["user"], levels=(2, 4, 4)),
+        lambda **kwargs: evaluation_from_user(kwargs["user"], score=0.75),
     )
     MockLLMProvider.register(
         "cv_adaptation",

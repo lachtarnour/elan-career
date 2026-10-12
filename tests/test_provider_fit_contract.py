@@ -25,7 +25,7 @@ from smartapply.pipeline.process.analysis_checkpoint import (
     save_extraction,
 )
 from smartapply.profile import get_profile
-from tests.fit_fixtures import decision_response
+from tests.fit_fixtures import global_response
 from tests.llm_config_helpers import change_call, configure_calls
 from tests.test_batch_analysis import extraction_offer, offer, seed_jobs
 
@@ -51,8 +51,8 @@ def test_provider_change_preserves_fit_inputs_contract_and_policy(monkeypatch, t
     assert build_fit_user(first, offer(), extraction_provenance=source) == build_fit_user(
         second, offer(), extraction_provenance=source
     )
-    assert "fit_annotations.technical_findings" in second["system_prompt"]
-    assert first["system_prompt"] != second["system_prompt"]
+    assert "without arithmetic weights" in second["system_prompt"]
+    assert first["system_prompt"] == second["system_prompt"]
     for key in ("user_template", "schema", "policy", "candidate_facts"):
         assert first[key] == second[key]
     assert first["context_fingerprint"] != second["context_fingerprint"]
@@ -180,14 +180,14 @@ def test_fit_keeps_scoring_and_observations_without_extra_call(monkeypatch, tmp_
 
     def complete(**kwargs):
         calls.append(kwargs)
-        return {**decision_response(), "issues": "invalid annotations"}
+        return global_response(score=0.9517)
 
     score, diagnostics = complete_fit(
         SimpleNamespace(name="anthropic", complete_json=complete), context, offer()
     )
     assert len(calls) == 1 and calls[0]["model"] == "claude-haiku-4-5"
-    assert score.fit_score == 0.95
-    assert diagnostics["diagnostic_checks"]["warnings"]
+    assert score.fit_score == 0.9517
+    assert diagnostics["evaluation"]["fit_score"] == 0.9517
 
 
 def test_extraction_checkpoints_remain_isolated_by_provider(isolated_db):

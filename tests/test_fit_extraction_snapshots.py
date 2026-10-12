@@ -25,9 +25,8 @@ explicit_fit_routes = _explicit_fit_routes
 
 
 def offer_block(user):
-    return json.loads(
-        user.split("=== IMMUTABLE OFFER ANALYSIS JSON ===\n", 1)[1].split("\n\n===", 1)[0]
-    )
+    suffix = user.split("=== IMMUTABLE OFFER ANALYSIS JSON ===\n", 1)[1]
+    return json.JSONDecoder().raw_decode(suffix)[0]
 
 
 @pytest.mark.parametrize("missing_historical_field", [False, True])

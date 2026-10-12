@@ -2109,6 +2109,36 @@ host.deleteLater()
 """
 
 
+_SCENARIOS["global_fit_card_shows_model_score_without_axis_levels"] = r"""
+bridge.job.update({
+    "has_analysis": True, "llm_score": 0.6137, "fit_current": True,
+    "fit_axes": [], "match_reasons": ["Appui direct sur les missions."],
+})
+bridge.currentJobChanged.emit()
+app.processEvents()
+card = page.findChild(QQuickItem, "offerFitEvaluation")
+assert card.property("visible")
+assert visual_item(card, "offerGlobalFitScore").property("text") == "Score IA : 61 %"
+assert card.findChild(QQuickItem, "offerFitAxis_missions") is None
+assert page.property("matchInsightPoints") == ["Appui direct sur les missions."]
+# Both lifecycle workspaces use the same global score component.
+component = QQmlComponent(engine, QUrl.fromLocalFile(str(qml / "components" / "AnalysisOfferDetail.qml")))
+assert not component.isError(), [error.toString() for error in component.errors()]
+detail = component.create()
+assert detail is not None
+detail.setProperty("width", 600)
+detail.setProperty("height", 850)
+detail.setProperty("offer", bridge.job)
+components.append(component)
+pages.append(detail)
+app.processEvents()
+analysis_card = detail.findChild(QQuickItem, "analysisOfferFitEvaluation")
+assert analysis_card.property("visible")
+assert visual_item(analysis_card, "offerGlobalFitScore").property("text") == "Score IA : 61 %"
+assert analysis_card.findChild(QQuickItem, "offerFitAxis_missions") is None
+"""
+
+
 _SCENARIOS["fit_card_shows_only_three_level_scores"] = r"""
 card = page.findChild(QQuickItem, "offerFitEvaluation")
 assert not card.property("visible")

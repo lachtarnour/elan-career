@@ -33,6 +33,8 @@ def fit_summary(diagnostics, *, has_score: bool) -> dict:
 
 def fit_detail(diagnostics, *, match_reasons=()) -> dict:
     raw = diagnostics if isinstance(diagnostics, dict) else {}
+    if raw.get("score_source") == "llm" or not raw.get("used_decisions"):
+        return {"fit_axes": (), "fit_reliability": (), "fit_warnings": ()}
     decisions = raw.get("used_decisions")
     decisions = decisions if isinstance(decisions, dict) else {}
     levels = raw.get("used_levels")
@@ -57,8 +59,14 @@ def fit_detail(diagnostics, *, match_reasons=()) -> dict:
             if not text:
                 continue
             # Retain the saved explanation's evidence qualifiers when available.
-            saved = next((reason for reason in match_reasons
-                          if reason == text or reason.endswith(": " + text)), None)
+            saved = next(
+                (
+                    reason
+                    for reason in match_reasons
+                    if reason == text or reason.endswith(": " + text)
+                ),
+                None,
+            )
             support = item.get("support")
             prefix = {
                 "declared_only": "Déclaré : ",

@@ -18,6 +18,10 @@ def set_analysis(session: Session, job_id: int, **fields: Any) -> JobAnalysis:
         analysis = JobAnalysis(job_id=job_id, **fields)
         session.add(analysis)
         return analysis
+    if {"fit_score", "fit_diagnostics", "raw_response"} & fields.keys():
+        from smartapply.database.fit_history import archive_fit
+
+        archive_fit(session, existing)
     for key, value in fields.items():
         setattr(existing, key, value)
     return existing

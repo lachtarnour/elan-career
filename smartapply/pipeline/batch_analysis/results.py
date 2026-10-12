@@ -13,6 +13,7 @@ from smartapply.database.analysis_batches import AnalysisBatchItem, AnalysisBatc
 from smartapply.database.models import Job
 from smartapply.database.repository.llm_cache import cache_get, cache_set, record_usage
 from smartapply.llm import (
+    JobFitAssessment,
     JobFitDecisionEvaluation,
     OfferAnalysis,
     OfferExtractionOutput,
@@ -60,7 +61,7 @@ from smartapply.profile import get_profile
 PHASE_SCHEMA = {
     "screening": JobScopeScreening,
     "extraction": OfferExtractionOutput,
-    "evaluation": JobFitDecisionEvaluation,
+    "evaluation": JobFitAssessment,
 }
 PHASE_PURPOSE = {
     "screening": "job_scope_screening",
@@ -92,8 +93,11 @@ def new_item(
             session,
             job,
             extraction_key(
-                analyzer_input, model, max_completion_tokens=max_completion_tokens,
-                provider=provider, effort=effort,
+                analyzer_input,
+                model,
+                max_completion_tokens=max_completion_tokens,
+                provider=provider,
+                effort=effort,
             ),
         )
         if session
@@ -144,7 +148,7 @@ def current_job(session: Session, item: AnalysisBatchItem, run: AnalysisBatchRun
         raise FrozenConfigurationError("Contexte d'évaluation manquant dans le lot.")
     if not context_is_current(run.fit_context, get_profile()):
         item.state = "skipped"
-        item.error = "Le profil a changé depuis le lancement. Relancez avec le profil actuel."
+        item.error = "Le profil ou le contrat d’évaluation a changé depuis le lancement. Relancez avec les réglages actuels."
         return None
     return job
 
@@ -294,7 +298,7 @@ def accept_result(
         item.state = "evaluation_pending"
     else:
         offer = extraction_offer_facts(item.offer_data)
-        if not isinstance(validated, (JobFitDecisionEvaluation, FitDecisionResponse)):
+        if not isinstance(validated, JobFitAssessment):
             raise LLMValidationError("Réponse d'évaluation incompatible avec le contrat fit.")
         if run.fit_context is None:
             raise LLMValidationError("Diagnostic sans contexte figé")
@@ -476,6 +480,7 @@ def schema_for_request(body: dict, content: str | None = None):
         model.__name__: model
         for model in (
             OfferExtractionOutput,
+            JobFitAssessment,
             JobFitDecisionEvaluation,
             JobScopeScreening,
         )

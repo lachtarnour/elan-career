@@ -31,7 +31,7 @@ def build_user_prompt(
     reference_date: date | None = None,
     extraction_provenance: dict | None = None,
 ) -> str:
-    """reference_date is kept for callers; it is not a scoring criterion."""
+    """Freeze the reference date alongside the full profile and immutable offer."""
     settings = get_llm_settings()
     route = resolve_route(settings, "job_fit_assessment")
     return build_fit_user(
@@ -42,6 +42,7 @@ def build_user_prompt(
             max_completion_tokens=route.max_output_tokens,
             settings=settings,
             effort=route.reasoning,
+            reference_date=reference_date,
         ),
         offer_analysis,
         extraction_provenance=extraction_provenance,

@@ -13,7 +13,7 @@ from smartapply.llm.fit_context import build_fit_context, context_is_current
 from smartapply.pipeline.batch_analysis.coordinator import BatchAnalysisCoordinator
 from smartapply.pipeline.rescore import execute_rescore_plan, prepare_rescore_plan
 from smartapply.profile import get_profile
-from tests.fit_fixtures import decision_response
+from tests.fit_fixtures import global_response
 from tests.llm_config_helpers import change_call, configure_calls
 from tests.test_batch_analysis import FakeTransport, extraction_offer, journal, pipeline, seed_jobs
 from tests.test_evidence_fit import seeded_analysis
@@ -90,7 +90,7 @@ def test_approved_rescore_uses_complete_prepared_routes_after_json_changes(
 
         def complete_json(self, **kwargs):
             calls.append(kwargs)
-            return extraction_offer() if kwargs["purpose"] == "job_offer_extraction" else decision_response()
+            return extraction_offer() if kwargs["purpose"] == "job_offer_extraction" else global_response(score=0.95)
 
     results = execute_rescore_plan(plan, Provider(), approved=True)
     assert results[0]["status"] == "rescored", results

@@ -44,7 +44,7 @@ L'analyse a trois appels structurés :
 
 1. **Préfiltre des missions.** Un appel indépendant produit `mission_screen` à partir du texte de l'annonce. Seules les missions **clairement hors périmètre** et **suffisamment décrites** sont archivées. Les erreurs et incertitudes laissent passer l'offre. Voir [préfiltre des missions](extraction-mission-screen.md).
 2. **Extraction des faits.** Le modèle extrait missions, exigences, séniorité, langue et autres faits de l'offre, sans verdict de préfiltre ni profil candidat. Les citations conservées sont vérifiées contre le texte.
-3. **Évaluation du profil.** Les faits retenus sont comparés au profil candidat. Le calcul `evidence_fit` produit `job_analyses.fit_score`, affiché comme score **IA**, et sauvegarde raisons, risques et diagnostics. Le score aide à prioriser ; il ne déclenche pas un rejet automatique. Voir [contrat et calcul de pertinence](evidence-fit.md).
+3. **Évaluation du profil.** Les faits retenus sont comparés au profil candidat. Le LLM donne directement une note globale `job_analyses.fit_score`, affichée comme score **IA**, et sauvegarde raisons, risques et diagnostics. Le score aide à prioriser ; il ne déclenche pas un rejet automatique. Voir [contrat et calcul de pertinence](evidence-fit.md).
 
 Une offre ou un profil modifié pendant l'opération invalide le résultat devenu obsolète avant sa publication. Une extraction validée peut être reprise depuis un checkpoint compatible ; une analyse complète efface ce checkpoint. Les offres clairement écartées au préfiltre restent consultables dans les archives et peuvent être reprises manuellement.
 

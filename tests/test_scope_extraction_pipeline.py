@@ -382,7 +382,7 @@ def test_invalid_immediate_screen_cache_is_evicted_before_provider_call(
             purpose="job_scope_screening", provider=route.provider,
         )
     assert runner(get_llm_provider())._analyze_one(job_id=job_id)
-    assert calls == ["JobScopeScreening", "OfferExtractionOutput", "JobFitDecisionEvaluation"]
+    assert calls == ["JobScopeScreening", "OfferExtractionOutput", "JobFitAssessment"]
     with session_scope() as session:
         assert session.scalar(select(LLMCache).where(LLMCache.cache_key == key)).response != "{}"
 

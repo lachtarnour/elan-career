@@ -510,15 +510,60 @@ def fit_diagnostics_command(job_id):
             raise click.ClickException("Offre sans analyse.")
         diagnostics = job.analysis.fit_diagnostics
         click.echo(
+            json.dumps(diagnostics or {"evaluation": "historical"}, ensure_ascii=False, indent=2)
+        )
+
+
+@cli.command("fit-history")
+@click.option("--job-id", required=True, type=int)
+@click.option("--restore", "history_id", type=int, help="Restaurer cet historique sans appel IA.")
+def fit_history_command(job_id, history_id):
+    """Lister ou restaurer les évaluations précédentes sans toucher aux candidatures."""
+    from sqlalchemy import select
+
+    from smartapply.concurrency import TaskConflictError, job_operation
+    from smartapply.database import write_session_scope
+    from smartapply.database.fit_history import restore_fit
+    from smartapply.database.models import JobFitHistory
+
+    if history_id is not None:
+        try:
+            with (
+                job_operation([job_id], operation="restauration du score IA"),
+                write_session_scope() as session,
+            ):
+                restored = restore_fit(session, job_id, history_id)
+                result = {"job_id": job_id, "restored": history_id, "fit_score": restored.fit_score}
+            click.echo(json.dumps(result, ensure_ascii=False))
+        except (ValueError, TaskConflictError) as exc:
+            raise click.ClickException(str(exc)) from exc
+        return
+    with session_scope() as session:
+        history = session.scalars(
+            select(JobFitHistory)
+            .where(JobFitHistory.job_id == job_id)
+            .order_by(JobFitHistory.id.desc())
+        ).all()
+        click.echo(
             json.dumps(
-                diagnostics or {"evaluation": "historical"}, ensure_ascii=False, indent=2
+                [
+                    {
+                        "id": entry.id,
+                        "fit_score": entry.snapshot.get("fit_score"),
+                        "policy": (entry.snapshot.get("fit_diagnostics") or {}).get("policy_name"),
+                        "archived_at": entry.archived_at.isoformat(),
+                    }
+                    for entry in history
+                ],
+                ensure_ascii=False,
+                indent=2,
             )
         )
 
 
 @cli.command("fit-schema")
 def fit_schema_command():
-    """Ajouter seulement les colonnes de diagnostic, sans recalcul ni maintenance."""
+    """Ajouter le schéma de diagnostic et d’historique, sans recalcul."""
     from smartapply.database.fit_schema import ensure_fit_schema
 
     try:

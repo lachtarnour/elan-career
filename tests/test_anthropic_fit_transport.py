@@ -255,6 +255,9 @@ def test_malformed_annotations_preserve_score_and_raw_evidence(monkeypatch, tmp_
     raw = json.dumps(wire, ensure_ascii=False)
     context = build_fit_context(get_profile(), "claude-haiku-5-5", provider="anthropic")
     parsed = read_fit_response(raw)
+    from smartapply.llm.fit_context import LEGACY_POLICY
+
+    context["policy"] = copy.deepcopy(LEGACY_POLICY)
     public, diagnostics = evaluate_fit(parsed, context, offer())
     assert public.fit_score == calculate_fit_decisions(parsed.decisions)[0]
     assert diagnostics["original_response"] == raw
@@ -485,9 +488,7 @@ def test_missing_record_list_does_not_invent_an_absent_block():
     assert "reliability" not in parsed.raw and schema_observations(parsed)
 
 
-def test_prompt_is_compact_only_for_anthropic_and_signed_legacy_context_is_supported(
-    monkeypatch, tmp_path
-):
+def test_global_prompt_is_shared_across_providers_and_context_remains_signed(monkeypatch, tmp_path):
     from smartapply.llm.fit_context import context_is_current, fingerprint
     from smartapply.llm.prompts.job_fit import build_system_prompt
 
@@ -504,8 +505,7 @@ def test_prompt_is_compact_only_for_anthropic_and_signed_legacy_context_is_suppo
     profile = get_profile()
     ctx = build_fit_context(profile, "claude-haiku-5-5", provider="anthropic")
     assert ctx["system_prompt"] == build_system_prompt(provider="anthropic")
-    assert ctx["system_prompt"] != build_system_prompt(provider="openai")
-    assert len(ctx["system_prompt"].split()) < len(build_system_prompt().split())
+    assert ctx["system_prompt"] == build_system_prompt(provider="openai")
     legacy = copy.deepcopy(ctx)
     legacy["system_prompt"] = build_system_prompt()
     legacy["prompt_fingerprint"] = fingerprint(
