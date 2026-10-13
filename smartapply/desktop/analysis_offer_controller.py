@@ -17,7 +17,13 @@ class AnalysisOfferController(QObject):
         self.loading = False
 
     def select(self, job_id):
-        if self.bridge.shutdownRequested or job_id <= 0:
+        if self.bridge.shutdownRequested:
+            return
+        if job_id <= 0:
+            self.selected_id = 0
+            self.offer = {}
+            self.loading = False
+            self.changed.emit()
             return
         if job_id == self.selected_id and self.offer:
             return
@@ -42,6 +48,8 @@ class AnalysisOfferController(QObject):
         )
 
     def _loaded(self, value):
+        if not self.selected_id:
+            return
         offer = self.serialize(value) if value else {}
         if offer != self.offer:
             self.offer = offer

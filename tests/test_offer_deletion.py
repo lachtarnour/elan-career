@@ -1,6 +1,7 @@
 """Permanent deletion uses isolated files and DBs, never real dossiers."""
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event, Thread
 
@@ -28,7 +29,8 @@ from smartapply.database.models import (
     LLMCache,
     LLMUsage,
 )
-from smartapply.desktop.offer_deletion import delete_ready_offer
+from smartapply.desktop.offer_deletion import delete_analysis_offer, delete_ready_offer
+from smartapply.filtering.hard_reject.types import HardRejectResult
 from smartapply.pipeline.output_deletion import (
     DELETION_PREFIX,
     ApplicationOutputDeletion,
@@ -68,6 +70,47 @@ def ready_offer(external_id="target"):
 
 def count(session, model):
     return session.scalar(select(func.count()).select_from(model))
+
+
+def analysis_offer(external_id="pending"):
+    with write_session_scope() as session:
+        job = Job(
+            external_id=external_id,
+            title="Data Scientist",
+            source_company="Acme",
+            description="Python ML",
+            source="manual",
+            status=JobStatus.FILTERED,
+            filtered_at=datetime.now(timezone.utc),
+        )
+        job.score = JobScore(components={
+            "filter_disposition": "pending_relevance",
+            "hard_reject": HardRejectResult(decisions=()).audit_payload(),
+        })
+        session.add(job)
+        session.flush()
+        return job.id
+
+
+def test_delete_analysis_offer_removes_available_offer(isolated_db):
+    job_id = analysis_offer()
+    other_id = analysis_offer("other")
+    result = delete_analysis_offer(job_id)
+    assert result.job_ids == (job_id,)
+    assert result.application_ids == ()
+    with session_scope() as session:
+        assert session.get(Job, job_id) is None
+        assert session.get(Job, other_id) is not None
+
+
+def test_delete_analysis_offer_rejects_linked_application(isolated_db):
+    job_id = analysis_offer()
+    with write_session_scope() as session:
+        session.get(Job, job_id).application = Application(status=JobStatus.ANALYZED)
+    with pytest.raises(ValueError, match="À analyser"):
+        delete_analysis_offer(job_id)
+    with session_scope() as session:
+        assert session.get(Job, job_id) is not None
 
 
 def test_delete_offer_documents_results_usage_copies_and_completed_batch(isolated_db):

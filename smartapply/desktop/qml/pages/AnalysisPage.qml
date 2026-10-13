@@ -73,6 +73,10 @@ Item {
             && reservedOfferIds.indexOf(jobId) < 0
     }
 
+    function canDelete(jobId) {
+        return canArchive(jobId) && candidateIds.indexOf(jobId) >= 0
+    }
+
     function confirmArchive(ids) {
         if (!ids.length || !ids.every(canArchive)) return
         archiveConfirm.ids = ids.slice()
@@ -219,6 +223,11 @@ Item {
     Connections {
         target: AppBridge
         function onAnalysisOffersArchived(ids) {
+            var next = Object.assign({}, root.selectedOffers)
+            ids.forEach(function(jobId) { delete next[String(jobId)] })
+            root.selectedOffers = next
+        }
+        function onOffersDeleted(ids, applicationIds) {
             var next = Object.assign({}, root.selectedOffers)
             ids.forEach(function(jobId) { delete next[String(jobId)] })
             root.selectedOffers = next
@@ -621,6 +630,7 @@ Item {
                     offer: AppBridge.analysisOffer || ({})
                     loading: AppBridge.analysisOfferLoading
                     archiveEnabled: !loading && offer.status !== "archived" && root.canArchive(offerId)
+                    deleteEnabled: !loading && root.canDelete(offerId)
                     trackingAvailable: Boolean(root.selectedRun.id) && !root.launching
                     trackingExpanded: root.trackingExpanded
                     requestedId: Number(AppBridge.analysisOfferId || 0)
@@ -628,6 +638,12 @@ Item {
                     pageWidth: root.width
                     onSourceRequested: function(url) { AppBridge.openUrl(url) }
                     onArchiveRequested: function(jobId) { root.confirmArchive([jobId]) }
+                    onDeleteRequested: function(jobId, title, company) {
+                        deleteConfirm.targetJobId = jobId
+                        deleteConfirm.targetTitle = title
+                        deleteConfirm.targetCompany = company
+                        deleteConfirm.open()
+                    }
                     onTrackingToggled: root.trackingExpanded = !root.trackingExpanded
                 }
             }
@@ -716,6 +732,24 @@ Item {
         }
 
 
+    }
+
+    ConfirmDialog {
+        id: deleteConfirm
+        objectName: "analysisDeleteConfirm"
+        property int targetJobId: 0
+        property string targetTitle: ""
+        property string targetCompany: ""
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        heading: "Supprimer cette offre ?"
+        message: targetTitle + " · " + targetCompany
+            + "\n\nL’offre et ses copies confirmées seront effacées définitivement. Cette action est irréversible."
+        confirmText: "Supprimer définitivement"
+        kind: "danger"
+        iconSource: Theme.icon("trash")
+        confirmEnabled: root.canDelete(targetJobId)
+        onAccepted: AppBridge.deleteAnalysisOffer(targetJobId)
     }
 
     ConfirmDialog {

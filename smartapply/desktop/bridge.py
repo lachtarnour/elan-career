@@ -1888,6 +1888,20 @@ class DesktopBridge(QObject):
             on_success=deleted, requires_maintenance=True,
         )
 
+    @Slot(int)
+    def deleteAnalysisOffer(self, job_id: int) -> None:  # noqa: N802
+        def deleted(result):
+            self.offersDeleted.emit(list(result.job_ids), [])
+            if self._analysis_offer_controller.selected_id in result.job_ids:
+                self._analysis_offer_controller.select(0)
+            self._analysis_controller.refresh(sync=False)
+            self._operation_done("Offre supprimée", "L’offre a été supprimée définitivement.")
+
+        self._mutate(
+            self.service.delete_analysis_offer, job_id,
+            on_success=deleted, requires_maintenance=True,
+        )
+
     def _update_shortlist_pending(self):
         if getattr(self, "_current_job", None):
             self._current_job = dict(self._current_job)

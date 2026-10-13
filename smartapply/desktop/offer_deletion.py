@@ -23,6 +23,7 @@ from smartapply.pipeline.output_deletion import (
     owned_application_directory,
 )
 from smartapply.pipeline.output_publication import recover_application_publication
+from smartapply.pipeline.process.analysis_admission import is_current_analysis_candidate
 
 
 @dataclass(frozen=True)
@@ -113,3 +114,23 @@ def delete_ready_offer(job_id: int) -> OfferDeletionResult:
             output.rollback()
             raise
         return OfferDeletionResult(tuple(sorted(ids)), tuple(sorted(directories)), output.finish())
+
+
+def delete_analysis_offer(job_id: int) -> OfferDeletionResult:
+    """Delete one available analysis offer and its confirmed copies."""
+    ensure_startup_maintenance_complete()
+    with job_operation([job_id], operation="suppression définitive"), write_session_scope() as session:
+        if session.bind.dialect.name == "sqlite":
+            session.execute(text("BEGIN IMMEDIATE"))
+        job = session.get(Job, job_id)
+        if job is None or not is_current_analysis_candidate(
+            session, job, exclude_reserved=True
+        ):
+            raise ValueError("Cette offre n’est plus dans À analyser. Actualisez la liste.")
+        ids = confirmed_offer_ids(session, job_id)
+        assert_no_active_batch(session, ids)
+        jobs = list(session.scalars(select(Job).where(Job.id.in_(ids))).unique())
+        if any(job.application is not None for job in jobs):
+            raise ValueError("Une offre liée possède un dossier de candidature. Supprimez-le depuis Prêt.")
+        erase_offer_rows(session, jobs)
+        return OfferDeletionResult(tuple(sorted(ids)), (), True)

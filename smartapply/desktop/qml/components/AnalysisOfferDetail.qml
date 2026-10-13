@@ -8,6 +8,7 @@ Item {
     property int requestedId: 0
     property bool loading: false
     property bool archiveEnabled: false
+    property bool deleteEnabled: false
     property bool trackingAvailable: false
     property bool trackingExpanded: false
     property real pageWidth: 1400
@@ -18,6 +19,7 @@ Item {
     signal sourceRequested(string url)
     signal retryRequested()
     signal archiveRequested(int jobId)
+    signal deleteRequested(int jobId, string title, string company)
     signal trackingToggled()
     onOfferIdChanged: detailViewport.contentY = 0
 
@@ -219,6 +221,18 @@ Item {
                 implicitHeight: 32
                 enabled: root.archiveEnabled && root.offerId > 0
                 onClicked: root.archiveRequested(root.offerId)
+            }
+            AppButton {
+                objectName: "analysisDeleteOfferAction"
+                text: "Supprimer"
+                iconSource: Theme.icon("trash")
+                kind: "danger"
+                visible: root.offerId > 0 && root.deleteEnabled
+                refined: true
+                fontPixelSize: 11
+                implicitHeight: 32
+                onClicked: root.deleteRequested(root.offerId,
+                    String(root.offer.title || ""), String(root.offer.company || ""))
             }
             Item { Layout.fillWidth: true }
             AppButton {

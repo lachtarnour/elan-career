@@ -2171,6 +2171,11 @@ class DesktopService(AnalysisServiceMixin, GenerationServiceMixin):
 
         return delete_ready_offer(job_id)
 
+    def delete_analysis_offer(self, job_id: int):
+        from smartapply.desktop.offer_deletion import delete_analysis_offer
+
+        return delete_analysis_offer(job_id)
+
     def archive_application(self, application_id: int) -> bool:
         """Archive an application and its associated offer."""
         with session_scope() as session:
