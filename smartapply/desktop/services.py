@@ -2171,6 +2171,11 @@ class DesktopService(AnalysisServiceMixin, GenerationServiceMixin):
 
         return delete_ready_offer(job_id)
 
+    def delete_analyzed_offer(self, job_id: int):
+        from smartapply.desktop.offer_deletion import delete_analyzed_offer
+
+        return delete_analyzed_offer(job_id)
+
     def delete_analysis_offer(self, job_id: int):
         from smartapply.desktop.offer_deletion import delete_analysis_offer
 

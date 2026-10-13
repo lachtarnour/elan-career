@@ -86,6 +86,69 @@ host.deleteLater()
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_analyzed_offer_delete_action_routes_both_detail_layouts():
+    helpers = runpy.run_path(str(Path(__file__).with_name("test_desktop_qml_responsiveness.py")))
+    harness = helpers["_HARNESS"].replace(
+        "class Bridge(QObject):",
+        """class Bridge(QObject):
+    @Slot(int)
+    def deleteReadyOffer(self, job_id):
+        self.ready_deletions.append(job_id)
+
+    @Slot(int)
+    def deleteAnalyzedOffer(self, job_id):
+        self.analyzed_deletions.append(job_id)
+""",
+    )
+    scenario = r"""
+bridge.ready_deletions = []
+bridge.analyzed_deletions = []
+bridge.protected = []
+host = QQuickWindow()
+host.resize(1400, 850)
+page.setParentItem(host.contentItem())
+host.show()
+bridge.job = {**offer(42, 0), "status": "analyzed", "application": {}}
+bridge.currentJobChanged.emit()
+app.processEvents()
+button = page.findChild(QQuickItem, "offerDeleteAnalyzedAction")
+dialog = page.findChild(QObject, "deleteReadyOfferDialog")
+assert button.property("visible") and button.property("enabled")
+assert QMetaObject.invokeMethod(button, "clicked", Qt.DirectConnection)
+wait_until(lambda: dialog.property("visible"))
+assert dialog.property("targetJobId") == 42
+assert dialog.property("targetStatus") == "analyzed"
+assert QMetaObject.invokeMethod(dialog, "accept", Qt.DirectConnection)
+assert bridge.analyzed_deletions == [42] and bridge.ready_deletions == []
+bridge.job = {**offer(43, 8), "status": "analyzed"}
+bridge.currentJobChanged.emit()
+app.processEvents()
+button_with_reservation = page.findChild(QQuickItem, "offerDeleteAction")
+assert button_with_reservation.property("visible")
+assert QMetaObject.invokeMethod(button_with_reservation, "clicked", Qt.DirectConnection)
+wait_until(lambda: dialog.property("visible"))
+assert dialog.property("targetJobId") == 43
+assert QMetaObject.invokeMethod(dialog, "accept", Qt.DirectConnection)
+assert bridge.analyzed_deletions == [42, 43] and bridge.ready_deletions == []
+host.hide()
+page.setParentItem(None)
+host.deleteLater()
+"""
+    env = {
+        **os.environ,
+        "QT_QPA_PLATFORM": "offscreen",
+        "QT_QUICK_BACKEND": "software",
+        "QSG_RHI_BACKEND": "software",
+        "QT_QUICK_CONTROLS_STYLE": "Basic",
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", harness + scenario + helpers["_TEARDOWN"],
+         str(Path(__file__).parents[1] / "smartapply/desktop/qml")],
+        env=env, capture_output=True, text=True, timeout=25,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_analysis_offer_deletion_requires_confirmation():
     helpers = runpy.run_path(str(Path(__file__).with_name("test_desktop_qml_responsiveness.py")))
     harness = helpers["_HARNESS"].replace(

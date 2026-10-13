@@ -54,6 +54,14 @@ Item {
         return Boolean(row.can_generate) || isGenerationResumable(row.id)
     }
 
+    function confirmDeleteOffer() {
+        deleteOfferDialog.targetJobId = Number(AppBridge.currentJob.id)
+        deleteOfferDialog.targetTitle = String(AppBridge.currentJob.title || "")
+        deleteOfferDialog.targetCompany = String(AppBridge.currentJob.company || "")
+        deleteOfferDialog.targetStatus = String(AppBridge.currentJob.status || "")
+        deleteOfferDialog.open()
+    }
+
     function chooseGenerationMode(ids, shortlist, count) {
         if (shortlist ? !generationLaunchEnabled : !canStartGeneration(ids)) return
         generationMode.jobIds = ids.slice()
@@ -80,13 +88,19 @@ Item {
         property int targetJobId: 0
         property string targetTitle: ""
         property string targetCompany: ""
+        property string targetStatus: ""
         heading: "Supprimer cette offre ?"
         message: targetTitle + " · " + targetCompany
-            + "\n\nL’offre, ses copies confirmées et son dossier de candidature seront effacés définitivement. Cette action est irréversible."
+            + (targetStatus === "analyzed"
+                ? "\n\nL’offre, son analyse et ses copies confirmées seront effacées définitivement. Cette action est irréversible."
+                : "\n\nL’offre, ses copies confirmées et son dossier de candidature seront effacés définitivement. Cette action est irréversible.")
         confirmText: "Supprimer définitivement"
         kind: "danger"
         confirmEnabled: !AppBridge.shutdownRequested && root.busyJobIdsSnapshot.indexOf(targetJobId) < 0
-        onAccepted: AppBridge.deleteReadyOffer(targetJobId)
+        onAccepted: {
+            if (targetStatus === "analyzed") AppBridge.deleteAnalyzedOffer(targetJobId)
+            else AppBridge.deleteReadyOffer(targetJobId)
+        }
     }
     readonly property var documentReviewPoints: applicationData.review_points || []
     readonly property int documentReviewPointCount: documentReviewPoints.length
@@ -1941,7 +1955,7 @@ Item {
                                 }
                                 AppButton {
                                     objectName: "offerDeleteAction"
-                                    visible: AppBridge.currentJob.status === "ready_for_form_submission"
+                                    visible: ["ready_for_form_submission", "analyzed"].indexOf(AppBridge.currentJob.status) >= 0
                                     Layout.minimumWidth: root.detailActionButtonWidth
                                     Layout.preferredWidth: root.detailActionButtonWidth
                                     Layout.maximumWidth: root.detailActionButtonWidth
@@ -1953,12 +1967,7 @@ Item {
                                     iconSize: 13
                                     implicitHeight: root.detailActionButtonHeight
                                     enabled: !AppBridge.shutdownRequested && !root.selectedJobBusy
-                                    onClicked: {
-                                        deleteOfferDialog.targetJobId = Number(AppBridge.currentJob.id)
-                                        deleteOfferDialog.targetTitle = String(AppBridge.currentJob.title || "")
-                                        deleteOfferDialog.targetCompany = String(AppBridge.currentJob.company || "")
-                                        deleteOfferDialog.open()
-                                    }
+                                    onClicked: root.confirmDeleteOffer()
                                 }
                                 AppButton {
                                     Layout.minimumWidth: root.detailActionButtonWidth
@@ -2006,6 +2015,18 @@ Item {
                                     }
                                 }
                                 Item { Layout.fillWidth: true }
+                                AppButton {
+                                    objectName: "offerDeleteAnalyzedAction"
+                                    visible: AppBridge.currentJob.status === "analyzed"
+                                    text: "Supprimer"
+                                    iconSource: Theme.icon("trash")
+                                    kind: "danger"
+                                    fontPixelSize: root.detailButtonFontSize
+                                    refined: true
+                                    implicitHeight: 34
+                                    enabled: !AppBridge.shutdownRequested && !root.selectedJobBusy
+                                    onClicked: root.confirmDeleteOffer()
+                                }
                                 AppButton {
                                     visible: Boolean(AppBridge.currentJob.url)
                                     text: "Offre"

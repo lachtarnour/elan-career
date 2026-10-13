@@ -29,7 +29,11 @@ from smartapply.database.models import (
     LLMCache,
     LLMUsage,
 )
-from smartapply.desktop.offer_deletion import delete_analysis_offer, delete_ready_offer
+from smartapply.desktop.offer_deletion import (
+    delete_analysis_offer,
+    delete_analyzed_offer,
+    delete_ready_offer,
+)
 from smartapply.filtering.hard_reject.types import HardRejectResult
 from smartapply.pipeline.output_deletion import (
     DELETION_PREFIX,
@@ -109,6 +113,42 @@ def test_delete_analysis_offer_rejects_linked_application(isolated_db):
         session.get(Job, job_id).application = Application(status=JobStatus.ANALYZED)
     with pytest.raises(ValueError, match="À analyser"):
         delete_analysis_offer(job_id)
+    with session_scope() as session:
+        assert session.get(Job, job_id) is not None
+
+
+def analyzed_offer(external_id="analyzed", *, with_reservation=False):
+    job_id = analysis_offer(external_id)
+    with write_session_scope() as session:
+        job = session.get(Job, job_id)
+        job.status = JobStatus.ANALYZED
+        job.analyzed_at = datetime.now(timezone.utc)
+        job.analysis = JobAnalysis(raw_response={"role_type": "data"})
+        if with_reservation:
+            job.application = Application(status=JobStatus.ANALYZED)
+    return job_id
+
+
+@pytest.mark.parametrize("with_reservation", [False, True])
+def test_delete_analyzed_offer_removes_offer_and_empty_reservation(isolated_db, with_reservation):
+    job_id = analyzed_offer(with_reservation=with_reservation)
+    with session_scope() as session:
+        application_id = session.get(Job, job_id).application.id if with_reservation else None
+    result = delete_analyzed_offer(job_id)
+    assert result.job_ids == (job_id,)
+    assert result.application_ids == ((application_id,) if application_id else ())
+    with session_scope() as session:
+        assert session.get(Job, job_id) is None
+        if application_id:
+            assert session.get(Application, application_id) is None
+
+
+def test_delete_analyzed_offer_rejects_real_dossier(isolated_db):
+    job_id = analyzed_offer(with_reservation=True)
+    with write_session_scope() as session:
+        session.get(Job, job_id).application.notes = "À revoir"
+    with pytest.raises(ValueError, match="dossier de candidature"):
+        delete_analyzed_offer(job_id)
     with session_scope() as session:
         assert session.get(Job, job_id) is not None
 
@@ -388,7 +428,8 @@ def test_ui_requires_confirmation_for_specific_offer_before_deleting():
     assert page.index('objectName: "offerArchiveApplicationAction"') < page.index(
         'objectName: "offerDeleteAction"'
     )
-    assert "onAccepted: AppBridge.deleteReadyOffer(targetJobId)" in page
+    assert "else AppBridge.deleteReadyOffer(targetJobId)" in page
+    assert "AppBridge.deleteAnalyzedOffer(targetJobId)" in page
     assert "deleteOfferDialog.targetJobId = Number(AppBridge.currentJob.id)" in page
     assert 'confirmText: "Supprimer définitivement"' in page
 

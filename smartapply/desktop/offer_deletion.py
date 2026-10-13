@@ -18,6 +18,7 @@ from smartapply.database.repository.offer_deletion import (
     erase_offer_rows,
 )
 from smartapply.database.session import ensure_startup_maintenance_complete
+from smartapply.jobsearch.offer_state import offer_state
 from smartapply.pipeline.output_deletion import (
     ApplicationOutputDeletion,
     owned_application_directory,
@@ -33,7 +34,7 @@ class OfferDeletionResult:
     files_removed: bool
 
 
-def _load_group(session, job_id: int) -> list[Job]:
+def _load_group(session, job_id: int, *, analyzed: bool = False) -> list[Job]:
     if session.get(Job, job_id) is None:
         raise ValueError("Cette offre a déjà été supprimée.")
     ids = confirmed_offer_ids(session, job_id)
@@ -51,10 +52,27 @@ def _load_group(session, job_id: int) -> list[Job]:
     )
     for job in jobs:
         app = job.application
-        if app and (app.status != JobStatus.READY_FOR_FORM_SUBMISSION or app.form_submitted_at):
+        if analyzed:
+            if app and (
+                app.status != JobStatus.ANALYZED
+                or app.form_submitted_at
+                or app.cv_json
+                or app.cv_docx_path
+                or app.cv_pdf_path
+                or app.documents
+                or app.notes
+                or app.validation_warnings
+                or app.form_submission_url
+                or app.ready_at
+            ):
+                raise ValueError("Une offre liée possède un dossier de candidature. Supprimez-le depuis Prêt.")
+        elif app and (app.status != JobStatus.READY_FOR_FORM_SUBMISSION or app.form_submitted_at):
             raise ValueError("Seuls les dossiers prêts et non envoyés peuvent être supprimés ici.")
     selected = next(job for job in jobs if job.id == job_id)
-    if (
+    if analyzed:
+        if offer_state(selected).status != JobStatus.ANALYZED or selected.archived_at:
+            raise ValueError("Cette offre n’est plus dans Analysé. Actualisez la liste.")
+    elif (
         selected.application is None
         or selected.status != JobStatus.READY_FOR_FORM_SUBMISSION
         or selected.archived_at
@@ -64,10 +82,18 @@ def _load_group(session, job_id: int) -> list[Job]:
 
 
 def delete_ready_offer(job_id: int) -> OfferDeletionResult:
+    return _delete_offer_with_dossiers(job_id, analyzed=False)
+
+
+def delete_analyzed_offer(job_id: int) -> OfferDeletionResult:
+    return _delete_offer_with_dossiers(job_id, analyzed=True)
+
+
+def _delete_offer_with_dossiers(job_id: int, *, analyzed: bool) -> OfferDeletionResult:
     ensure_startup_maintenance_complete()
     with job_operation([job_id], operation="suppression définitive"), ExitStack() as locks:
         with session_scope() as session:
-            jobs = _load_group(session, job_id)
+            jobs = _load_group(session, job_id, analyzed=analyzed)
             ids = {job.id for job in jobs}
             for app in sorted(
                 (job.application for job in jobs if job.application), key=lambda app: app.id
@@ -79,7 +105,7 @@ def delete_ready_offer(job_id: int) -> OfferDeletionResult:
         for application_id in application_ids:
             recover_application_publication(application_id)
         with session_scope() as session:
-            jobs = _load_group(session, job_id)
+            jobs = _load_group(session, job_id, analyzed=analyzed)
             if {job.id for job in jobs} != ids:
                 raise ValueError("Les copies de cette offre ont changé. Actualisez la liste.")
             directories = {
@@ -95,7 +121,7 @@ def delete_ready_offer(job_id: int) -> OfferDeletionResult:
             with write_session_scope() as session:
                 if session.bind.dialect.name == "sqlite":
                     session.execute(text("BEGIN IMMEDIATE"))
-                jobs = _load_group(session, job_id)
+                jobs = _load_group(session, job_id, analyzed=analyzed)
                 if {job.id for job in jobs} != ids:
                     raise ValueError("Les copies de cette offre ont changé. Actualisez la liste.")
                 current = {

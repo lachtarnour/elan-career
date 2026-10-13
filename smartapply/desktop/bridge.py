@@ -1865,6 +1865,13 @@ class DesktopBridge(QObject):
 
     @Slot(int)
     def deleteReadyOffer(self, job_id: int) -> None:  # noqa: N802
+        self._delete_offer_from_jobs(job_id, self.service.delete_ready_offer, has_dossier=True)
+
+    @Slot(int)
+    def deleteAnalyzedOffer(self, job_id: int) -> None:  # noqa: N802
+        self._delete_offer_from_jobs(job_id, self.service.delete_analyzed_offer, has_dossier=False)
+
+    def _delete_offer_from_jobs(self, job_id: int, fn, *, has_dossier: bool) -> None:
         def deleted(result):
             for application_id in result.application_ids:
                 self._notes_epochs[application_id] = self._notes_epochs.get(application_id, 0) + 1
@@ -1874,7 +1881,9 @@ class DesktopBridge(QObject):
             if getattr(self, "_selected_job_id", 0) in result.job_ids:
                 self.selectJob(0)
             if result.files_removed:
-                self._operation_done("Offre supprimée", "L’offre et son dossier ont été supprimés définitivement.")
+                message = ("L’offre et son dossier ont été supprimés définitivement."
+                           if has_dossier else "L’offre a été supprimée définitivement.")
+                self._operation_done("Offre supprimée", message)
             else:
                 self._refresh_workflow()
                 self.toastRequested.emit(
@@ -1884,7 +1893,7 @@ class DesktopBridge(QObject):
                 )
 
         self._mutate_offer_and_advance(
-            job_id, self.service.delete_ready_offer, job_id,
+            job_id, fn, job_id,
             on_success=deleted, requires_maintenance=True,
         )
 
