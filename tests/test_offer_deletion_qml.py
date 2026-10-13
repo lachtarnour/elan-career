@@ -113,6 +113,15 @@ app.processEvents()
 button = page.findChild(QQuickItem, "analysisDeleteOfferAction")
 dialog = page.findChild(QObject, "analysisDeleteConfirm")
 assert button and dialog and button.property("visible") and button.property("enabled")
+bridge.analysis_workspace = {"desktop_view": True, "candidate_ids": [],
+    "matching_candidate_ids": [], "runs": []}
+bridge.analysisWorkspaceChanged.emit()
+app.processEvents()
+assert button.property("visible") and not button.property("enabled")
+bridge.analysis_workspace["candidate_ids"] = [42, 43]
+bridge.analysisWorkspaceChanged.emit()
+app.processEvents()
+assert button.property("enabled")
 assert QMetaObject.invokeMethod(button, "clicked", Qt.DirectConnection)
 wait_until(lambda: dialog.property("visible"))
 assert dialog.property("targetJobId") == 42

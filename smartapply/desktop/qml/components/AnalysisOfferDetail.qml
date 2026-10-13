@@ -227,10 +227,11 @@ Item {
                 text: "Supprimer"
                 iconSource: Theme.icon("trash")
                 kind: "danger"
-                visible: root.offerId > 0 && root.deleteEnabled
+                visible: root.offerId > 0
                 refined: true
                 fontPixelSize: 11
                 implicitHeight: 32
+                enabled: root.deleteEnabled
                 onClicked: root.deleteRequested(root.offerId,
                     String(root.offer.title || ""), String(root.offer.company || ""))
             }
