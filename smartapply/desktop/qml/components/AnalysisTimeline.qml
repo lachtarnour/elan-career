@@ -123,7 +123,7 @@ Item {
         width: parent.width / root.stepCount * (root.compactStages
             ? Math.max(0, root.completedSteps - 1) : root.completedSteps)
         height: 2
-        color: root.productStyle ? Theme.lineStrong : Theme.success
+        color: Theme.success
     }
 
     RowLayout {

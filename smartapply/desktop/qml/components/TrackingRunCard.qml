@@ -38,7 +38,7 @@ Surface {
     strokeColor: "transparent"
 
     function tone() {
-        if (run.status === "completed") return "success"
+        if (run.status === "completed") return "neutral"
         if (run.status === "failed") return "danger"
         if (needsAction || run.status === "expired") return "warning"
         if (run.status === "cancelled") return "neutral"

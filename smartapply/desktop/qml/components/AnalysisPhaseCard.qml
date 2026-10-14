@@ -15,7 +15,7 @@ Item {
     readonly property int completed: Number(phase.completed || 0)
     readonly property int failed: Number(phase.failed || 0)
     readonly property string state: String(phase.status || "waiting")
-    readonly property color markerColor: productStyle && !issue && !current ? Theme.lineStrong : issue ? Theme.warning
+    readonly property color markerColor: productStyle && state === "skipped" ? Theme.lineStrong : issue ? Theme.warning
         : complete ? Theme.success : current ? Theme.accentBright : Theme.lineStrong
 
     implicitHeight: phase.label ? 100 : 82
@@ -78,7 +78,7 @@ Item {
         radius: width / 2
         anchors.horizontalCenter: parent.horizontalCenter
         y: 5
-        color: root.productStyle && !root.current ? Theme.surfaceRaised
+        color: root.productStyle && root.state === "skipped" ? Theme.surfaceRaised
             : root.complete ? Theme.success : root.current ? Theme.accent : Theme.surfaceRaised
         border.width: root.current ? 2 : 1
         border.color: root.markerColor
@@ -87,7 +87,7 @@ Item {
             anchors.centerIn: parent
             visible: root.complete && (!root.productStyle || root.state !== "skipped")
             text: "✓"
-            color: root.productStyle ? Theme.inkSoft : Theme.canvas
+            color: Theme.canvas
             font.pixelSize: root.productStyle ? 11 : 9
             font.weight: Font.Bold
         }

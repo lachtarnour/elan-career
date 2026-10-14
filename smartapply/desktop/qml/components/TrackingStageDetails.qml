@@ -123,8 +123,7 @@ Surface {
                 readonly property int failed: Number(batchData.failed || 0)
                 readonly property int processed: Math.min(total, Number(batchData.completed || 0) + failed)
                 readonly property string state: String(batchData.status || "waiting")
-                readonly property color barColor: failed > 0 ? Theme.warning
-                    : state === "completed" ? Theme.lineStrong : Theme.accentBright
+                readonly property color barColor: failed > 0 ? Theme.warning : Theme.blue
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 10
