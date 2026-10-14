@@ -10,6 +10,7 @@ Surface {
     property bool controlsEnabled: true
     property bool retryEnabled: true
     property bool detailsExpanded: false
+    property bool detailsAlwaysVisible: false
     property bool errorsExpanded: false
     readonly property string runId: String(run.id || "")
     readonly property var errors: run.errors || []
@@ -31,7 +32,7 @@ Surface {
     surfaceColor: "transparent"
     strokeColor: "transparent"
     onRunIdChanged: {
-        detailsExpanded = false
+        if (!detailsAlwaysVisible) detailsExpanded = false
         errorsExpanded = false
     }
 
@@ -92,7 +93,7 @@ Surface {
             Text {
                 objectName: "analysisRunTitle"
                 Layout.fillWidth: true
-                text: (root.generation ? "Création de " : "Analyse de ") + root.total
+                text: (root.generation ? "Génération de " : "Analyse de ") + root.total
                     + (root.total === 1 ? " offre" : " offres")
                 color: Theme.ink
                 font.pixelSize: 14
@@ -130,7 +131,7 @@ Surface {
                 return 0
             }
             onActivated: root.runSelected(String(currentValue))
-            Accessible.name: root.generation ? "Historique des créations" : "Historique des analyses"
+            Accessible.name: root.generation ? "Historique des générations" : "Historique des analyses"
         }
         RowLayout {
             id: headerActions
@@ -142,7 +143,7 @@ Surface {
                 objectName: "analysisActiveCount"
                 visible: root.activeRunCount > 0
                 text: root.activeRunCount + (root.generation
-                    ? (root.activeRunCount === 1 ? " création en cours" : " créations en cours")
+                    ? (root.activeRunCount === 1 ? " génération en cours" : " générations en cours")
                     : (root.activeRunCount === 1 ? " analyse en cours" : " analyses en cours"))
                 tone: "accent"
                 compact: true
@@ -155,6 +156,7 @@ Surface {
             }
             AppButton {
                 objectName: "analysisRunDetailsToggle"
+                visible: !root.detailsAlwaysVisible
                 text: root.detailsExpanded ? "Réduire" : "Détails"
                 refined: true
                 quiet: true
@@ -231,15 +233,17 @@ Surface {
 
     AnalysisTimeline {
         objectName: "analysisTimeline"
-        visible: root.detailsExpanded && (root.generation || root.run.status !== "completed")
+        visible: (root.detailsAlwaysVisible || root.detailsExpanded)
+            && (root.detailsAlwaysVisible || root.generation || root.run.status !== "completed")
         Layout.fillWidth: true
         Layout.preferredHeight: root.generation ? 100 : 82
         run: root.run
+        compactStages: root.detailsAlwaysVisible
     }
 
     ColumnLayout {
         objectName: "analysisRunDetails"
-        visible: root.detailsExpanded
+        visible: root.detailsAlwaysVisible || root.detailsExpanded
         Layout.fillWidth: true
         spacing: 8
 
@@ -258,7 +262,7 @@ Surface {
             objectName: "analysisBatchDetails"
             // A single Batch repeats the progress already shown by the
             // timeline. Keep the breakdown only when it adds per-Batch detail.
-            visible: root.run.status === "completed" || root.hasMultipleBatches
+            visible: root.detailsAlwaysVisible || root.run.status === "completed" || root.hasMultipleBatches
             Layout.fillWidth: true
             columns: root.width >= 1000 ? 2 : 1
             columnSpacing: 12

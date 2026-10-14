@@ -441,6 +441,21 @@ def test_dashboard_counts_confirmed_duplicate_submissions_once(isolated_db) -> N
     assert snapshot.sent_by_day[-1].count == 0
 
 
+def test_dashboard_keeps_archived_submission_in_daily_count(isolated_db) -> None:
+    job_id = _job(external_id="manual:archived-sent-dashboard")
+    submitted_at = datetime.now().astimezone().replace(
+        hour=12, minute=0, second=0, microsecond=0,
+    ).astimezone(timezone.utc)
+    with session_scope() as session:
+        application = create_or_get_application(session, job_id)
+        application.status = JobStatus.ARCHIVED
+        application.form_submitted_at = submitted_at
+
+    snapshot = DesktopService().dashboard()
+    assert snapshot.sent == 1
+    assert snapshot.sent_by_day[-1].count == 1
+
+
 def test_job_rows_expose_generation_capability_from_analysis_state(isolated_db) -> None:
     job_id = _job(external_id="manual:actions")
 

@@ -334,7 +334,9 @@ ApplicationWindow {
                         objectName: "trackingLoader"
                         active: window.trackingLoaded
                         asynchronous: true
-                        sourceComponent: Component { TrackingPage { } }
+                        sourceComponent: Component {
+                            TrackingPage { onNavigateRequested: function(route) { window.navigate(route) } }
+                        }
                     }
                 }
 

@@ -26,6 +26,8 @@ Item {
             if (String(runs[i].id) === target) return runs[i]
         return runs.length ? runs[0] : ({})
     }
+    readonly property string displayedRunId: String(selectedRun.id || "")
+    onDisplayedRunIdChanged: if (viewport) viewport.contentY = 0
     signal refreshRequested()
     signal stopRequested()
     signal retryRequested(string runId)
@@ -61,15 +63,15 @@ Item {
 
     function historyLabel(run) {
         var stamp = String(run.created_at || "")
-        if (!stamp) return "Création n°" + Number(run.sequence || 1)
+        if (!stamp) return "Génération n°" + Number(run.sequence || 1)
         var created = new Date(stamp)
         var date = isNaN(created.getTime()) ? "" : " · " + Qt.formatDateTime(created, "dd/MM HH:mm")
-        return "Création n°" + Number(run.sequence || 1) + date
+        return "Génération n°" + Number(run.sequence || 1) + date
     }
 
     ColumnLayout {
         anchors.fill: parent
-        spacing: 6
+        spacing: 12
         RowLayout {
             Layout.fillWidth: true
             Layout.preferredHeight: 30
@@ -77,7 +79,7 @@ Item {
             AppButton {
                 objectName: "generationTrackingToggle"
                 visible: !root.embedded
-                text: root.expanded ? "Réduire le suivi" : "Suivi des créations"
+                text: root.expanded ? "Réduire le suivi" : "Suivi des générations"
                 iconSource: Theme.icon("analysis")
                 refined: true
                 quiet: true
@@ -88,12 +90,11 @@ Item {
             Text {
                 objectName: "generationTrackingStatus"
                 Layout.fillWidth: true
-                text: root.commandRunning ? "Création en cours…"
+                text: root.commandRunning ? "Génération en cours…"
                     : root.operation === "refresh" ? "Actualisation du suivi…"
                     : root.embedded && root.error ? "Dernier état enregistré"
-                    : [root.selectedRun.status_label || "", root.selectedRun.phase_label || ""].filter(Boolean).join(" · ")
-                color: ["paused", "partial", "failed", "blocked", "attention"].indexOf(root.selectedRun.status) >= 0
-                    ? Theme.warning : Theme.inkMuted
+                    : "Historique des générations"
+                color: root.error ? Theme.warning : Theme.inkMuted
                 font.pixelSize: 11
                 elide: Text.ElideRight
             }
@@ -109,13 +110,11 @@ Item {
             }
             AppButton {
                 objectName: "generationRefreshAction"
-                text: ""
+                text: "Actualiser"
                 iconSource: Theme.icon("refresh")
                 refined: true
-                quiet: true
-                implicitWidth: 30
                 implicitHeight: 30
-                Accessible.name: "Actualiser le suivi des créations"
+                Accessible.name: "Actualiser le suivi des générations"
                 enabled: root.controlsEnabled && !root.loading
                 onClicked: root.refreshRequested()
             }
@@ -133,19 +132,16 @@ Item {
             ScrollBar.vertical: AppScrollBar { visible: viewport.contentHeight > viewport.height + 2 }
             ColumnLayout {
                 id: content
-                width: viewport.width - (viewport.contentHeight > viewport.height + 2 ? Theme.scrollGutter : 0)
-                spacing: 8
-                Text {
+                width: Math.max(0, viewport.width - Theme.scrollGutter)
+                spacing: 12
+                TrackingNotice {
                     objectName: "generationWorkspaceError"
                     visible: root.error.length > 0
                     Layout.fillWidth: true
-                    text: root.error
-                    textFormat: Text.PlainText
-                    color: Theme.warning
-                    font.pixelSize: 12
-                    wrapMode: Text.WordWrap
+                    heading: "La synchronisation n’a pas abouti"
+                    message: root.error
                 }
-                AnalysisRunCard {
+                TrackingRunCard {
                     objectName: "generationRunCard"
                     visible: Boolean(root.selectedRun.id)
                     Layout.fillWidth: true
@@ -165,39 +161,48 @@ Item {
                         abandonConfirm.open()
                     }
                 }
-                RowLayout {
-                    objectName: "generationHistoryPagination"
-                    visible: root.desktopView
-                    Layout.fillWidth: true
-                    Text {
-                        Layout.fillWidth: true
-                        text: root.historyTotal + " créations · page " + root.historyPage
-                            + " / " + Math.max(1, Math.ceil(root.historyTotal / root.historyPageSize))
-                        color: Theme.inkMuted
-                        font.pixelSize: 11
-                    }
-                    AppButton {
-                        objectName: "generationPreviousHistoryPageAction"
-                        text: "‹"
-                        Accessible.name: "Page précédente de l’historique des créations"
-                        refined: true
-                        implicitWidth: 32
-                        implicitHeight: 30
-                        enabled: root.historyPage > 1 && !root.loading && root.controlsEnabled
-                        onClicked: root.historyPageRequested(root.historyPage - 1)
-                    }
-                    AppButton {
-                        objectName: "generationNextHistoryPageAction"
-                        text: "›"
-                        Accessible.name: "Page suivante de l’historique des créations"
-                        refined: true
-                        implicitWidth: 32
-                        implicitHeight: 30
-                        enabled: root.historyPage * root.historyPageSize < root.historyTotal
-                            && !root.loading && root.controlsEnabled
-                        onClicked: root.historyPageRequested(root.historyPage + 1)
-                    }
-                }
+            }
+        }
+        RowLayout {
+            objectName: "generationHistoryPagination"
+            visible: root.expanded && root.desktopView && root.historyTotal > 0
+            Layout.fillWidth: true
+            Layout.rightMargin: Theme.scrollGutter
+            spacing: 8
+            Text {
+                Layout.fillWidth: true
+                text: root.historyTotal + (root.historyTotal === 1 ? " génération enregistrée" : " générations enregistrées")
+                color: Theme.inkFaint
+                font.pixelSize: 11
+            }
+            Text {
+                text: "Page " + root.historyPage + " / " + Math.max(1, Math.ceil(root.historyTotal / root.historyPageSize))
+                color: Theme.inkMuted
+                font.pixelSize: 11
+            }
+            AppButton {
+                objectName: "generationPreviousHistoryPageAction"
+                text: ""
+                iconSource: Theme.icon("chevron-right")
+                contentItem.rotation: 180
+                Accessible.name: "Page précédente de l’historique des générations"
+                refined: true
+                implicitWidth: 30
+                implicitHeight: 30
+                enabled: root.historyPage > 1 && !root.loading && root.controlsEnabled
+                onClicked: root.historyPageRequested(root.historyPage - 1)
+            }
+            AppButton {
+                objectName: "generationNextHistoryPageAction"
+                text: ""
+                iconSource: Theme.icon("chevron-right")
+                Accessible.name: "Page suivante de l’historique des générations"
+                refined: true
+                implicitWidth: 30
+                implicitHeight: 30
+                enabled: root.historyPage * root.historyPageSize < root.historyTotal
+                    && !root.loading && root.controlsEnabled
+                onClicked: root.historyPageRequested(root.historyPage + 1)
             }
         }
     }
@@ -208,7 +213,7 @@ Item {
         property string runId: ""
         parent: Overlay.overlay
         anchors.centerIn: parent
-        heading: "Abandonner cette création ?"
+        heading: "Abandonner cette génération ?"
         message: "Les offres restantes seront libérées. Les étapes enregistrées et les candidatures créées seront conservées."
         dismissText: "Retour"
         confirmText: "Libérer les offres"

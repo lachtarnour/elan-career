@@ -526,11 +526,19 @@ class DesktopService(AnalysisServiceMixin, GenerationServiceMixin):
             sent_applications = session.execute(
                 select(
                     Application.id, Application.job_id,
-                    Application.form_submitted_at, Application.updated_at,
-                ).where(Application.status == JobStatus.SENT)
+                    Application.status, Application.form_submitted_at,
+                    Application.updated_at,
+                ).where(
+                    or_(
+                        Application.status == JobStatus.SENT,
+                        Application.form_submitted_at.is_not(None),
+                    )
+                )
             )
             for application in sent_applications:
-                event_at = application.form_submitted_at or application.updated_at
+                event_at = application.form_submitted_at
+                if event_at is None and application.status == JobStatus.SENT:
+                    event_at = application.updated_at
                 if event_at is None:
                     continue
                 if event_at.tzinfo is None:

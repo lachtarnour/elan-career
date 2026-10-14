@@ -6,6 +6,7 @@ Item {
     property alias content: body.data
     property int padding: Theme.cardPadding
     property int verticalPadding: padding
+    property int contentSpacing: 16
     property color surfaceColor: Theme.surface
     property color surfaceEndColor: surfaceColor
     property color strokeColor: Theme.line
@@ -64,6 +65,6 @@ Item {
         anchors.rightMargin: root.padding
         anchors.topMargin: root.verticalPadding
         anchors.bottomMargin: root.verticalPadding
-        spacing: 16
+        spacing: root.contentSpacing
     }
 }

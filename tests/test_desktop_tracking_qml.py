@@ -58,6 +58,109 @@ def tracking_ready():
 """
 
 _SCENARIOS = {
+    "completed_runs_keep_requested_steps_and_details_visible": r"""
+gen["status"] = "completed"
+gen["status_label"] = "Terminé"
+gen["phase"] = "done"
+gen["is_active"] = False
+gen["phase_batches"] = [
+    {"phase": phase, "status": "completed", "total": 1, "completed": 1}
+    for phase in ("cv_adaptation", "assembly", "application_texts",
+                  "document_review", "rendering")]
+ana["status"] = "completed"
+ana["status_label"] = "Terminé"
+ana["phase"] = "done"
+ana["is_active"] = False
+ana["phase_batches"] = [
+    {"phase": phase, "status": "completed", "total": 1, "completed": 1}
+    for phase in ("screening", "extraction", "evaluation")]
+bridge.generation_workspace = {**bridge.generation_workspace, "selected_run": gen}
+bridge.analysis_workspace = {**bridge.analysis_workspace, "selected_run": ana}
+bridge.generationWorkspaceChanged.emit()
+bridge.analysisWorkspaceChanged.emit()
+invoke(window, "navigate", "tracking", 0)
+wait_until(tracking_ready)
+tracking = window.findChild(QQuickItem, "trackingPage")
+assert tracking.findChild(QQuickItem, "trackingGenerationTab").property("text") == "Génération"
+assert tracking.findChild(QQuickItem, "trackingAnalysisTab").property("text") == "Analyse"
+generation = tracking.findChild(QQuickItem, "generationRunCard")
+timeline = generation.findChild(QQuickItem, "analysisTimeline")
+assert timeline.property("visible")
+assert generation.findChild(QQuickItem, "analysisRunDetails").property("visible")
+assert generation.findChild(QQuickItem, "analysisRunDetailsToggle") is None
+assert [visual_item(timeline, f"analysisPhaseTitle_{i}").property("text")
+    for i in range(1, 7)] == [
+    "Sélection des éléments pour le CV", "Construction du CV",
+    "Génération du résumé et de la lettre", "Relecture", "Correction", "Confirmation"]
+assert visual_item(timeline, "analysisPhaseMarker_6").property("finished")
+assert visual_item(timeline, "analysisPhaseStatus_5").property("text") == "Non nécessaire"
+assert visual_item(timeline, "analysisPhaseTitle_7") is None
+for width, height in ((1320, 820), (1640, 960)):
+    window.resize(width, height)
+    app.processEvents()
+    viewport = tracking.findChild(QQuickItem, "generationTrackingViewport")
+    assert viewport.property("contentHeight") <= viewport.property("height") + 1
+    for i in range(1, 7):
+        title = visual_item(timeline, f"analysisPhaseTitle_{i}")
+        assert not title.property("truncated"), title.property("text")
+        assert title.mapToItem(timeline, QPointF()).x() >= 0
+        assert title.mapToItem(timeline, QPointF()).x() + title.width() <= timeline.width() + 1
+    heading = generation.findChild(QQuickItem, "analysisRunTitle")
+    selector = generation.findChild(QQuickItem, "analysisRunSelector")
+    assert heading.mapToItem(generation, QPointF()).x() + heading.width() <= selector.mapToItem(generation, QPointF()).x()
+invoke(tracking.findChild(QQuickItem, "trackingAnalysisTab"), "clicked")
+analysis = tracking.findChild(QQuickItem, "trackingAnalysisRunCard")
+timeline = analysis.findChild(QQuickItem, "analysisTimeline")
+assert timeline.property("visible")
+assert analysis.findChild(QQuickItem, "analysisRunDetails").property("visible")
+assert analysis.findChild(QQuickItem, "analysisRunDetailsToggle") is None
+assert [visual_item(timeline, f"analysisPhaseTitle_{i}").property("text")
+    for i in range(1, 4)] == ["Préfiltre", "Extraction", "Évaluation"]
+assert visual_item(timeline, "analysisPhaseMarker_3").property("finished")
+assert visual_item(timeline, "analysisPhaseTitle_4") is None
+window.resize(1320, 820)
+app.processEvents()
+viewport = tracking.findChild(QQuickItem, "trackingAnalysisViewport")
+assert viewport.property("contentHeight") <= viewport.property("height") + 1
+gen["status"] = "active"
+gen["phase"] = "document_correction"
+gen["is_active"] = True
+gen["phase_batches"] = [*gen["phase_batches"][:4],
+    {"phase": "document_correction", "status": "in_progress"},
+    {"phase": "rendering", "status": "waiting"}]
+bridge.generation_workspace = {**bridge.generation_workspace, "selected_run": gen}
+bridge.generationWorkspaceChanged.emit()
+app.processEvents()
+invoke(tracking.findChild(QQuickItem, "trackingGenerationTab"), "clicked")
+generation_timeline = generation.findChild(QQuickItem, "analysisTimeline")
+assert visual_item(generation_timeline, "analysisPhaseMarker_5").property("active")
+assert not visual_item(generation_timeline, "analysisPhaseMarker_6").property("finished")
+assert generation.findChild(QQuickItem, "analysisRunDetails").property("visible")
+""",
+    "empty_workspaces_offer_working_navigation_and_refresh": r"""
+bridge.generation_workspace = {"desktop_view": True, "runs": [], "selected_run": {},
+    "active_run_count": 0, "history_total_count": 0}
+bridge.analysis_workspace = {"desktop_view": True, "runs": [], "selected_run": {},
+    "active_run_count": 0, "history_total_count": 0}
+invoke(window, "navigate", "tracking", 0)
+wait_until(tracking_ready)
+tracking = window.findChild(QQuickItem, "trackingPage")
+assert tracking.findChild(QQuickItem, "trackingGenerationEmpty").property("visible")
+invoke(tracking.findChild(QQuickItem, "trackingGenerationEmptyRefreshAction"), "clicked")
+assert window.property("currentRoute") == "tracking"
+invoke(tracking.findChild(QQuickItem, "trackingGenerationOffersAction"), "clicked")
+wait_until(lambda: window.property("currentRoute") == "jobs")
+assert window.property("jobsFilterStatus") == "analyzed"
+invoke(window, "navigate", "tracking", 0)
+wait_until(tracking_ready)
+invoke(tracking.findChild(QQuickItem, "trackingAnalysisTab"), "clicked")
+assert tracking.findChild(QQuickItem, "trackingAnalysisEmpty").property("visible")
+invoke(tracking.findChild(QQuickItem, "trackingAnalysisOffersAction"), "clicked")
+wait_until(lambda: window.property("currentRoute") == "jobs"
+    and window.property("jobsFilterStatus") == "scraped" and bridge.routes[-1] == "analysis")
+assert bridge.routes[-1] == "analysis"
+assert not bridge.generation_starts and not bridge.analysis_starts
+""",
     "available_from_home_without_loading_offers": r"""
 assert window.property("currentRoute") == "dashboard"
 assert not window.property("jobsLoaded") and not window.property("trackingLoaded")
@@ -83,7 +186,7 @@ generation = tracking.findChild(QQuickItem, "generationTrackingBand")
 assert generation.property("expanded") and generation.property("embedded")
 assert not generation.findChild(QQuickItem, "generationTrackingToggle").property("visible")
 assert generation.findChild(QQuickItem, "generationRunCard").property("run")["id"] == "persisted-generation"
-assert generation.findChild(QQuickItem, "analysisRunTitle").property("text") == "Création de 98 offres"
+assert generation.findChild(QQuickItem, "analysisRunTitle").property("text") == "Génération de 98 offres"
 wait_until(lambda: generation.height() > 240)
 assert generation.findChild(QQuickItem, "generationNextHistoryPageAction").property("enabled")
 invoke(tracking.findChild(QQuickItem, "trackingAnalysisTab"), "clicked")
@@ -94,9 +197,15 @@ assert bridge.analysis_candidate_reads == reads_before
 assert tracking.findChild(QQuickItem, "trackingAnalysisNextHistoryAction").property("enabled")
 """,
     "tracking_preserves_tabs_scroll_and_offers_context": r"""
+# A long history still needs scrolling after the ordinary view becomes compact.
+ana["phase_batches"] = [{**phase, "total": 40, "completed": 20, "batch_count": 20,
+    "batches": [{**phase["batches"][0], "number": i} for i in range(1, 21)]}
+    for phase in ana["phase_batches"]]
+bridge.analysisWorkspaceChanged.emit()
 invoke(window, "navigate", "jobs", 0)
 wait_until(lambda: window.findChild(QQuickItem, "jobsPage") is not None and bridge.queries)
 offers = window.findChild(QQuickItem, "jobsPage")
+assert offers.findChild(QQuickItem, "generationTrackingBand") is None
 bridge.rows = [offer(42+i, 7+i) for i in range(80)]
 bridge.jobsChanged.emit()
 table = offers.findChild(QQuickItem, "offerListViewport")
@@ -113,7 +222,8 @@ wait_until(tracking_ready)
 tracking = window.findChild(QQuickItem, "trackingPage")
 invoke(tracking.findChild(QQuickItem, "trackingAnalysisTab"), "clicked")
 card = tracking.findChild(QQuickItem, "trackingAnalysisRunCard")
-invoke(card.findChild(QQuickItem, "analysisRunDetailsToggle"), "clicked")
+assert card.findChild(QQuickItem, "analysisRunDetails").property("visible")
+assert card.findChild(QQuickItem, "analysisRunDetailsToggle") is None
 viewport = tracking.findChild(QQuickItem, "trackingAnalysisViewport")
 wait_until(lambda: viewport.property("contentHeight") > viewport.property("height"))
 viewport.setProperty("contentY", 80)
@@ -125,13 +235,13 @@ for i in range(20):
     bridge.analysisWorkspaceChanged.emit()
     app.processEvents()
 assert changed == [] and viewport.property("contentY") == 80
-assert card.property("detailsExpanded")
+assert card.findChild(QQuickItem, "analysisRunDetails").property("visible")
 invoke(window, "navigate", "dashboard", 0)
 wait_until(lambda: window.property("currentRoute") == "dashboard")
 invoke(window, "navigate", "tracking", 0)
 wait_until(lambda: window.property("currentRoute") == "tracking")
 assert window.findChild(QQuickItem, "trackingPage") is tracking
-assert tracking.property("tab") == "analysis" and card.property("detailsExpanded")
+assert tracking.property("tab") == "analysis" and card.findChild(QQuickItem, "analysisRunDetails").property("visible")
 assert viewport.property("contentY") == 80
 invoke(window, "navigate", "jobs", 0)
 wait_until(lambda: window.property("currentRoute") == "jobs")
@@ -153,22 +263,43 @@ wait_until(tracking_ready)
 tracking = window.findChild(QQuickItem, "trackingPage")
 generation = tracking.findChild(QQuickItem, "generationTrackingBand")
 card = generation.findChild(QQuickItem, "generationRunCard")
+invoke(card.findChild(QQuickItem, "analysisCancelAction"), "clicked")
+assert bridge.generation_cancellations == ["persisted-generation"]
 invoke(generation.findChild(QQuickItem, "generationNextHistoryPageAction"), "clicked")
 assert bridge.generation_history_pages == [2]
 assert QMetaObject.invokeMethod(card, "runSelected", Qt.DirectConnection, Q_ARG("QString", "generation-30"))
 assert bridge.generation_run_selections == ["generation-30"]
 bridge.generation_workspace = {**bridge.generation_workspace, "selected_run": {**gen,
-    "status": "paused", "is_active": False, "can_cancel": False, "can_retry": True}}
+    "status": "paused", "is_active": False, "can_cancel": False, "can_retry": True, "can_abandon": True}}
 bridge.generationWorkspaceChanged.emit()
 app.processEvents()
 retry = card.findChild(QQuickItem, "analysisRetryAction")
 assert retry.property("enabled")
 invoke(retry, "clicked")
 assert bridge.generation_retries == ["persisted-generation"]
+invoke(card.findChild(QQuickItem, "generationAbandonAction"), "clicked")
+confirm = generation.findChild(QObject, "generationAbandonConfirm")
+wait_until(lambda: confirm.property("opened"))
+assert bridge.generation_abandons == []
+assert QMetaObject.invokeMethod(confirm, "accepted", Qt.DirectConnection)
+assert bridge.generation_abandons == ["persisted-generation"]
+assert QMetaObject.invokeMethod(confirm, "close", Qt.DirectConnection)
 bridge.generation_loading = True
 bridge.generationWorkspaceLoadingChanged.emit()
 assert not retry.property("enabled")
 bridge.generation_loading = False
+bridge.generationWorkspaceLoadingChanged.emit()
+bridge.generation_operation = "immediate"
+bridge.generation_loading = True
+bridge.generationWorkspaceOperationChanged.emit()
+bridge.generationWorkspaceLoadingChanged.emit()
+stop = generation.findChild(QQuickItem, "generationStopImmediateAction")
+assert stop.property("visible") and stop.property("enabled")
+invoke(stop, "clicked")
+assert bridge.generation_stops == 1
+bridge.generation_operation = ""
+bridge.generation_loading = False
+bridge.generationWorkspaceOperationChanged.emit()
 bridge.generationWorkspaceLoadingChanged.emit()
 invoke(tracking.findChild(QQuickItem, "trackingAnalysisTab"), "clicked")
 invoke(tracking.findChild(QQuickItem, "trackingAnalysisNextHistoryAction"), "clicked")

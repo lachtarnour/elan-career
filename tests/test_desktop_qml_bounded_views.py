@@ -170,7 +170,8 @@ bridge.generation_workspace = {"desktop_view": True,
     "history_page": 1, "history_page_size": 20, "history_total_count": 41}
 bridge.generationWorkspaceChanged.emit()
 app.processEvents()
-tracking = page.findChild(QQuickItem, "generationTrackingBand")
+tracking_page = load_page("TrackingPage.qml")
+tracking = tracking_page.findChild(QQuickItem, "generationTrackingBand")
 tracking.setProperty("expanded", True)
 app.processEvents()
 card = tracking.findChild(QQuickItem, "generationRunCard")

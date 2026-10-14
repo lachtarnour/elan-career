@@ -6,6 +6,7 @@ import "../components"
 Item {
     id: root
     objectName: "trackingPage"
+    signal navigateRequested(string route)
     property string tab: "generation"
     property bool initialTabSelected: false
     property string selectedAnalysisRunId: ""
@@ -29,6 +30,8 @@ Item {
             if (String(analysisRuns[i].id) === target) return analysisRuns[i]
         return analysisRuns.length ? analysisRuns[0] : ({})
     }
+    readonly property string displayedAnalysisRunId: String(selectedAnalysisRun.id || "")
+    onDisplayedAnalysisRunIdChanged: if (analysisViewport) analysisViewport.contentY = 0
     property var analysisHistoryOptions: []
     property string analysisHistorySignature: ""
 
@@ -82,37 +85,64 @@ Item {
     onSelectedAnalysisRunChanged: updateAnalysisHistory()
 
     ColumnLayout {
-        anchors.fill: parent
-        spacing: 16
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: Math.min(parent.width, Theme.pageContentMaxWidth)
+        spacing: 12
         PageHeader {
             Layout.fillWidth: true
             title: "Suivi"
-        }
-        Text {
-            Layout.fillWidth: true
-            text: "Les Batch envoyés continuent après fermeture. Le suivi se synchronise à la réouverture."
-            color: Theme.inkMuted
-            font.pixelSize: 12
-            wrapMode: Text.WordWrap
-        }
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 8
-            AppButton {
-                objectName: "trackingGenerationTab"
-                text: "Créations"
-                kind: root.tab === "generation" ? "primary" : "secondary"
-                refined: true
-                onClicked: root.chooseTab("generation")
+            Rectangle {
+                Layout.preferredWidth: 304
+                Layout.preferredHeight: 40
+                radius: 10
+                color: Theme.canvasLift
+                border.color: Theme.line
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.margins: 4
+                    spacing: 4
+                    AppButton {
+                        objectName: "trackingGenerationTab"
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 1
+                        Layout.fillHeight: true
+                        text: "Génération"
+                        iconSource: Theme.icon("document")
+                        kind: root.tab === "generation" ? "primary" : "secondary"
+                        refined: true
+                        Accessible.role: Accessible.PageTab
+                        Accessible.selected: root.tab === "generation"
+                        background: Rectangle {
+                            radius: 9
+                            color: root.tab === "generation" ? Theme.accentSoft : parent.hovered ? Theme.surface : "transparent"
+                            border.color: parent.visualFocus ? Theme.accentBright
+                                : root.tab === "generation" ? Theme.accentLine : "transparent"
+                        }
+                        onClicked: root.chooseTab("generation")
+                    }
+                    AppButton {
+                        objectName: "trackingAnalysisTab"
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 1
+                        Layout.fillHeight: true
+                        text: "Analyse"
+                        iconSource: Theme.icon("analysis")
+                        kind: root.tab === "analysis" ? "primary" : "secondary"
+                        refined: true
+                        Accessible.role: Accessible.PageTab
+                        Accessible.selected: root.tab === "analysis"
+                        background: Rectangle {
+                            radius: 9
+                            color: root.tab === "analysis" ? Theme.accentSoft : parent.hovered ? Theme.surface : "transparent"
+                            border.color: parent.visualFocus ? Theme.accentBright
+                                : root.tab === "analysis" ? Theme.accentLine : "transparent"
+                        }
+                        onClicked: root.chooseTab("analysis")
+                    }
+                }
             }
-            AppButton {
-                objectName: "trackingAnalysisTab"
-                text: "Analyses"
-                kind: root.tab === "analysis" ? "primary" : "secondary"
-                refined: true
-                onClicked: root.chooseTab("analysis")
-            }
-            Item { Layout.fillWidth: true }
         }
         StackLayout {
             Layout.fillWidth: true
@@ -137,37 +167,52 @@ Item {
                     onHistoryPageRequested: function(page) { AppBridge.setGenerationHistoryPage(page) }
                     onRunSelected: function(runId) { AppBridge.selectGenerationRun(runId) }
                 }
-                ColumnLayout {
+                Surface {
                     objectName: "trackingGenerationEmpty"
                     visible: !generationTracking.visible
-                    anchors.centerIn: parent
-                    spacing: 12
-                    Text {
-                        text: AppBridge.generationWorkspaceLoading ? "Lecture du suivi des créations…"
-                            : "Aucune création enregistrée."
-                        color: Theme.inkMuted
-                        font.pixelSize: 13
+                    anchors.fill: parent
+                    anchors.rightMargin: Theme.scrollGutter
+                    Item { Layout.fillHeight: true }
+                    EmptyState {
+                        iconSource: Theme.icon("document")
+                        title: AppBridge.generationWorkspaceLoading ? "Lecture du suivi…" : "Vos générations apparaîtront ici"
+                        message: "Lancez la génération d’un dossier depuis Offres, puis suivez ici chaque étape."
                     }
-                    AppButton {
-                        text: "Actualiser"
-                        enabled: !AppBridge.shutdownRequested && !AppBridge.generationWorkspaceLoading
-                        onClicked: AppBridge.refreshGenerationWorkspace()
+                    RowLayout {
+                        Layout.alignment: Qt.AlignHCenter
+                        spacing: 8
+                        AppButton {
+                            objectName: "trackingGenerationOffersAction"
+                            text: "Voir les offres"
+                            kind: "primary"
+                            enabled: !AppBridge.shutdownRequested
+                            onClicked: root.navigateRequested("jobs")
+                        }
+                        AppButton {
+                            objectName: "trackingGenerationEmptyRefreshAction"
+                            text: "Actualiser"
+                            iconSource: Theme.icon("refresh")
+                            enabled: !AppBridge.shutdownRequested && !AppBridge.generationWorkspaceLoading
+                            onClicked: AppBridge.refreshGenerationWorkspace()
+                        }
                     }
+                    Item { Layout.fillHeight: true }
                 }
             }
             ColumnLayout {
                 spacing: 12
                 RowLayout {
                     Layout.fillWidth: true
+                    Layout.preferredHeight: 30
                     Text {
                         Layout.fillWidth: true
                         text: root.immediateRunning ? "Analyse immédiate en cours…"
                             : root.analysisLoading && root.analysisOperation === "start" ? "Préparation du Batch…"
                             : root.analysisLoading ? "Actualisation du suivi…"
                             : root.analysisError ? "Dernier état enregistré"
-                            : [root.selectedAnalysisRun.status_label || "", root.selectedAnalysisRun.phase_label || ""].filter(Boolean).join(" · ")
+                            : "Historique des analyses"
                         color: Theme.inkMuted
-                        font.pixelSize: 12
+                        font.pixelSize: 11
                         elide: Text.ElideRight
                     }
                     AppButton {
@@ -185,22 +230,22 @@ Item {
                     AppButton {
                         objectName: "trackingAnalysisRefreshAction"
                         text: "Actualiser"
+                        iconSource: Theme.icon("refresh")
                         refined: true
+                        implicitHeight: 30
                         enabled: !AppBridge.shutdownRequested && !root.analysisLoading
                         onClicked: AppBridge.refreshAnalysisWorkspace()
                     }
                 }
-                Text {
+                TrackingNotice {
                     objectName: "trackingAnalysisError"
                     visible: root.analysisError.length > 0
                     Layout.fillWidth: true
-                    text: root.analysisError
-                    textFormat: Text.PlainText
-                    color: Theme.warning
-                    font.pixelSize: 12
-                    wrapMode: Text.WordWrap
+                    heading: "La synchronisation n’a pas abouti"
+                    message: root.analysisError
                 }
                 Flickable {
+                    id: analysisViewport
                     objectName: "trackingAnalysisViewport"
                     Layout.fillWidth: true
                     Layout.fillHeight: true
@@ -212,15 +257,28 @@ Item {
                     ColumnLayout {
                         id: analysisContent
                         width: parent.width - Theme.scrollGutter
-                        Text {
+                        Surface {
                             objectName: "trackingAnalysisEmpty"
                             visible: !Boolean(root.selectedAnalysisRun.id)
                             Layout.fillWidth: true
-                            text: root.analysisLoading ? "Lecture du suivi des analyses…" : "Aucune analyse Batch enregistrée."
-                            color: Theme.inkMuted
-                            font.pixelSize: 13
+                            Layout.preferredHeight: Math.max(340, analysisViewport.height)
+                            Item { Layout.fillHeight: true }
+                            EmptyState {
+                                iconSource: Theme.icon("analysis")
+                                title: root.analysisLoading ? "Lecture du suivi…" : "Vos analyses apparaîtront ici"
+                                message: "Lancez une analyse Batch depuis les offres à analyser pour retrouver son avancement ici."
+                            }
+                            AppButton {
+                                objectName: "trackingAnalysisOffersAction"
+                                Layout.alignment: Qt.AlignHCenter
+                                text: "Voir les offres à analyser"
+                                kind: "primary"
+                                enabled: !AppBridge.shutdownRequested
+                                onClicked: root.navigateRequested("analysis")
+                            }
+                            Item { Layout.fillHeight: true }
                         }
-                        AnalysisRunCard {
+                        TrackingRunCard {
                             objectName: "trackingAnalysisRunCard"
                             visible: Boolean(root.selectedAnalysisRun.id)
                             Layout.fillWidth: true
@@ -246,28 +304,39 @@ Item {
                     objectName: "trackingAnalysisHistoryPagination"
                     visible: root.analysisDesktopView && root.analysisHistoryTotal > 0
                     Layout.fillWidth: true
+                    Layout.rightMargin: Theme.scrollGutter
+                    spacing: 8
                     Text {
                         Layout.fillWidth: true
-                        text: root.analysisHistoryTotal + " analyses · page " + root.analysisHistoryPage
-                            + " / " + Math.max(1, Math.ceil(root.analysisHistoryTotal / root.analysisHistorySize))
+                        text: root.analysisHistoryTotal + (root.analysisHistoryTotal === 1 ? " analyse enregistrée" : " analyses enregistrées")
+                        color: Theme.inkFaint
+                        font.pixelSize: 11
+                    }
+                    Text {
+                        text: "Page " + root.analysisHistoryPage + " / " + Math.max(1, Math.ceil(root.analysisHistoryTotal / root.analysisHistorySize))
                         color: Theme.inkMuted
                         font.pixelSize: 11
                     }
                     AppButton {
                         objectName: "trackingAnalysisPreviousHistoryAction"
-                        text: "‹"
+                        text: ""
+                        iconSource: Theme.icon("chevron-right")
+                        contentItem.rotation: 180
                         Accessible.name: "Page précédente de l’historique des analyses"
                         refined: true
-                        implicitWidth: 32
+                        implicitWidth: 30
+                        implicitHeight: 30
                         enabled: root.analysisHistoryPage > 1 && !root.analysisLoading && !AppBridge.shutdownRequested
                         onClicked: AppBridge.setAnalysisHistoryPage(root.analysisHistoryPage - 1)
                     }
                     AppButton {
                         objectName: "trackingAnalysisNextHistoryAction"
-                        text: "›"
+                        text: ""
+                        iconSource: Theme.icon("chevron-right")
                         Accessible.name: "Page suivante de l’historique des analyses"
                         refined: true
-                        implicitWidth: 32
+                        implicitWidth: 30
+                        implicitHeight: 30
                         enabled: root.analysisHistoryPage * root.analysisHistorySize < root.analysisHistoryTotal
                             && !root.analysisLoading && !AppBridge.shutdownRequested
                         onClicked: AppBridge.setAnalysisHistoryPage(root.analysisHistoryPage + 1)

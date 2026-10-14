@@ -83,19 +83,15 @@ Item {
             }
         }
 
-        Rectangle {
+        Item {
             id: table
             Layout.fillWidth: true
             Layout.fillHeight: true
-            radius: Theme.radiusLarge
-            color: Theme.surface
-            border.color: Theme.line
-            readonly property real flexibleWidth: width - 32 - Theme.scrollGutter - 112 - 72
+            readonly property real flexibleWidth: width - Theme.scrollGutter - 112 - 72
             readonly property var columnWidths: [68, 44, flexibleWidth * 0.18, flexibleWidth * 0.19, flexibleWidth * 0.21, flexibleWidth * 0.16, flexibleWidth * 0.26]
 
             ColumnLayout {
                 anchors.fill: parent
-                anchors.margins: 16
                 spacing: 10
                 Row {
                     Layout.fillWidth: true

@@ -44,6 +44,7 @@ token.json
 /documents/
 /samples/
 /output/
+/outputs/
 /tmp/
 /test-results/
 /artifacts/

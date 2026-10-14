@@ -74,8 +74,6 @@ Item {
         id: generationMode
         controlsEnabled: root.generationLaunchEnabled
         onModeChosen: function(mode, ids, shortlist) {
-            generationTracking.expanded = true
-            generationTracking.selectedRunId = ""
             if (shortlist) AppBridge.startShortlistedGeneration(mode)
             else if (mode === "immediate") AppBridge.startImmediateGeneration(ids)
             else AppBridge.startGenerationBatch(ids)
@@ -583,7 +581,7 @@ Item {
         anchors.fill: parent
         anchors.margins: 10
         anchors.topMargin: 10 + root.topInset
-        anchors.bottomMargin: 10 + (generationTracking.visible ? generationTracking.height + 8 : 0)
+        anchors.bottomMargin: 10
         spacing: 0
         visible: !root.isNewOffersFilter
 
@@ -2292,29 +2290,6 @@ Item {
             }
             Item { Layout.fillWidth: true }
         }
-    }
-
-    GenerationTracking {
-        id: generationTracking
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.bottom: parent.bottom
-        anchors.margins: 10
-        height: implicitHeight
-        visible: !root.isNewOffersFilter && (runs.length > 0 || Boolean(selectedRun.id)
-            || commandRunning || error.length > 0)
-        workspace: root.generationWorkspace
-        loading: AppBridge.generationWorkspaceLoading
-        operation: AppBridge.generationWorkspaceOperation || ""
-        error: AppBridge.generationWorkspaceError || ""
-        controlsEnabled: !AppBridge.shutdownRequested
-        onRefreshRequested: AppBridge.refreshGenerationWorkspace()
-        onStopRequested: AppBridge.cancelImmediateGeneration()
-        onRetryRequested: function(runId) { AppBridge.retryGenerationRun(runId) }
-        onCancelRequested: function(runId) { AppBridge.cancelGenerationRun(runId) }
-        onAbandonRequested: function(runId) { AppBridge.abandonGenerationRun(runId) }
-        onHistoryPageRequested: function(page) { AppBridge.setGenerationHistoryPage(page) }
-        onRunSelected: function(runId) { AppBridge.selectGenerationRun(runId) }
     }
 
     AnalysisPage {

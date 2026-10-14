@@ -11,6 +11,27 @@ Item {
     readonly property int pendingCount: Number(AppBridge.dashboard.pending || 0)
     readonly property int readyCount: Number(AppBridge.dashboard.ready || 0)
     readonly property int sentCount: Number(AppBridge.dashboard.sent || 0)
+    readonly property int dailyGoal: 30
+    property string todayKey: Qt.formatDate(new Date(), "yyyy-MM-dd")
+    readonly property int todaySent: {
+        var points = AppBridge.dashboard.sent_by_day || []
+        if (points.length === 0 || points[points.length - 1].day !== todayKey)
+            return 0
+        return Number(points[points.length - 1].count || 0)
+    }
+
+    Timer {
+        interval: 60000
+        repeat: true
+        running: root.visible
+        onTriggered: {
+            var currentDay = Qt.formatDate(new Date(), "yyyy-MM-dd")
+            if (currentDay !== root.todayKey) {
+                root.todayKey = currentDay
+                AppBridge.refreshDashboard()
+            }
+        }
+    }
 
     Flickable {
         id: dashboardScroll
@@ -78,6 +99,18 @@ Item {
                     progress: AppBridge.dashboard.sent_progress || 0
                     interactive: true
                     onActivated: root.navigateRequested("jobs?status=sent")
+                }
+                MetricCard {
+                    objectName: "dashboardTodayGoal"
+                    Layout.fillWidth: true
+                    label: "Envois aujourd'hui"
+                    value: root.todaySent + " / " + root.dailyGoal
+                    caption: root.todaySent >= root.dailyGoal
+                        ? "Objectif atteint"
+                        : "Encore " + (root.dailyGoal - root.todaySent) + " à envoyer"
+                    accent: root.todaySent >= root.dailyGoal ? Theme.success : Theme.accent
+                    symbol: "◎"
+                    progress: root.todaySent / root.dailyGoal
                 }
             }
 
