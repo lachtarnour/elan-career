@@ -121,8 +121,8 @@ def test_score_or_manual_choice_protects_legacy_alias(isolated_db):
 
 
 def _add_filter_metadata(session, alias_id):
+    from smartapply.filtering.factory import build_rejector
     from smartapply.maintenance.filter_labels import persist_filter_label
-    from smartapply.maintenance.hard_reject_backfill import build_rejector
 
     alias = session.get(Job, alias_id)
     persist_filter_label(session, alias, build_rejector().evaluate(alias), migrate=True)

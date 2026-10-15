@@ -25,7 +25,7 @@ To run the app locally, follow the [setup guide](docs/setup.md). For focused cha
 | `smartapply/pipeline/`, `smartapply/jobsearch/` | Application workflow |
 | `smartapply/profile/`, `smartapply/llm/`, `smartapply/cv/` | Candidate data, prompts, and document generation |
 | `smartapply/database/` | Local storage |
-| `scripts/` | Explicit maintenance commands for reviewed migrations and repairs |
+| `smartapply/maintenance/` | Runtime reconciliation and isolated development environment support |
 | `tests/` | Application regression tests and interface checks |
 | `docs/` | Setup, source connectors, and interface guidelines |
 

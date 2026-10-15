@@ -46,7 +46,9 @@ token.json
 /output/
 /tmp/
 /test-results/
-/artifacts/
+/artifacts/*
+!/artifacts/elan-demo.mp4
+!/artifacts/elan-demo-preview.png
 /tools/
 /.backups/
 /test.ipynb
@@ -55,20 +57,11 @@ token.json
 # Legacy locations for private company lists and ranking research.
 /smartapply/desktop/resources/*.csv
 /docs/company-ranking.json
+# Local experiments and one-off operational scripts stay out of the product tree.
 /benchmarks/
-!/benchmarks/
-/benchmarks/*
-!/benchmarks/elan_200/
-/benchmarks/elan_200/*
-!/benchmarks/elan_200/publication/
-/benchmarks/elan_200/publication/*
-!/benchmarks/elan_200/publication/README.md
-!/benchmarks/elan_200/publication/corpora.json
-!/benchmarks/elan_200/publication/runs.json
-!/benchmarks/elan_200/publication/coverage.jsonl
-!/benchmarks/elan_200/publication/checksums.json
-!/benchmarks/elan_200/publication/verify.py
-!/benchmarks/elan_200/publication/benchmark_overview.html
+/benchmark-instructions/
+/README-CODEX.md
+/scripts/
 *.db
 *.db-*
 *.sqlite
@@ -77,9 +70,6 @@ token.json
 *.sqlite3-*
 *.log
 .elan-locks/
-
-# ---- Obsolete captures ----
-/docs/screenshots/applications.png
 
 # ---- Editors ----
 .claude/

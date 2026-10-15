@@ -67,7 +67,7 @@ class Ingestor:
 
     def _get_job_filter(self):
         if self._job_filter is None:
-            from smartapply.maintenance.hard_reject_backfill import build_rejector
+            from smartapply.filtering.factory import build_rejector
 
             self._job_filter = build_rejector()
         return self._job_filter

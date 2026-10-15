@@ -161,7 +161,8 @@ smartapply/
 ├── profile/      Chargement et validation du profil candidat
 ├── llm/          Fournisseurs, prompts et contrats des réponses IA
 ├── cv/           Adaptation, assemblage et rendu des documents
-└── database/     Modèles, accès SQLite et journaux persistants
+├── database/     Modèles, accès SQLite et journaux persistants
+└── maintenance/  Réconciliation des données et environnement de développement
 ```
 
 Les composants QML déclenchent les services Python ; les pipelines conservent leur progression dans la base. Les journaux d’analyse et de création sont distincts et réutilisent les transports IA configurés. Les responsabilités et les données de chaque étape sont détaillées dans le [parcours d’une offre](docs/parcours-offre.md).

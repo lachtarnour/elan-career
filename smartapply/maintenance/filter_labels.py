@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session, contains_eager
 
 from smartapply.database import session_scope, write_session_scope
 from smartapply.database.models import Job, JobScore
+from smartapply.filtering.factory import build_rejector
 from smartapply.filtering.hard_reject.types import HardRejectDisposition, HardRejectResult
 from smartapply.filtering.manual_policy import (
     evaluate_or_bypass,
@@ -25,7 +26,6 @@ from smartapply.filtering.manual_policy import (
     manual_filter_bypass_result,
 )
 from smartapply.jobsearch.offer_state import completed_offer_expression, offer_state
-from smartapply.maintenance.hard_reject_backfill import build_rejector
 from smartapply.pipeline.process.filter_state import has_manual_keep_override
 from smartapply.pipeline.process.local_filtering import LocalFilterMixin
 from smartapply.pipeline.process.score_components import (

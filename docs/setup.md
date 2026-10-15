@@ -63,7 +63,7 @@ To develop with the installed application's existing offers, analyses, profile
 and documents, create a separate runtime once, from the repository root:
 
 ```bash
-.venv/bin/python scripts/clone_development_runtime.py
+.venv/bin/python -m smartapply.maintenance.development_runtime
 make run-desktop
 ```
 
@@ -275,36 +275,6 @@ repairs. The audit records the gates as skipped, not successfully evaluated.
 Fit analysis can still report risks; duplicates, sent applications, active
 reservations and manual archives remain protected. A source named `manual`
 alone is not an exemption. Existing archived offers are not automatically reopened.
-
-To migrate persisted legacy `uncertain` decisions, run the dedicated command
-against the active database. It previews changes by default; add `--apply` to
-create a backup and apply exactly the reviewed plan atomically. Supply an external
-schema-v3 manifest that satisfies the guarded migration contract; historical
-audit manifests are not bundled with the repository:
-
-```bash
-.venv/bin/python -m scripts.migrate_legacy_filter \
-  --database "/absolute/path/to/smartapply.db" \
-  --review-manifest "/absolute/path/to/reviewed-manifest.json" \
-  --output /private/tmp/legacy-filter-plan.json
-```
-
-Review the plan, then apply it. The command refuses any change to the scope,
-offer inputs, decisions, or audit manifest:
-
-```bash
-.venv/bin/python -m scripts.migrate_legacy_filter \
-  --database "/absolute/path/to/smartapply.db" \
-  --review-manifest "/absolute/path/to/reviewed-manifest.json" \
-  --apply --expected-plan /private/tmp/legacy-filter-plan.json
-```
-
-The migration preserves scores, analyses, documents, applications, and manual
-or duplicate workflow decisions. Only untouched offers with a reviewed blocker
-are automatically archived. Offers that pass the first filter become
-`pending_relevance`; this does not start an LLM analysis. Migrating legacy
-`relevant` decisions additionally requires the explicit `--include-relevant`
-option. Repeating the preview after migration should report zero planned rows.
 
 ### CV template and writing style
 

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from dotenv import dotenv_values
 
-from scripts.clone_development_runtime import clone_runtime
+from smartapply.maintenance.development_runtime import clone_runtime
 
 
 def source_runtime(tmp_path: Path):

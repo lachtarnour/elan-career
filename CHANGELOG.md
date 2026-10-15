@@ -11,7 +11,6 @@ Cette version étend le parcours local de recherche d'emploi, de l'admission des
 - Recherche par familles de métiers IA et data, ajout manuel explicite, gestion des doublons et archivage depuis l'espace Analyse.
 - Interface Analyse et Offres réorganisée pour rendre les états, l'historique et les détails plus lisibles tout en préservant la sélection et les notes pendant les actualisations passives.
 - Relecture et correction des textes de candidature séparées. Les routes de modèles restent configurables.
-- Index public de métadonnées des benchmarks historiques, avec vérificateur de sommes de contrôle. Il ne contient ni annonces, ni profil candidat, ni requêtes ou réponses des fournisseurs.
 
 ### Corrections et fiabilité
 
@@ -29,5 +28,4 @@ Cette version étend le parcours local de recherche d'emploi, de l'admission des
 ### Vérification de publication
 
 - `make check`
-- `python3 benchmarks/elan_200/publication/verify.py`
 - Vérification du wheel Python et du bundle macOS avant diffusion d'un binaire.
