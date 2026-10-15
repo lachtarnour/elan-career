@@ -22,8 +22,7 @@
     a:focus-visible, video:focus-visible { outline: 2px solid #c9bbff; outline-offset: 5px; }
     .repo { font-size: 14px; white-space: nowrap; }
     video { display: block; width: 100%; aspect-ratio: 16/9; margin: 24px 0 18px; background: #08070c; border: 1px solid #392e4e; border-radius: 12px; box-shadow: 0 20px 70px #0006; }
-    footer { font-size: 13px; }
-    footer p { font-size: inherit; }
+    footer { font-size: 13px; justify-content: flex-end; }
     @media (max-width: 600px) { main { padding: 20px 14px; } header { align-items: flex-start; } .brand img { width: 40px; height: 40px; } h1 { font-size: 23px; } .brand p { font-size: 12px; } .repo { font-size: 12px; margin-top: 8px; } footer { align-items: flex-start; flex-direction: column; gap: 10px; } video { margin-top: 20px; border-radius: 8px; } }
   </style>
 </head>
@@ -41,7 +40,6 @@
       Votre navigateur ne peut pas lire cette vidéo. <a href="artifacts/elan-demo.mp4" download>Télécharger le MP4 original</a>.
     </video>
     <footer>
-      <p>Démonstration · 2 min 45 s · 1080p · 60 images/s · sans son</p>
       <a href="artifacts/elan-demo.mp4" download="elan-demo.mp4">Télécharger l’original · 104 Mo</a>
     </footer>
   </main>
