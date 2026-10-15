@@ -14,9 +14,9 @@ Copyright © 2026 Lachtar Nour. Tous droits réservés. Ce dépôt est accessibl
 
 2 min 45 s, en 1080p à 60 images/s, sans son.
 
-[![Voir la démonstration Élan](artifacts/elan-demo-preview.png)](https://github.com/lachtarnour/elan-career/raw/refs/heads/main/artifacts/elan-demo.mp4)
+[![Voir la démonstration Élan](artifacts/elan-demo-preview.png)](https://lachtarnour.github.io/elan-career/)
 
-[Voir ou télécharger la vidéo originale (MP4, 104 Mo)](https://github.com/lachtarnour/elan-career/raw/refs/heads/main/artifacts/elan-demo.mp4)
+[Télécharger la vidéo originale (MP4, 104 Mo)](https://github.com/lachtarnour/elan-career/raw/refs/heads/main/artifacts/elan-demo.mp4)
 
 ## Parcours d'une offre
 

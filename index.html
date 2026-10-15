@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Découvrez Élan, votre espace de recherche d’emploi sur macOS. Démonstration en 1080p à 60 images par seconde.">
+  <meta name="theme-color" content="#0d0b14">
+  <title>Élan — Démonstration</title>
+  <link rel="icon" type="image/svg+xml" href="smartapply/desktop/resources/app_icon.svg">
+  <style>
+    :root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0d0b14; color: #f4f1fc; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100svh; background: radial-gradient(ellipse at 50% 0%, #251b3b 0, #0d0b14 65%); }
+    main { width: min(1180px, 100%); margin: auto; padding: 32px 24px 24px; }
+    header, footer { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand img { width: 48px; height: 48px; }
+    h1 { font-size: 26px; margin: 0; letter-spacing: -.6px; }
+    p { color: #bdb5ce; font-size: 14px; line-height: 1.6; margin: 2px 0 0; }
+    a { color: #c9bbff; text-underline-offset: 4px; }
+    a:hover { color: #fff; }
+    a:focus-visible, video:focus-visible { outline: 2px solid #c9bbff; outline-offset: 5px; }
+    .repo { font-size: 14px; white-space: nowrap; }
+    video { display: block; width: 100%; aspect-ratio: 16/9; margin: 24px 0 18px; background: #08070c; border: 1px solid #392e4e; border-radius: 12px; box-shadow: 0 20px 70px #0006; }
+    footer { font-size: 13px; }
+    footer p { font-size: inherit; }
+    @media (max-width: 600px) { main { padding: 20px 14px; } header { align-items: flex-start; } .brand img { width: 40px; height: 40px; } h1 { font-size: 23px; } .brand p { font-size: 12px; } .repo { font-size: 12px; margin-top: 8px; } footer { align-items: flex-start; flex-direction: column; gap: 10px; } video { margin-top: 20px; border-radius: 8px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="brand">
+        <img src="smartapply/desktop/resources/app_icon.svg" alt="" width="48" height="48">
+        <div><h1>Élan</h1><p>Votre recherche d’emploi prend son élan.</p></div>
+      </div>
+      <a class="repo" href="https://github.com/lachtarnour/elan-career">Voir le projet ↗</a>
+    </header>
+    <video controls playsinline preload="metadata" poster="artifacts/elan-demo-preview.png" aria-label="Démonstration de l’application Élan">
+      <source src="artifacts/elan-demo.mp4" type="video/mp4">
+      Votre navigateur ne peut pas lire cette vidéo. <a href="artifacts/elan-demo.mp4" download>Télécharger le MP4 original</a>.
+    </video>
+    <footer>
+      <p>Démonstration · 2 min 45 s · 1080p · 60 images/s · sans son</p>
+      <a href="artifacts/elan-demo.mp4" download="elan-demo.mp4">Télécharger l’original · 104 Mo</a>
+    </footer>
+  </main>
+</body>
+</html>
