@@ -12,9 +12,11 @@ Copyright © 2026 Lachtar Nour. Tous droits réservés. Ce dépôt est accessibl
 
 ## Démonstration
 
-45 secondes, sans son, avec des annotations en français. Les données sont fictives ; la collecte et les réponses IA sont simulées.
+2 min 45 s, en 1080p à 60 images/s, sans son.
 
-https://github.com/user-attachments/assets/b357b04e-eba4-49aa-a6ed-851d0a94e167
+[![Voir la démonstration Élan](artifacts/elan-demo-preview.png)](https://github.com/lachtarnour/elan-career/raw/refs/heads/main/artifacts/elan-demo.mp4)
+
+[Voir ou télécharger la vidéo originale (MP4, 104 Mo)](https://github.com/lachtarnour/elan-career/raw/refs/heads/main/artifacts/elan-demo.mp4)
 
 ## Parcours d'une offre
 
